@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/CoreClrSample/CoreClrSample.csproj" />
+    <Project Path="samples/NativeAotSample/NativeAotSample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/DotnetDbgMcp.Core/DotnetDbgMcp.Core.csproj" />
+    <Project Path="src/DotnetDbgMcp.Server/DotnetDbgMcp.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DotnetDbgMcp.Core.Tests/DotnetDbgMcp.Core.Tests.csproj" />
+    <Project Path="tests/DotnetDbgMcp.Server.IntegrationTests/DotnetDbgMcp.Server.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

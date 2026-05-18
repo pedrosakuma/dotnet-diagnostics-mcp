@@ -1,0 +1,32 @@
+# Build artifacts
+bin/
+obj/
+out/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+
+# Test results
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+# Diagnostic artifacts (dumps, traces)
+*.nettrace
+*.gcdump
+*.dmp
+artifacts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tools
+.dotnet/
+
+# Local env
+.env
+.env.local

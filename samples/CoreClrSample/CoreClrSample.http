@@ -1,0 +1,6 @@
+@CoreClrSample_HostAddress = http://localhost:5133
+
+GET {{CoreClrSample_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
