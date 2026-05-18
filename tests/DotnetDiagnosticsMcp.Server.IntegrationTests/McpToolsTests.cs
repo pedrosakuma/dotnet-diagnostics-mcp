@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
@@ -49,6 +50,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 $"tool {tool.Name} must declare a Title — surfaced in Claude Code / Copilot CLI pickers");
             // Tool names must satisfy the 2025-11-25 regex [A-Za-z0-9_\-.] (1–128 chars).
             tool.Name.Should().MatchRegex("^[A-Za-z0-9_\\-.]{1,128}$");
+            // Every tool must publish an outputSchema so type-aware clients can parse the
+            // structured response without a model round-trip (2025-11-25).
+            tool.ReturnJsonSchema.Should().NotBeNull(
+                $"tool {tool.Name} must declare an outputSchema (UseStructuredContent = true)");
+            tool.ReturnJsonSchema!.Value.ValueKind.Should().Be(JsonValueKind.Object);
         }
     }
 
@@ -286,7 +292,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             },
             cancellationToken: CancellationToken.None);
 
-        result.IsError.Should().Be(true);
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error.Should().NotBeNull("invalid arguments must surface a structured DiagnosticError");
+        envelope.Error!.Kind.Should().Be("InvalidArgument");
+        envelope.Hints.Should().NotBeEmpty("error responses must include at least one recovery hint");
     }
 
     private async Task<McpClient> ConnectAsync(ModelContextProtocol.Client.McpClientOptions? clientOptions = null)
@@ -330,7 +340,29 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             json = textBlock!.Text;
         }
 
-        return JsonSerializer.Deserialize<T>(json, DeserializeOptions);
+        var envelope = JsonSerializer.Deserialize<DiagnosticResult<T>>(json, DeserializeOptions);
+        envelope.Should().NotBeNull("structured payload must deserialize as DiagnosticResult<T>");
+        envelope!.Summary.Should().NotBeNullOrWhiteSpace("every response must include a summary");
+        envelope.Hints.Should().NotBeNull("hints array is mandatory (may be empty)");
+        envelope.Error.Should().BeNull("successful responses must not carry an error");
+        return envelope.Data;
+    }
+
+    private static DiagnosticResult<JsonElement>? DeserializeEnvelope(ModelContextProtocol.Protocol.CallToolResult result)
+    {
+        string json;
+        if (result.StructuredContent is { } structured)
+        {
+            json = structured.GetRawText();
+        }
+        else
+        {
+            var textBlock = result.Content.OfType<ModelContextProtocol.Protocol.TextContentBlock>().FirstOrDefault();
+            textBlock.Should().NotBeNull();
+            json = textBlock!.Text;
+        }
+
+        return JsonSerializer.Deserialize<DiagnosticResult<JsonElement>>(json, DeserializeOptions);
     }
 
     public sealed class AuthedFactory : WebApplicationFactory<DotnetDiagnosticsMcp.Server.Program>

@@ -75,7 +75,8 @@ builder.Services
             """;
     })
     .WithHttpTransport()
-    .WithTools<DiagnosticTools>();
+    .WithTools<DiagnosticTools>()
+    .WithResources<DotnetDiagnosticsMcp.Server.Resources.InvestigationGuideResources>();
 
 var app = builder.Build();
 

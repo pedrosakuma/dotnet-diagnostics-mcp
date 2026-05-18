@@ -1,0 +1,62 @@
+namespace DotnetDiagnosticsMcp.Core;
+
+/// <summary>
+/// Discoverability-aware envelope for every diagnostic tool response. Provides a short
+/// human-readable <see cref="Summary"/>, a list of suggested <see cref="Hints"/> that the
+/// LLM should follow next, and the typed <see cref="Data"/> payload.
+/// </summary>
+/// <typeparam name="T">Type of the underlying diagnostic payload.</typeparam>
+/// <remarks>
+/// The envelope is the foundation for handle-based drill-down (see issue #8). Tools that
+/// produce large datasets can keep <see cref="Data"/> small (top-N) and use <see cref="Hints"/>
+/// to point at follow-up tools that fetch detail by handle.
+/// </remarks>
+public sealed record DiagnosticResult<T>(
+    string Summary,
+    T? Data,
+    IReadOnlyList<NextActionHint> Hints,
+    DiagnosticError? Error = null)
+{
+    /// <summary>True when the call failed and <see cref="Error"/> is populated.</summary>
+    public bool IsError => Error is not null;
+}
+
+/// <summary>
+/// Non-generic factory helpers for <see cref="DiagnosticResult{T}"/>. Kept separate so the
+/// generic type satisfies CA1000 (no static members on generic types).
+/// </summary>
+public static class DiagnosticResult
+{
+    /// <summary>Successful response.</summary>
+    public static DiagnosticResult<T> Ok<T>(T data, string summary, params NextActionHint[] hints)
+        => new(summary, data, hints);
+
+    /// <summary>Error response with a structured error and at least one recovery hint.</summary>
+    public static DiagnosticResult<T> Fail<T>(string summary, DiagnosticError error, params NextActionHint[] hints)
+        => new(summary, default, hints, error);
+}
+
+/// <summary>
+/// A suggestion to the agent for the next call to make. Surfaced verbatim in
+/// <see cref="DiagnosticResult{T}.Hints"/> so a low-context LLM can keep drilling without
+/// having to re-read the server instructions on every turn.
+/// </summary>
+/// <param name="NextTool">Name of the recommended next MCP tool.</param>
+/// <param name="Reason">Short human-readable justification (1 sentence).</param>
+/// <param name="SuggestedArguments">Optional argument suggestions for the next call.</param>
+public sealed record NextActionHint(
+    string NextTool,
+    string Reason,
+    IReadOnlyDictionary<string, object?>? SuggestedArguments = null);
+
+/// <summary>
+/// Structured representation of a tool failure. Always carries a <see cref="Kind"/> (machine
+/// classification) and an optional <see cref="Detail"/>. Hints describe the recommended recovery.
+/// </summary>
+/// <param name="Kind">Stable identifier for client-side branching (e.g. "InvalidArgument", "ProcessNotFound", "PermissionDenied").</param>
+/// <param name="Message">Human-readable description of the failure.</param>
+/// <param name="Detail">Optional extra context (stack trace excerpt, parameter name, etc.).</param>
+public sealed record DiagnosticError(
+    string Kind,
+    string Message,
+    string? Detail = null);
