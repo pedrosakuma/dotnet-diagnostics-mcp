@@ -21,24 +21,25 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        var sampleProject = LocateSampleProject();
-        if (sampleProject is null)
+        var sampleDll = LocateSampleDll();
+        if (sampleDll is null)
         {
             return;
         }
 
+        // Execute the published DLL directly with `dotnet <dll>` so the captured PID
+        // *is* the application process — `dotnet run` creates a wrapper process whose
+        // own EventCounters surface (mostly idle) sometimes returns no payloads
+        // before our short collection window ends, which made tests flaky.
         var psi = new ProcessStartInfo("dotnet")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
-            WorkingDirectory = sampleProject,
+            WorkingDirectory = Path.GetDirectoryName(sampleDll)!,
         };
-        psi.ArgumentList.Add("run");
-        psi.ArgumentList.Add("--no-build");
-        psi.ArgumentList.Add("-c");
-        psi.ArgumentList.Add("Debug");
+        psi.ArgumentList.Add(sampleDll);
         psi.ArgumentList.Add("--urls");
         psi.ArgumentList.Add("http://127.0.0.1:0");
         psi.Environment["DOTNET_NOLOGO"] = "1";
@@ -107,7 +108,9 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         var collector = new EventPipeCounterCollector();
         var snapshot = await collector.CollectAsync(
             Pid,
-            TimeSpan.FromSeconds(3),
+            // EventPipe session startup takes ~500ms-1s, then EventCounters are emitted
+            // at intervalSeconds boundaries. 6s gives consistent headroom for 3-5 ticks.
+            TimeSpan.FromSeconds(6),
             providers: new[] { "System.Runtime" },
             intervalSeconds: 1,
             cancellationToken: CancellationToken.None);
@@ -156,15 +159,26 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    private static string? LocateSampleProject()
+    private static string? LocateSampleDll()
     {
+        // Walk up from the test bin dir until we find the repo root containing samples/.
         var probe = AppContext.BaseDirectory;
         for (var i = 0; i < 8; i++)
         {
-            var candidate = Path.Combine(probe, "samples", "CoreClrSample");
-            if (Directory.Exists(candidate))
+            var sampleDir = Path.Combine(probe, "samples", "CoreClrSample");
+            if (Directory.Exists(sampleDir))
             {
-                return candidate;
+                // Match the configuration the tests were built with — falls back to whichever exists.
+                foreach (var configuration in new[] { "Release", "Debug" })
+                {
+                    var dll = Path.Combine(sampleDir, "bin", configuration, "net10.0", "CoreClrSample.dll");
+                    if (File.Exists(dll))
+                    {
+                        return dll;
+                    }
+                }
+
+                return null;
             }
 
             probe = Path.GetFullPath(Path.Combine(probe, ".."));
