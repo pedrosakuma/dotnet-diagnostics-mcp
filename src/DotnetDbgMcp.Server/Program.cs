@@ -1,6 +1,10 @@
 using DotnetDbgMcp.Core.Capabilities;
 using DotnetDbgMcp.Core.Counters;
 using DotnetDbgMcp.Core.CpuSampling;
+using DotnetDbgMcp.Core.Dump;
+using DotnetDbgMcp.Core.EventSources;
+using DotnetDbgMcp.Core.Exceptions;
+using DotnetDbgMcp.Core.Gc;
 using DotnetDbgMcp.Core.ProcessDiscovery;
 using DotnetDbgMcp.Server.Auth;
 using DotnetDbgMcp.Server.Tools;
@@ -18,6 +22,10 @@ builder.Services.AddSingleton<IProcessDiscovery, LocalProcessDiscovery>();
 builder.Services.AddSingleton<ICapabilityDetector, CapabilityDetector>();
 builder.Services.AddSingleton<ICounterCollector, EventPipeCounterCollector>();
 builder.Services.AddSingleton<ICpuSampler, EventPipeCpuSampler>();
+builder.Services.AddSingleton<IExceptionCollector, EventPipeExceptionCollector>();
+builder.Services.AddSingleton<IGcCollector, EventPipeGcCollector>();
+builder.Services.AddSingleton<IEventSourceCollector, EventPipeEventSourceCollector>();
+builder.Services.AddSingleton<IProcessDumper, DiagnosticsClientDumper>();
 
 builder.Services
     .AddMcpServer()

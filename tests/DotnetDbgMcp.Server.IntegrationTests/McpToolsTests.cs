@@ -3,6 +3,10 @@ using System.Text.Json;
 using DotnetDbgMcp.Core.Capabilities;
 using DotnetDbgMcp.Core.Counters;
 using DotnetDbgMcp.Core.CpuSampling;
+using DotnetDbgMcp.Core.Dump;
+using DotnetDbgMcp.Core.EventSources;
+using DotnetDbgMcp.Core.Exceptions;
+using DotnetDbgMcp.Core.Gc;
 using DotnetDbgMcp.Core.ProcessDiscovery;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -31,7 +35,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "get_process_info",
             "get_diagnostic_capabilities",
             "snapshot_counters",
-            "collect_cpu_sample");
+            "collect_cpu_sample",
+            "collect_exceptions",
+            "collect_gc_events",
+            "collect_event_source",
+            "collect_process_dump");
 
         foreach (var tool in tools)
         {
@@ -111,6 +119,128 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         snapshot.Should().NotBeNull();
         snapshot!.Counters.Should().NotBeEmpty();
         snapshot.Counters.Should().Contain(c => c.Provider == "System.Runtime");
+    }
+
+    [Fact]
+    public async Task CollectExceptions_RunsAgainstSelfHost()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "collect_exceptions",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 2,
+                ["maxRecent"] = 10,
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var snapshot = DeserializeStructured<ExceptionSnapshot>(result);
+        snapshot.Should().NotBeNull();
+        snapshot!.ProcessId.Should().Be(Environment.ProcessId);
+        snapshot.TotalExceptions.Should().BeGreaterThanOrEqualTo(0);
+    }
+
+    [Fact]
+    public async Task CollectGcEvents_RunsAgainstSelfHost()
+    {
+        await using var client = await ConnectAsync();
+
+        // Encourage at least one GC so the test exercises the parsing path.
+        for (var i = 0; i < 3; i++)
+        {
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        }
+
+        var result = await client.CallToolAsync(
+            "collect_gc_events",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 3,
+                ["maxEvents"] = 50,
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var summary = DeserializeStructured<GcSummary>(result);
+        summary.Should().NotBeNull();
+        summary!.ProcessId.Should().Be(Environment.ProcessId);
+        // Force a few more during the window so events actually land.
+        _ = Task.Run(() =>
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                Thread.Sleep(200);
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+            }
+        });
+    }
+
+    [Fact]
+    public async Task CollectEventSource_CapturesSystemRuntimeEvents()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "collect_event_source",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["providerName"] = "System.Runtime",
+                ["durationSeconds"] = 2,
+                ["maxEvents"] = 50,
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var capture = DeserializeStructured<EventSourceCapture>(result);
+        capture.Should().NotBeNull();
+        capture!.Provider.Should().Be("System.Runtime");
+    }
+
+    [Fact]
+    public async Task CollectProcessDump_WritesMiniDumpToDisk()
+    {
+        await using var client = await ConnectAsync();
+
+        var directory = Path.Combine(Path.GetTempPath(), $"dbgmcp-tests-{Guid.NewGuid():N}");
+        try
+        {
+            var result = await client.CallToolAsync(
+                "collect_process_dump",
+                new Dictionary<string, object?>
+                {
+                    ["processId"] = Environment.ProcessId,
+                    ["dumpType"] = "Mini",
+                    ["outputDirectory"] = directory,
+                },
+                cancellationToken: CancellationToken.None);
+
+            result.IsError.Should().NotBe(true);
+            var dump = DeserializeStructured<DumpResult>(result);
+            dump.Should().NotBeNull();
+            dump!.ProcessId.Should().Be(Environment.ProcessId);
+            dump.FilePath.Should().StartWith(directory);
+            File.Exists(dump.FilePath).Should().BeTrue();
+            dump.FileSizeBytes.Should().BeGreaterThan(0);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+            }
+            catch (Exception)
+            {
+                // best effort cleanup
+            }
+        }
     }
 
     [Fact]
