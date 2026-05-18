@@ -45,25 +45,37 @@ dotnet test DotnetDiagnosticsMcp.slnx -c Release --no-build
 # Run only the integration tests
 dotnet test tests/DotnetDiagnosticsMcp.Server.IntegrationTests/ -c Release --no-build
 
-# Run the MCP server locally
+# Run the MCP server locally (launch profile listens on http://localhost:5130)
 dotnet run --project src/DotnetDiagnosticsMcp.Server -c Release
-# Server listens on http://127.0.0.1:5050 — bearer token from appsettings (default "dev-token")
+
+# Run a single live test
+dotnet test tests/DotnetDiagnosticsMcp.Core.Tests/ -c Release --no-build \
+  --filter FullyQualifiedName~Counters_ReturnsSystemRuntimeMetrics
 ```
+
+**Bearer token.** The server reads `MCP_BEARER_TOKEN` from the environment. If unset, it
+generates an ephemeral 32-byte hex token at startup and logs it as a warning — there is no
+hard-coded default. The local docker walkthroughs explicitly pass `MCP_BEARER_TOKEN=dev-token`.
+
+**SDK version.** `global.json` pins `10.0.201` with `rollForward: latestFeature`. Use the
+SDK from `global.json`, not whatever is on `PATH` outside this repo.
+
+**Warnings as errors.** `Directory.Build.props` sets `TreatWarningsAsErrors=true` for source
+projects (test projects opt out). Analyzer warnings (CA1711, CA1852, CA1861, etc.) will fail
+the build — fix them, do not suppress them globally.
+
+**Central package management.** Package versions live in `Directory.Packages.props`. Project
+files reference packages without a `Version` attribute. Add new packages to the central props
+first.
 
 ### Local Docker sidecar (matches K8s topology)
 
-See [`docs/local-docker-sidecar.md`](./docs/local-docker-sidecar.md) for the validated walkthrough. Short version:
-
-```bash
-docker build -t dotnet-diagnostics-mcp:dev -f deploy/Dockerfile .
-docker build -t badcode-sample:dev -f samples/BadCodeSample/Dockerfile samples/BadCodeSample
-docker network create dbgmcp-net
-docker volume create badcode-tmp
-docker run -d --name badcode --network dbgmcp-net -v badcode-tmp:/tmp -p 127.0.0.1:18180:8080 badcode-sample:dev
-docker run -d --name badcode-mcp --network dbgmcp-net \
-  --pid=container:badcode -v badcode-tmp:/tmp --user 0 \
-  -p 127.0.0.1:18887:5050 dotnet-diagnostics-mcp:dev
-```
+See [`docs/local-docker-sidecar.md`](./docs/local-docker-sidecar.md) for the canonical CoreClrSample
+walkthrough, and [`docs/bad-code-scenarios.md`](./docs/bad-code-scenarios.md) for the BadCodeSample
+walkthrough used to exercise the LLM diagnostic loop. Both use network `diagmcp-net`,
+publish the MCP server on `127.0.0.1:18887`, and require `--user 0` on the sidecar (see UID
+note below). Do not invent ad-hoc names or ports — drift between repos and docs is the #1
+source of wasted debugging time here.
 
 ## Critical conventions you must respect
 
@@ -97,7 +109,7 @@ dotnet … collect_exceptions  # synchronous
 
 ### 🧪 Live tests are real
 
-`tests/DotnetDiagnosticsMcp.Core.Tests/LiveCoreClrProcessTests.cs` spawns the `CoreClrSample` webapi via `dotnet run --no-build` and attaches to it. Required: .NET 10 SDK on `PATH`, ability to bind to `127.0.0.1:0`, and ~10s of runtime. CI runs both Linux and Windows runners.
+`tests/DotnetDiagnosticsMcp.Core.Tests/LiveCoreClrProcessTests.cs` spawns the `CoreClrSample` webapi by invoking its published DLL directly (`dotnet …/CoreClrSample.dll`) and attaches to the resulting PID. The fixture deliberately avoids `dotnet run`, which creates a wrapper host process whose PID is not the application. Required: .NET 10 SDK on `PATH`, ability to bind to `127.0.0.1:0`, and ~10s of runtime. CI runs both Linux and Windows runners.
 
 ### 🎯 One MCP tool per concept (≤10 tools per context)
 
@@ -111,15 +123,7 @@ See Phase 7 issue [#8 `mcp-drilldown`](https://github.com/pedrosakuma/dotnet-dia
 
 ## Phase 7 — what is being designed and why
 
-All open work has a GitHub issue. Read the **meta tracking issue first**: [#17 Phase 7 — Post-MVP Roadmap](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/17).
-
-The dependency graph and execution order are documented there. Two deep-research artifacts back the design — they live in the session workspace (not in the repo), but every issue inlines the relevant findings. Topics:
-
-- **Spec catch-up** (`spec-compliance` label) — bump to MCP `2025-11-25`, `outputSchema`, Tasks, elicitation with graceful degradation.
-- **Discoverability** (`discoverability` label) — `serverInfo.description`, tool titles, hints, structured errors, Prompts.
-- **Drill-down** (`drilldown` label) — handle + summary + detail tools, `start_investigation` meta-tool (cold/warm/hypothesis), portable investigation summaries with provenance and lineage.
-- **Diagnostics** — source-level resolution (TraceLog + SourceLink), ClrMD dump inspection, NativeAOT sampling fallback.
-- **Infra** — NativeAOT publishing, central K8s topology, cloud platforms.
+All open work has a GitHub issue. **Read the meta tracking issue first**: [#17 Phase 7 — Post-MVP Roadmap](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/17). It carries the current dependency graph, execution order, label taxonomy, and links to the two deep-research artifacts that back the design. Don't inline that taxonomy here — it drifts.
 
 ## How to contribute as an agent
 
