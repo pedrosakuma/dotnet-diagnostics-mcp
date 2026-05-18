@@ -41,7 +41,8 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "collect_gc_events",
             "collect_event_source",
             "collect_process_dump",
-            "get_call_tree");
+            "get_call_tree",
+            "start_investigation");
 
         // Tools may only require `processId` (and `providerName` for collect_event_source,
         // `handle` for get_call_tree). Anything else must have a default so clients without
@@ -58,6 +59,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["collect_event_source"] = new[] { "processId", "providerName" },
             ["collect_process_dump"] = new[] { "processId" },
             ["get_call_tree"] = new[] { "handle" },
+            ["start_investigation"] = new[] { "processId" },
         };
 
         // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
@@ -72,7 +74,8 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         {
             "durationSeconds", "topN", "maxRecent", "maxEvents", "eventLevel",
             "dumpType", "outputDirectory", "rootMethodFilter", "maxDepth", "maxNodes",
-            "intervalSeconds", "symptom",
+            "intervalSeconds", "symptom", "hypothesis", "baseline", "maxToolCalls",
+            "dumpRequiresApproval",
         };
 
         foreach (var tool in tools)
@@ -424,6 +427,51 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         envelope.Error!.Kind.Should().Be("HandleExpired");
         envelope.Hints.Should().NotBeEmpty();
         envelope.Hints[0].NextTool.Should().Be("collect_cpu_sample");
+    }
+
+    [Fact]
+    public async Task StartInvestigation_ReturnsColdPlan_WhenOnlySymptomProvided()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "start_investigation",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["symptom"] = "high latency on /checkout endpoint",
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var plan = DeserializeStructured<DotnetDiagnosticsMcp.Core.Investigation.InvestigationPlan>(result);
+        plan.Should().NotBeNull();
+        plan!.Mode.Should().Be(DotnetDiagnosticsMcp.Core.Investigation.InvestigationMode.Cold);
+        plan.NextStep.ToolName.Should().Be("snapshot_counters");
+        plan.Constraints.MaxToolCalls.Should().Be(8);
+        plan.AllSteps.Should().HaveCountGreaterThan(1);
+    }
+
+    [Fact]
+    public async Task StartInvestigation_RoutesHypothesisDirectlyToContentionEvents()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "start_investigation",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["hypothesis"] = "lock contention on Cart.Checkout after release v2025.10",
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var plan = DeserializeStructured<DotnetDiagnosticsMcp.Core.Investigation.InvestigationPlan>(result);
+        plan.Should().NotBeNull();
+        plan!.Mode.Should().Be(DotnetDiagnosticsMcp.Core.Investigation.InvestigationMode.Hypothesis);
+        plan.NextStep.ToolName.Should().Be("collect_event_source");
+        plan.EarlyStopConditions.Select(e => e.ConditionId).Should().Contain("hypothesis-confirmed");
     }
 
     [Fact]

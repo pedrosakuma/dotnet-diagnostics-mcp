@@ -26,6 +26,8 @@ builder.Services.AddSingleton<IExceptionCollector, EventPipeExceptionCollector>(
 builder.Services.AddSingleton<IGcCollector, EventPipeGcCollector>();
 builder.Services.AddSingleton<IEventSourceCollector, EventPipeEventSourceCollector>();
 builder.Services.AddSingleton<IProcessDumper, DiagnosticsClientDumper>();
+builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.Investigation.IInvestigationPlanner>(_ =>
+    new DotnetDiagnosticsMcp.Core.Investigation.InvestigationPlanner());
 builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHandleStore>(_ =>
     new DotnetDiagnosticsMcp.Core.Drilldown.MemoryDiagnosticHandleStore(maxEntries: 32));
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.HandleEvictionBackgroundService>();

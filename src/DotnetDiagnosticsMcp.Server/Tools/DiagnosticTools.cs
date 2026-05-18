@@ -8,6 +8,7 @@ using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.Drilldown;
+using DotnetDiagnosticsMcp.Core.Investigation;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol.Server;
@@ -475,6 +476,54 @@ public sealed class DiagnosticTools
             dump,
             $"Wrote {dumpType} dump for pid {dump.ProcessId} to {dump.FilePath} ({dump.FileSizeBytes:N0} bytes).",
             new NextActionHint("list_dotnet_processes", "No further automated drill-down — analyze the dump offline with dotnet-dump analyze."));
+    }
+
+    [McpServerTool(
+        Name = "start_investigation",
+        Title = "Plan a diagnostic investigation",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns a structured InvestigationPlan: a ready-to-execute decision tree of tool calls with " +
+        "rationale, decision branches, early-stop conditions, and constraints (MaxToolCalls, " +
+        "dump-requires-approval). Modes are resolved from the arguments: hypothesis present → " +
+        "'hypothesis' (routes directly to the relevant evidence collector); baseline present → " +
+        "'warm' (skips covered steps, emits MetricComparisons against baseline); otherwise 'cold' " +
+        "(USE-style: snapshot_counters first, branch on evidence). Call this BEFORE any other " +
+        "collector when the symptom is non-trivial — it pays for itself by preventing loops.")]
+    public static DiagnosticResult<InvestigationPlan> StartInvestigation(
+        IInvestigationPlanner planner,
+        [Description("Operating system process id of the target .NET process.")] int processId,
+        [Description("Plain-language symptom, e.g. 'high latency on /checkout since v2025.10'. Required for cold mode; optional for warm/hypothesis.")] string? symptom = null,
+        [Description("Specific hypothesis to test, e.g. 'lock contention on Cart.Checkout'. Triggers hypothesis mode.")] string? hypothesis = null,
+        [Description("Baseline snapshot from a prior investigation (JSON of BaselineHandle). Triggers warm mode.")] BaselineHandle? baseline = null,
+        [Description("Optional hard limit on tool calls before forcing summarization. Defaults to 8.")] int maxToolCalls = 8,
+        [Description("If true, collect_process_dump steps are marked approval-gated. Defaults to true.")] bool dumpRequiresApproval = true)
+    {
+        if (processId <= 0) return InvalidArg<InvestigationPlan>(nameof(processId), "must be a positive OS pid");
+        if (maxToolCalls < 1) return InvalidArg<InvestigationPlan>(nameof(maxToolCalls), "must be >= 1");
+
+        var request = new InvestigationRequest(
+            ProcessId: processId,
+            Symptom: symptom,
+            Hypothesis: hypothesis,
+            Baseline: baseline,
+            Constraints: new InvestigationConstraints(
+                MaxToolCalls: maxToolCalls,
+                DumpRequiresApproval: dumpRequiresApproval));
+
+        var plan = planner.Plan(request);
+        var summary = $"Mode={plan.Mode}. Next step #{plan.NextStep.StepNumber}: {plan.NextStep.ToolName}. " +
+                      $"{plan.AllSteps.Count} total step(s), {plan.EarlyStopConditions.Count} early-stop condition(s). " +
+                      $"Honor MaxToolCalls={plan.Constraints.MaxToolCalls}.";
+
+        var hintParams = new Dictionary<string, object?>(plan.NextStep.ToolParams);
+        return DiagnosticResult.Ok(
+            plan,
+            summary,
+            new NextActionHint(plan.NextStep.ToolName, plan.NextStep.Rationale, hintParams));
     }
 
     private static DiagnosticResult<T> InvalidArg<T>(string parameterName, string requirement)
