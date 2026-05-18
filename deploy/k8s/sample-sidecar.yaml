@@ -4,6 +4,12 @@
 #   * shareProcessNamespace: true  -> the sidecar can see the app's PIDs
 #   * shared emptyDir over /tmp    -> both containers see the same
 #                                     /tmp/dotnet-diagnostic-<pid> socket
+#   * matching UID/GID on both     -> the diagnostic socket created by the
+#     containers (or fsGroup)        target app inherits its UID; the sidecar
+#                                     must be able to open it. Easiest path:
+#                                     run BOTH containers with the same
+#                                     runAsUser, or set pod-level fsGroup so
+#                                     the shared volume is group-readable.
 #
 # Neither the target app's image nor its code needs any modification.
 #
@@ -43,6 +49,15 @@ spec:
       # Required so the sidecar's DiagnosticsClient.GetPublishedProcesses()
       # can see the target process and connect to its diagnostic socket.
       shareProcessNamespace: true
+
+      # Pin both containers to the same non-root UID/GID so the diagnostic
+      # IPC socket (created by the app at /tmp/dotnet-diagnostic-<pid>) is
+      # readable by the sidecar. Override per-container below if needed.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
 
       volumes:
         # Shared emptyDir mounted at /tmp in both containers; .NET creates the

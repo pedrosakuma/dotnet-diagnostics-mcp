@@ -26,8 +26,18 @@ two things:
 2. **A shared volume mounted at `/tmp` in both containers** — so the socket
    the runtime creates in the app container is visible from the sidecar. An
    `emptyDir` volume is enough; it lives only as long as the pod.
+3. **Matching UID/GID (or `fsGroup`)** — the diagnostic socket inherits the
+   UID of the .NET process. If the sidecar runs as a different non-root user,
+   it gets `Permission denied` opening the socket. The manifest pins both
+   containers to UID/GID `10001` and sets `fsGroup: 10001` on the pod. If the
+   target app image *must* run as a different UID, either match `runAsUser`
+   in the sidecar or rely on `fsGroup` + group-readable socket permissions.
 
-The provided manifest configures both.
+The provided manifest configures all three.
+
+> **Validated locally with Docker** using `--pid=container:<app>` + a shared
+> volume mounted at `/tmp` in both containers — the same building blocks
+> Kubernetes provides via `shareProcessNamespace` and `emptyDir`.
 
 ## Auth
 

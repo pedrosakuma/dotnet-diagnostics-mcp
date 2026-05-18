@@ -13,7 +13,7 @@ FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 WORKDIR /src
 
 # Bring in the files needed to restore first so the layer caches well.
-COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY global.json Directory.Build.props Directory.Packages.props .editorconfig ./
 COPY src/DotnetDbgMcp.Core/DotnetDbgMcp.Core.csproj src/DotnetDbgMcp.Core/
 COPY src/DotnetDbgMcp.Server/DotnetDbgMcp.Server.csproj src/DotnetDbgMcp.Server/
 

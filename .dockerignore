@@ -5,7 +5,9 @@
 !global.json
 !Directory.Build.props
 !Directory.Packages.props
+!.editorconfig
 !src/
+!samples/
 
 # Drop build artefacts from any subtree that gets copied.
 **/bin/
