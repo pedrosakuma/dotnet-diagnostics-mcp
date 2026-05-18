@@ -19,6 +19,16 @@ public sealed record DiagnosticResult<T>(
 {
     /// <summary>True when the call failed and <see cref="Error"/> is populated.</summary>
     public bool IsError => Error is not null;
+
+    /// <summary>
+    /// Optional opaque handle that identifies a heavier in-memory artifact (parsed trace,
+    /// gcdump, …) the LLM can drill into via a follow-up tool. Omitted when the response is
+    /// already self-contained.
+    /// </summary>
+    public string? Handle { get; init; }
+
+    /// <summary>UTC moment at which <see cref="Handle"/> expires. Use to inform retry/refresh logic.</summary>
+    public DateTimeOffset? HandleExpiresAt { get; init; }
 }
 
 /// <summary>
@@ -30,6 +40,10 @@ public static class DiagnosticResult
     /// <summary>Successful response.</summary>
     public static DiagnosticResult<T> Ok<T>(T data, string summary, params NextActionHint[] hints)
         => new(summary, data, hints);
+
+    /// <summary>Successful response that also publishes a drill-down handle.</summary>
+    public static DiagnosticResult<T> OkWithHandle<T>(T data, string summary, string handle, DateTimeOffset expiresAt, params NextActionHint[] hints)
+        => new(summary, data, hints) { Handle = handle, HandleExpiresAt = expiresAt };
 
     /// <summary>Error response with a structured error and at least one recovery hint.</summary>
     public static DiagnosticResult<T> Fail<T>(string summary, DiagnosticError error, params NextActionHint[] hints)

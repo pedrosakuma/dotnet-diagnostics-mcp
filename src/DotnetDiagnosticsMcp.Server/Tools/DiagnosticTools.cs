@@ -7,6 +7,7 @@ using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
+using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol.Server;
@@ -188,6 +189,7 @@ public sealed class DiagnosticTools
         "Each hotspot reports both inclusive and exclusive sample counts. Run after snapshot_counters shows elevated cpu-usage.")]
     public static async Task<DiagnosticResult<CpuSample>> CollectCpuSample(
         ICpuSampler sampler,
+        IDiagnosticHandleStore handles,
         [Description("Operating system process id of the target .NET process.")] int processId,
         [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of hotspots to return. Must be >= 1. Defaults to 25.")] int topN = 25,
@@ -196,17 +198,146 @@ public sealed class DiagnosticTools
         if (durationSeconds < 1) return InvalidArg<CpuSample>(nameof(durationSeconds), "must be >= 1");
         if (topN < 1) return InvalidArg<CpuSample>(nameof(topN), "must be >= 1");
 
-        var sample = await sampler.SampleAsync(processId, TimeSpan.FromSeconds(durationSeconds), topN, cancellationToken).ConfigureAwait(false);
+        var result = await sampler.SampleAsync(processId, TimeSpan.FromSeconds(durationSeconds), topN, cancellationToken).ConfigureAwait(false);
+        var sample = result.Summary;
         var top = sample.TopHotspots.Count > 0 ? sample.TopHotspots[0] : null;
+        var handle = handles.Register(processId, "cpu-sample", result.Artifact, CpuSampleHandleTtl);
         var summary = top is not null
-            ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive)."
+            ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\")."
             : $"Captured {sample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
 
-        return DiagnosticResult.Ok(
+        return DiagnosticResult.OkWithHandle(
             sample,
             summary,
+            handle.Id,
+            handle.ExpiresAt,
+            new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }),
             new NextActionHint("collect_exceptions", "Confirm hot path isn't driven by exception-heavy control flow.",
                 new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 10 }));
+    }
+
+    [McpServerTool(
+        Name = "get_call_tree",
+        Title = "Drill into CPU sample call tree",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns a pruned caller→callee tree from a prior collect_cpu_sample run, addressed by its handle. " +
+        "Use `rootMethodFilter` to anchor the walk at a method substring (case-insensitive). " +
+        "`maxDepth` and `maxNodes` bound the response size so the LLM stays under its token budget. " +
+        "Handles expire ~10 minutes after collection.")]
+    public static DiagnosticResult<CallTreeView> GetCallTree(
+        IDiagnosticHandleStore handles,
+        [Description("Handle returned by a prior collect_cpu_sample call.")] string handle,
+        [Description("Optional case-insensitive substring; the tree is re-rooted at the highest-ranked frame whose method name contains this text.")] string? rootMethodFilter = null,
+        [Description("Maximum tree depth from the root. Must be >= 1. Defaults to 8.")] int maxDepth = 8,
+        [Description("Approximate cap on the number of nodes returned (top children at each level). Must be >= 1. Defaults to 200.")] int maxNodes = 200)
+    {
+        if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CallTreeView>(nameof(handle), "is required");
+        if (maxDepth < 1) return InvalidArg<CallTreeView>(nameof(maxDepth), "must be >= 1");
+        if (maxNodes < 1) return InvalidArg<CallTreeView>(nameof(maxNodes), "must be >= 1");
+
+        var artifact = handles.TryGet<CpuSampleTraceArtifact>(handle);
+        if (artifact is null)
+        {
+            return DiagnosticResult.Fail<CallTreeView>(
+                $"Handle '{handle}' is unknown or expired.",
+                new DiagnosticError("HandleExpired", "Drill-down handles live ~10min and are invalidated when the target process exits.", handle),
+                new NextActionHint("collect_cpu_sample", "Re-run the sampler on the same pid to issue a fresh handle.",
+                    new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
+        }
+
+        var root = artifact.Root;
+        if (!string.IsNullOrWhiteSpace(rootMethodFilter))
+        {
+            var match = FindHighestRankedDescendant(root, rootMethodFilter);
+            if (match is null)
+            {
+                return DiagnosticResult.Fail<CallTreeView>(
+                    $"No frame matching '{rootMethodFilter}' in handle '{handle}'.",
+                    new DiagnosticError("NotFound", "No frame in the merged call tree contains the supplied substring.", rootMethodFilter),
+                    new NextActionHint("get_call_tree", "Re-issue without rootMethodFilter to inspect the full tree first.",
+                        new Dictionary<string, object?> { ["handle"] = handle, ["maxDepth"] = maxDepth, ["maxNodes"] = maxNodes }));
+            }
+            root = match;
+        }
+
+        var (pruned, nodeCount, truncated) = PruneTree(root, maxDepth, maxNodes);
+        var view = new CallTreeView(artifact.ProcessId, artifact.TotalSamples, nodeCount, truncated, pruned);
+        var summary = truncated
+            ? $"Showing {nodeCount} nodes (truncated; raise maxNodes or maxDepth, or narrow with rootMethodFilter). Root: {root.Frame.Method} — {root.InclusiveSamples} inclusive samples."
+            : $"Showing the full sub-tree rooted at {root.Frame.Method} ({nodeCount} nodes, {root.InclusiveSamples} inclusive samples).";
+
+        return DiagnosticResult.Ok(
+            view,
+            summary,
+            new NextActionHint("get_call_tree", "Drill deeper by anchoring at a specific method.",
+                new Dictionary<string, object?> { ["handle"] = handle, ["rootMethodFilter"] = "<method substring>", ["maxDepth"] = 6 }));
+    }
+
+    private static readonly TimeSpan CpuSampleHandleTtl = TimeSpan.FromMinutes(10);
+
+    private static CallTreeNode? FindHighestRankedDescendant(CallTreeNode node, string substring)
+    {
+        CallTreeNode? best = null;
+        var stack = new Stack<CallTreeNode>();
+        stack.Push(node);
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            if (current.Frame.Method.Contains(substring, StringComparison.OrdinalIgnoreCase) &&
+                (best is null || current.InclusiveSamples > best.InclusiveSamples))
+            {
+                best = current;
+            }
+
+            foreach (var child in current.Children)
+            {
+                stack.Push(child);
+            }
+        }
+
+        return best;
+    }
+
+    private static (CallTreeNode Pruned, int NodeCount, bool Truncated) PruneTree(CallTreeNode root, int maxDepth, int maxNodes)
+    {
+        var nodeBudget = maxNodes;
+        var truncated = false;
+        var pruned = Walk(root, maxDepth);
+        return (pruned, maxNodes - nodeBudget, truncated);
+
+        CallTreeNode Walk(CallTreeNode n, int depthRemaining)
+        {
+            if (nodeBudget <= 0)
+            {
+                truncated = true;
+                return n with { Children = Array.Empty<CallTreeNode>() };
+            }
+            nodeBudget--;
+
+            if (depthRemaining <= 1 || n.Children.Count == 0)
+            {
+                if (n.Children.Count > 0) truncated = true;
+                return n with { Children = Array.Empty<CallTreeNode>() };
+            }
+
+            var kept = new List<CallTreeNode>();
+            foreach (var child in n.Children)
+            {
+                if (nodeBudget <= 0)
+                {
+                    truncated = true;
+                    break;
+                }
+                kept.Add(Walk(child, depthRemaining - 1));
+            }
+
+            return n with { Children = kept };
+        }
     }
 
     [McpServerTool(

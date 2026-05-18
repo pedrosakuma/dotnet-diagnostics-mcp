@@ -125,14 +125,15 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         EnsureSampleRunning();
 
         var sampler = new EventPipeCpuSampler();
-        var sample = await sampler.SampleAsync(
+        var result = await sampler.SampleAsync(
             Pid,
             TimeSpan.FromSeconds(3),
             topN: 10,
             cancellationToken: CancellationToken.None);
 
-        sample.TotalSamples.Should().BeGreaterThan(0);
-        sample.TopHotspots.Should().NotBeEmpty();
+        result.Summary.TotalSamples.Should().BeGreaterThan(0);
+        result.Summary.TopHotspots.Should().NotBeEmpty();
+        result.Artifact.Root.Children.Should().NotBeEmpty("the call-tree artifact must capture at least one stack");
     }
 
     private void EnsureSampleRunning()

@@ -22,7 +22,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         _logger = logger ?? NullLogger<EventPipeCpuSampler>.Instance;
     }
 
-    public async Task<CpuSample> SampleAsync(
+    public async Task<CpuSampleResult> SampleAsync(
         int processId,
         TimeSpan duration,
         int topN = 25,
@@ -44,8 +44,10 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         try
         {
             await CollectTraceAsync(processId, tracePath, duration, cancellationToken).ConfigureAwait(false);
-            var (total, hotspots) = AggregateHotspots(tracePath, processId, topN);
-            return new CpuSample(processId, startedAt, duration, total, hotspots);
+            var (total, hotspots, root) = AggregateHotspots(tracePath, processId, topN);
+            var summary = new CpuSample(processId, startedAt, duration, total, hotspots);
+            var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root);
+            return new CpuSampleResult(summary, artifact);
         }
         finally
         {
@@ -103,7 +105,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         }
     }
 
-    private (long Total, IReadOnlyList<Hotspot> Hotspots) AggregateHotspots(string tracePath, int pid, int topN)
+    private (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root) AggregateHotspots(string tracePath, int pid, int topN)
     {
         var etlxPath = TraceLog.CreateFromEventPipeDataFile(tracePath);
         try
@@ -113,12 +115,13 @@ public sealed class EventPipeCpuSampler : ICpuSampler
             if (process is null)
             {
                 _logger.LogDebug("Process {Pid} not found in trace.", pid);
-                return (0, Array.Empty<Hotspot>());
+                return (0, Array.Empty<Hotspot>(), EmptyRoot());
             }
 
             var inclusive = new Dictionary<string, long>(StringComparer.Ordinal);
             var exclusive = new Dictionary<string, long>(StringComparer.Ordinal);
             var modules = new Dictionary<string, string>(StringComparer.Ordinal);
+            var rootBuilder = new CallTreeBuilder();
             long total = 0;
 
             foreach (var traceEvent in process.EventsInProcess)
@@ -136,23 +139,33 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 }
 
                 total++;
-                var seenInThisStack = new HashSet<string>(StringComparer.Ordinal);
+                var stackFrames = new List<(string Key, string Module)>();
                 var frame = callStack;
-                var leafKey = FormatFrame(frame);
-                exclusive[leafKey] = exclusive.GetValueOrDefault(leafKey) + 1;
-                modules.TryAdd(leafKey, frame.CodeAddress?.ModuleFile?.Name ?? string.Empty);
-
                 while (frame is not null)
                 {
                     var key = FormatFrame(frame);
+                    var module = frame.CodeAddress?.ModuleFile?.Name ?? string.Empty;
+                    stackFrames.Add((key, module));
+                    modules.TryAdd(key, module);
+                    frame = frame.Caller;
+                }
+
+                // stack is leaf→root; reverse to root→leaf for tree traversal.
+                stackFrames.Reverse();
+
+                var leafKey = stackFrames[^1].Key;
+                exclusive[leafKey] = exclusive.GetValueOrDefault(leafKey) + 1;
+
+                var seenInThisStack = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var (key, _) in stackFrames)
+                {
                     if (seenInThisStack.Add(key))
                     {
                         inclusive[key] = inclusive.GetValueOrDefault(key) + 1;
-                        modules.TryAdd(key, frame.CodeAddress?.ModuleFile?.Name ?? string.Empty);
                     }
-
-                    frame = frame.Caller;
                 }
+
+                rootBuilder.AddStack(stackFrames, leafKey);
             }
 
             var hotspots = inclusive
@@ -166,11 +179,59 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                     ExclusiveSamples: exclusive.GetValueOrDefault(kv.Key)))
                 .ToList();
 
-            return (total, hotspots);
+            return (total, hotspots, rootBuilder.Build());
         }
         finally
         {
             TryDelete(etlxPath);
+        }
+    }
+
+    private static CallTreeNode EmptyRoot() => new(new SampledFrame(string.Empty, "<root>"), 0, 0, Array.Empty<CallTreeNode>());
+
+    private sealed class CallTreeBuilder
+    {
+        private readonly Node _root = new(new SampledFrame(string.Empty, "<root>"));
+
+        public void AddStack(List<(string Key, string Module)> rootToLeaf, string leafKey)
+        {
+            var current = _root;
+            current.Inclusive++;
+            for (var i = 0; i < rootToLeaf.Count; i++)
+            {
+                var (key, module) = rootToLeaf[i];
+                if (!current.Children.TryGetValue(key, out var child))
+                {
+                    child = new Node(new SampledFrame(module, key));
+                    current.Children[key] = child;
+                }
+                child.Inclusive++;
+                if (key == leafKey && i == rootToLeaf.Count - 1)
+                {
+                    child.Exclusive++;
+                }
+                current = child;
+            }
+        }
+
+        public CallTreeNode Build() => Materialize(_root);
+
+        private static CallTreeNode Materialize(Node n)
+        {
+            var children = n.Children.Values
+                .OrderByDescending(c => c.Inclusive)
+                .Select(Materialize)
+                .ToList();
+            return new CallTreeNode(n.Frame, n.Inclusive, n.Exclusive, children);
+        }
+
+        private sealed class Node
+        {
+            public Node(SampledFrame frame) { Frame = frame; }
+            public SampledFrame Frame { get; }
+            public long Inclusive;
+            public long Exclusive;
+            public Dictionary<string, Node> Children { get; } = new(StringComparer.Ordinal);
         }
     }
 

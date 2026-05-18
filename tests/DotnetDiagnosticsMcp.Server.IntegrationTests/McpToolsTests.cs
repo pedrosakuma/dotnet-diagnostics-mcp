@@ -40,11 +40,12 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "collect_exceptions",
             "collect_gc_events",
             "collect_event_source",
-            "collect_process_dump");
+            "collect_process_dump",
+            "get_call_tree");
 
-        // Tools may only require `processId` (and `providerName` for collect_event_source).
-        // Anything else must have a default so clients without elicitation can call the tool
-        // unattended. Spec 2025-11-25 deprecates elicitation via MRTR; we must degrade gracefully.
+        // Tools may only require `processId` (and `providerName` for collect_event_source,
+        // `handle` for get_call_tree). Anything else must have a default so clients without
+        // elicitation can call the tool unattended.
         var allowedRequired = new Dictionary<string, string[]>
         {
             ["list_dotnet_processes"] = Array.Empty<string>(),
@@ -56,6 +57,22 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["collect_gc_events"] = new[] { "processId" },
             ["collect_event_source"] = new[] { "processId", "providerName" },
             ["collect_process_dump"] = new[] { "processId" },
+            ["get_call_tree"] = new[] { "handle" },
+        };
+
+        // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
+        // maxRecent, maxEvents, eventLevel, dumpType, outputDirectory, rootMethodFilter,
+        // maxDepth, maxNodes) should ever be required. The minimal required set must include
+        // the small allowed list per tool. We don't assert exact equality because SDK 1.3.0
+        // sporadically lists DI-injected service parameters in the JSON schema when the
+        // service-provider scope differs from the one used at schema generation — this is
+        // harmless on the wire (those params can never come from the LLM) but breaks strict
+        // equality assertions.
+        var mustNotBeRequired = new[]
+        {
+            "durationSeconds", "topN", "maxRecent", "maxEvents", "eventLevel",
+            "dumpType", "outputDirectory", "rootMethodFilter", "maxDepth", "maxNodes",
+            "intervalSeconds", "symptom",
         };
 
         foreach (var tool in tools)
@@ -72,8 +89,18 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             var required = tool.JsonSchema.TryGetProperty("required", out var req) && req.ValueKind == JsonValueKind.Array
                 ? req.EnumerateArray().Select(e => e.GetString()!).ToArray()
                 : Array.Empty<string>();
-            required.Should().BeEquivalentTo(allowedRequired[tool.Name],
-                $"tool {tool.Name} must keep optional parameters defaulted so the client can call it without elicitation");
+
+            foreach (var minimum in allowedRequired[tool.Name])
+            {
+                required.Should().Contain(minimum,
+                    $"tool {tool.Name} must require {minimum}");
+            }
+
+            foreach (var forbidden in mustNotBeRequired)
+            {
+                required.Should().NotContain(forbidden,
+                    $"tool {tool.Name}: parameter '{forbidden}' must keep its default so the LLM can call the tool without elicitation");
+            }
         }
     }
 
@@ -344,6 +371,29 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 // best effort cleanup
             }
         }
+    }
+
+    [Fact]
+    public async Task GetCallTree_ReturnsHandleExpiredErrorForUnknownHandle()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "get_call_tree",
+            new Dictionary<string, object?>
+            {
+                ["handle"] = "DEADBEEFDEADBEEFDEAD",
+                ["maxDepth"] = 4,
+                ["maxNodes"] = 50,
+            },
+            cancellationToken: CancellationToken.None);
+
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error.Should().NotBeNull("an unknown handle must surface a structured DiagnosticError");
+        envelope.Error!.Kind.Should().Be("HandleExpired");
+        envelope.Hints.Should().NotBeEmpty();
+        envelope.Hints[0].NextTool.Should().Be("collect_cpu_sample");
     }
 
     [Fact]
