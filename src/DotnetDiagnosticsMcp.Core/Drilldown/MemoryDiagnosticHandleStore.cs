@@ -94,6 +94,21 @@ public sealed class MemoryDiagnosticHandleStore : IDiagnosticHandleStore
         return removed;
     }
 
+    /// <summary>Distinct PIDs currently referenced by live (non-expired) handles.</summary>
+    public IReadOnlyCollection<int> RegisteredProcessIds()
+    {
+        var now = _clock.GetUtcNow();
+        var set = new HashSet<int>();
+        foreach (var kv in _entries)
+        {
+            if (kv.Value.Handle.ExpiresAt > now)
+            {
+                set.Add(kv.Value.Handle.ProcessId);
+            }
+        }
+        return set;
+    }
+
     private void EvictExpired()
     {
         var now = _clock.GetUtcNow();

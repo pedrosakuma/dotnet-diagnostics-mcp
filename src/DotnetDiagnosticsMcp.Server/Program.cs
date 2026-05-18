@@ -28,6 +28,7 @@ builder.Services.AddSingleton<IEventSourceCollector, EventPipeEventSourceCollect
 builder.Services.AddSingleton<IProcessDumper, DiagnosticsClientDumper>();
 builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHandleStore>(_ =>
     new DotnetDiagnosticsMcp.Core.Drilldown.MemoryDiagnosticHandleStore(maxEntries: 32));
+builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.HandleEvictionBackgroundService>();
 
 builder.Services
     .AddMcpServer(options =>
@@ -90,7 +91,8 @@ builder.Services
     .WithHttpTransport()
     .WithTools<DiagnosticTools>()
     .WithPrompts<DotnetDiagnosticsMcp.Server.Prompts.DiagnosticPrompts>()
-    .WithResources<DotnetDiagnosticsMcp.Server.Resources.InvestigationGuideResources>();
+    .WithResources<DotnetDiagnosticsMcp.Server.Resources.InvestigationGuideResources>()
+    .WithResources<DotnetDiagnosticsMcp.Server.Resources.TraceSessionResources>();
 
 var app = builder.Build();
 

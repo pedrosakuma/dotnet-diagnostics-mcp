@@ -154,6 +154,36 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
     }
 
     [Fact]
+    public async Task ListResourceTemplates_ExposesTraceSession()
+    {
+        await using var client = await ConnectAsync();
+
+        var templates = await client.ListResourceTemplatesAsync(cancellationToken: CancellationToken.None);
+
+        templates.Should().Contain(t => t.UriTemplate == "trace://session/{handle}",
+            "trace://session/{handle} must be advertised so clients can pull drill-down artifacts directly");
+    }
+
+    [Fact]
+    public async Task ReadResource_ReturnsUnknownPayloadForExpiredHandle()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.ReadResourceAsync(
+            "trace://session/DEADBEEFDEADBEEFDEAD",
+            cancellationToken: CancellationToken.None);
+
+        result.Contents.Should().NotBeEmpty();
+        var text = result.Contents
+            .OfType<ModelContextProtocol.Protocol.TextResourceContents>()
+            .Select(c => c.Text)
+            .FirstOrDefault();
+        text.Should().NotBeNullOrWhiteSpace();
+        text!.Should().Contain("unknown",
+            "expired/unknown handles must serialize a deterministic JSON body so consumers can branch");
+    }
+
+    [Fact]
     public async Task Initialize_AdvertisesServerInfoAndInstructions()
     {
         // Pin the spec version we advertise so a future SDK bump that changes the default
