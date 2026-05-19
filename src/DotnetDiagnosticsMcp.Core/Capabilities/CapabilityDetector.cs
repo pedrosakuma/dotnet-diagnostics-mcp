@@ -1,6 +1,7 @@
 using DotnetDiagnosticsMcp.Core.Container;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Internal;
+using DotnetDiagnosticsMcp.Core.OffCpu;
 using Microsoft.Diagnostics.NETCore.Client;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -22,17 +23,20 @@ public sealed class CapabilityDetector : ICapabilityDetector
     private readonly PerfNativeAotCpuSampler? _perfSampler;
     private readonly EtwNativeAotCpuSampler? _etwSampler;
     private readonly IContainerSignalsCollector? _containerSignals;
+    private readonly IOffCpuSampler? _offCpuSampler;
 
     public CapabilityDetector(
         ILogger<CapabilityDetector>? logger = null,
         PerfNativeAotCpuSampler? perfSampler = null,
         EtwNativeAotCpuSampler? etwSampler = null,
-        IContainerSignalsCollector? containerSignals = null)
+        IContainerSignalsCollector? containerSignals = null,
+        IOffCpuSampler? offCpuSampler = null)
     {
         _logger = logger ?? NullLogger<CapabilityDetector>.Instance;
         _perfSampler = perfSampler;
         _etwSampler = etwSampler;
         _containerSignals = containerSignals;
+        _offCpuSampler = offCpuSampler;
     }
 
     public async Task<DiagnosticCapabilities> DetectAsync(int processId, CancellationToken cancellationToken = default)
@@ -47,6 +51,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
 
         var perfAvailable = _perfSampler is not null && _perfSampler.IsAvailable();
         var etwAvailable = _etwSampler is not null && _etwSampler.IsAvailable();
+        var canSampleOffCpu = _offCpuSampler is not null && _offCpuSampler.IsAvailable();
         // CoreCLR always supports SampleProfiler; whether the 2-second probe happened to
         // catch a Thread/Sample event is a function of workload, not capability. As long
         // as we classified the runtime as CoreCLR (preferably from module inspection,
@@ -61,7 +66,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var canCollectCustomEs = probe.SessionStarted;
         var canCollectDump = true;
 
-        var notes = BuildNotes(runtime, probe, perfAvailable, etwAvailable);
+        var notes = BuildNotes(runtime, probe, perfAvailable, etwAvailable, canSampleOffCpu);
 
         var (inContainer, cgroupV2, canSeeThrottle) = await DetectContainerFlagsAsync(processId, cancellationToken).ConfigureAwait(false);
 
@@ -81,6 +86,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
             InContainer = inContainer,
             CgroupV2 = cgroupV2,
             CanSeeThrottle = canSeeThrottle,
+            CanSampleOffCpu = canSampleOffCpu,
         };
     }
 
@@ -243,7 +249,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return RuntimeFlavor.NativeAot;
     }
 
-    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable, bool etwAvailable)
+    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable, bool etwAvailable, bool canSampleOffCpu)
     {
         if (!probe.SessionStarted)
         {
@@ -251,7 +257,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
                    "Verify the process is .NET 6+ and that DOTNET_EnableDiagnostics is not 0.";
         }
 
-        return runtime switch
+        var primary = runtime switch
         {
             RuntimeFlavor.CoreClr => "CoreCLR runtime detected; all diagnostic tools available.",
             RuntimeFlavor.NativeAot when etwAvailable =>
@@ -267,6 +273,33 @@ public sealed class CapabilityDetector : ICapabilityDetector
                 "On Linux, install 'perf' with CAP_PERFMON to enable the native CPU sampling fallback.",
             _ => "Could not classify runtime flavor."
         };
+
+        // Off-CPU availability is a property of the sidecar host (perf + CAP_PERFMON on Linux,
+        // admin elevation on Windows), not of the target runtime — so we surface it as a
+        // separate hint so the LLM can decide whether to call collect_off_cpu_sample before
+        // committing to the (system-wide, privileged) capture.
+        if (canSampleOffCpu)
+        {
+            primary += " collect_off_cpu_sample is available.";
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            primary += " collect_off_cpu_sample is NOT available: the sidecar lacks administrative " +
+                       "elevation required for the NT Kernel Logger ContextSwitch provider. Run the " +
+                       "diagnostics process as Administrator (or grant SeSystemProfilePrivilege).";
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            primary += " collect_off_cpu_sample is NOT available: 'perf' is missing from PATH or the " +
+                       "sidecar lacks CAP_PERFMON (or perf_event_paranoid > -1). Install linux-tools-common " +
+                       "/ linux-tools-generic and grant the capability.";
+        }
+        else
+        {
+            primary += " collect_off_cpu_sample is not supported on this OS in this release.";
+        }
+
+        return primary;
     }
 
     private sealed record ProbeResult(bool SessionStarted, long SampleEventsReceived, string? FailureReason);

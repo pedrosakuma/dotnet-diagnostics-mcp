@@ -39,4 +39,16 @@ public sealed record DiagnosticCapabilities(
     /// quota is configured — i.e. CPU throttling is observable. False when the cgroup has no
     /// CPU quota (no quota → no throttling possible) or on non-Linux hosts.</summary>
     public bool CanSeeThrottle { get; init; }
+
+    /// <summary>
+    /// True when <c>collect_off_cpu_sample</c> is expected to succeed against this sidecar
+    /// before the LLM commits to the (system-wide, privileged) capture. On Linux it requires
+    /// <c>perf</c> in <c>PATH</c> plus <c>CAP_PERFMON</c> / <c>perf_event_paranoid &lt;= -1</c>;
+    /// on Windows it requires the diagnostics process to be elevated (or hold
+    /// <c>SeSystemProfilePrivilege</c>) so the NT Kernel Logger ContextSwitch provider can be
+    /// enabled. False on macOS / other and whenever the sidecar lacks the prerequisite.
+    /// Mirrors <see cref="CanSampleCpu"/> in spirit but is a property of the sidecar host, not
+    /// of the target runtime.
+    /// </summary>
+    public bool CanSampleOffCpu { get; init; }
 }

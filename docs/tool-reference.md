@@ -132,7 +132,11 @@ foram wired).
 
 O `get_diagnostic_capabilities` ganhou 3 flags pra você saber se chamar vale a
 pena antes: `InContainer`, `CgroupV2`, `CanSeeThrottle` (true sse há quota
-configurada → throttling é observável).
+configurada → throttling é observável). Slice 2b adicionou
+**`CanSampleOffCpu`** — true quando o sidecar tem perf + `CAP_PERFMON` (Linux)
+ou está elevado (Windows). Quando false, `Notes` traz a hint concreta de
+elevação / capability antes da LLM tentar `collect_off_cpu_sample` num sidecar
+sem privilégio.
 
 NextActionHints: throttle > 5% sugere `collect_cpu_sample` direto; memória >
 85% do limite sugere `inspect_live_heap` antes do OOM-kill.
