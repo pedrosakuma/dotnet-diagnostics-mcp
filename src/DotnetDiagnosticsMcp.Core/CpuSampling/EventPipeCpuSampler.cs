@@ -195,7 +195,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 sources = ResolveSources(traceLog, ranked, modules, codeAddressByKey, sourceResolution);
             }
 
-            var identities = BuildMethodIdentities(ranked, modules, codeAddressByKey);
+            var identities = BuildMethodIdentities(ranked, modules, codeAddressByKey, sources);
 
             var hotspots = ranked
                 .Select(kv =>
@@ -225,7 +225,8 @@ public sealed class EventPipeCpuSampler : ICpuSampler
     private Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> BuildMethodIdentities(
         KeyValuePair<string, long>[] ranked,
         Dictionary<string, string> modules,
-        Dictionary<string, Microsoft.Diagnostics.Tracing.Etlx.TraceCodeAddress> codeAddressByKey)
+        Dictionary<string, Microsoft.Diagnostics.Tracing.Etlx.TraceCodeAddress> codeAddressByKey,
+        IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? sources)
     {
         var result = new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>();
         foreach (var (key, _) in ranked)
@@ -256,6 +257,8 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 ? key[(module.Length + 1)..]
                 : key;
             var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, methodDisplay);
+            DotnetDiagnosticsMcp.Core.Memory.SourceLocation? source = null;
+            sources?.TryGetValue(symbol, out source);
             result[symbol] = new DotnetDiagnosticsMcp.Core.Memory.MethodIdentity(
                 ModuleName: moduleName,
                 ModulePath: modulePath,
@@ -266,6 +269,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 GenericArity: parsed.GenericArity)
             {
                 GenericTypeArguments = parsed.GenericTypeArguments,
+                Source = source,
             };
         }
         return result;

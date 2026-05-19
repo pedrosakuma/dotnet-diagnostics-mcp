@@ -204,6 +204,51 @@ public class MethodIdentityHandoffTests
         roundtripped.GenericTypeArguments.Method.Should().Equal("System.String");
     }
 
+    [Fact]
+    public void MethodIdentity_CarriesSourceLocation_WhenStampedByProducer()
+    {
+        // Issue #28 — Source travels on the identity itself so every consumer (hotspots,
+        // thread frames, exception frames, retention paths) sees it without a separate map.
+        var src = new SourceLocation(
+            File: "/abs/path/HotPath.cs",
+            StartLine: 42,
+            SourceLink: "https://github.com/me/repo/blob/abc123/HotPath.cs#L42",
+            EndLine: 58);
+        var id = new MethodIdentity(
+            ModuleName: "MyApp.dll",
+            ModulePath: "/app/MyApp.dll",
+            ModuleVersionId: Guid.Parse("44444444-4444-4444-4444-444444444444"),
+            MetadataToken: 0x06000150,
+            TypeFullName: "MyApp.HotPath",
+            MethodName: "DoWork",
+            GenericArity: 0) { Source = src };
+
+        id.Source.Should().NotBeNull();
+        id.Source!.File.Should().Be("/abs/path/HotPath.cs");
+        id.Source.StartLine.Should().Be(42);
+        id.Source.EndLine.Should().Be(58);
+        id.Source.SourceLink.Should().StartWith("https://");
+
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            id, InvestigationSummaryJsonContext.Default.MethodIdentity);
+        json.Should().Contain("\"Source\"");
+        json.Should().Contain("58");
+
+        var roundtripped = System.Text.Json.JsonSerializer.Deserialize(
+            json, InvestigationSummaryJsonContext.Default.MethodIdentity);
+        roundtripped!.Source!.StartLine.Should().Be(42);
+        roundtripped.Source.EndLine.Should().Be(58);
+    }
+
+    [Fact]
+    public void SourceLocation_EndLine_DefaultsToNull_ForBackwardCompat()
+    {
+        // Existing positional callers (pre-#28) construct SourceLocation without EndLine —
+        // it's optional with a null default so no downstream code breaks.
+        var src = new SourceLocation("/x/y.cs", 10, null);
+        src.EndLine.Should().BeNull();
+    }
+
     private sealed class FixedProv : IProvenanceCollector
     {
         public InvestigationProvenance Collect(int processId, string? buildAssemblyName = null)

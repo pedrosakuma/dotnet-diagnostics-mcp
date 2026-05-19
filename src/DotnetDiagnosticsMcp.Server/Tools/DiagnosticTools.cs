@@ -199,18 +199,19 @@ public sealed class DiagnosticTools
         [Description("Operating system process id of the target .NET process.")] int processId,
         [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of hotspots to return. Must be >= 1. Defaults to 25.")] int topN = 25,
-        [Description("If true, attempts to resolve top hotspots to file:line via PDB / SourceLink. Lazy: only the top-N hotspots are resolved (capped by maxResolvedSources). Off by default — requires PDBs alongside the assemblies or a reachable symbol path.")] bool resolveSourceLines = false,
+        [Description("If true, attempts to resolve top hotspots to file:line via PDB / SourceLink and stamps the resolved SourceLocation onto each MethodIdentity payload (issue #28 — makes dotnet-assembly-mcp.get_method_source optional when PDBs are reachable). Defaults to true; set to false to skip PDB I/O when symbols are known to be unreachable.")] bool resolveSourceLines = true,
         [Description("Optional NT_SYMBOL_PATH-style search path forwarded to the symbol reader (e.g. '/symbols;srv*https://msdl.microsoft.com/download/symbols'). Ignored when resolveSourceLines=false.")] string? symbolPath = null,
-        [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to 10.")] int maxResolvedSources = 10,
+        [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to the requested topN so every emitted MethodIdentity carries its resolved SourceLocation when available.")] int? maxResolvedSources = null,
         [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous).")] bool runAsJob = false,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<CpuSample>(nameof(durationSeconds), "must be >= 1");
         if (topN < 1) return InvalidArg<CpuSample>(nameof(topN), "must be >= 1");
-        if (maxResolvedSources < 1) return InvalidArg<CpuSample>(nameof(maxResolvedSources), "must be >= 1");
+        var effectiveMaxResolved = maxResolvedSources ?? topN;
+        if (effectiveMaxResolved < 1) return InvalidArg<CpuSample>(nameof(maxResolvedSources), "must be >= 1");
 
         var srcOpts = resolveSourceLines
-            ? new SourceResolutionOptions(Enabled: true, SymbolPath: symbolPath, MaxResolved: maxResolvedSources)
+            ? new SourceResolutionOptions(Enabled: true, SymbolPath: symbolPath, MaxResolved: effectiveMaxResolved)
             : null;
 
         if (runAsJob)

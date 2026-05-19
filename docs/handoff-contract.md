@@ -44,6 +44,7 @@ JSON summary as `HotspotSummary.Identity`):
 | `MethodName`      | `string`  | display              | Bare method name (no signature)                                          |
 | `GenericArity`    | `int`     | sanity-check         | Number of generic method parameters; `0` for non-generic methods         |
 | `GenericTypeArguments` | `GenericInstantiation?` | closed-signature drilldown | Closed instantiation when the producer can extract it structurally from the trace — see below. `null` for non-generic methods AND for any frame where the producer couldn't recover the instantiation (consumer falls back to the open def) |
+| `Source`          | `SourceLocation?` | inline source jump  | `{ File, StartLine, SourceLink?, EndLine? }` resolved locally from the PDB embedded in (or sitting next to) the module on the diagnostics box. When non-null the LLM can open `File:StartLine` directly — the partner `dotnet-assembly-mcp.get_method_source` becomes optional. `null` when no PDB is reachable, the method has no non-hidden sequence points (compiler-generated bodies), or source resolution was explicitly disabled (issue #28) |
 
 ### `GenericInstantiation` (issue #21)
 

@@ -69,11 +69,17 @@ public sealed record HotspotSummary(
 public sealed record SymbolRef(string Module, string MethodFullName);
 
 /// <summary>
-/// Source-level resolution for a hotspot. Populated lazily for top-N frames only — the
-/// sampler skips deep stacks to keep cost predictable. <c>SourceLink</c> is the SourceLink
+/// Source-level resolution for a method or hotspot. Populated lazily — the sampler skips
+/// deep stacks to keep cost predictable, and other producers (threads, exceptions, retention
+/// paths) attach this best-effort per <see cref="MethodIdentity"/> when an embedded /
+/// sibling PDB is reachable on the diagnostics box. <c>SourceLink</c> is the SourceLink
 /// HTTP URL embedded in the PDB when available, ready to paste into a PR comment.
 /// </summary>
-public sealed record SourceLocation(string? File, int? StartLine, string? SourceLink);
+/// <param name="File">Build-time absolute source file path emitted by the compiler into the PDB.</param>
+/// <param name="StartLine">First non-hidden sequence point line for the method (1-based).</param>
+/// <param name="SourceLink">SourceLink-resolved HTTP URL, when the PDB ships one.</param>
+/// <param name="EndLine">Optional last sequence point line; null when the producer doesn't compute span end (issue #28).</param>
+public sealed record SourceLocation(string? File, int? StartLine, string? SourceLink, int? EndLine = null);
 
 /// <summary>
 /// Canonical, machine-readable identity of a managed method observed in a diagnostic
@@ -109,6 +115,18 @@ public sealed record MethodIdentity(
     /// <c>+</c>; arrays <c>T[]</c>/<c>T[,]</c>).
     /// </summary>
     public GenericInstantiation? GenericTypeArguments { get; init; }
+
+    /// <summary>
+    /// Best-effort source-level resolution attached at producer time (issue #28). When
+    /// non-null the LLM can open <c>File:StartLine</c> directly without delegating to
+    /// <c>dotnet-assembly-mcp.get_method_source</c> — that partner becomes useful only for
+    /// stripped binaries / decompilation. Null when no PDB is reachable from the diagnostics
+    /// box, when the method has no non-hidden sequence points (compiler-generated bodies),
+    /// or when the producer doesn't run source resolution (perf sampler / NativeAOT).
+    /// Travels with the identity through every tool that emits one (CPU hotspots, thread
+    /// frames, exception frames, retention paths, drilldown query results).
+    /// </summary>
+    public SourceLocation? Source { get; init; }
 }
 
 /// <summary>Closed generic instantiation for a single <see cref="MethodIdentity"/>.
