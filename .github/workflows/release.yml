@@ -2,7 +2,7 @@ name: Release
 
 # Publishes NuGet tool package + per-OS single-file binaries on tag push.
 # Requires the maintainer to have configured the NUGET_API_KEY secret.
-# Container publishing (ghcr.io) is handled in a separate workflow.
+# Container publishing (ghcr.io) is handled by .github/workflows/publish-container.yml.
 
 on:
   push:

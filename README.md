@@ -85,6 +85,11 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
   -e MCP_BEARER_TOKEN=$(openssl rand -hex 32) \
   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
 
+# For off-CPU sampling (collect_off_cpu_sample) or NativeAOT CPU sampling, use the
+# `-perf` variant which ships linux-perf preinstalled:
+#   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest-perf
+# (Requires CAP_PERFMON or perf_event_paranoid <= -1 on the host.)
+
 # Or grab a self-contained single-file binary for your OS/arch from the Releases page.
 ```
 
