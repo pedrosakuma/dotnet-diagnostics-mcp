@@ -1440,11 +1440,14 @@ public sealed class DiagnosticTools
         }
 
         // ClrMD wraps Linux ptrace failures (errno EPERM/ESRCH) in ClrDiagnosticsException.
-        // Match on type-name-suffix to avoid taking a hard reference here.
+        // Match on type-name-suffix to avoid taking a hard reference here. "operation not
+        // permitted" is the canonical EPERM wording; also walk inner exceptions because
+        // ClrMD often nests a Win32Exception with NativeErrorCode==1.
         var isPtraceFailure = (typeName.EndsWith("ClrDiagnosticsException", StringComparison.Ordinal)
                                && (message.Contains("PTRACE", StringComparison.OrdinalIgnoreCase)
-                                   || message.Contains("permission", StringComparison.OrdinalIgnoreCase)))
-                              || (ex is System.ComponentModel.Win32Exception w32 && w32.NativeErrorCode == 1 /* EPERM */);
+                                   || message.Contains("permission", StringComparison.OrdinalIgnoreCase)
+                                   || message.Contains("operation not permitted", StringComparison.OrdinalIgnoreCase)))
+                              || HasEpermInChain(ex);
         if (isPtraceFailure)
         {
             return DiagnosticResult.Fail<T>(
@@ -1472,6 +1475,23 @@ public sealed class DiagnosticTools
         return DiagnosticResult.Fail<T>(
             $"{tool} failed{pidHint}: {message}",
             new DiagnosticError("Internal", message, typeName));
+    }
+
+    private static bool HasEpermInChain(Exception ex)
+    {
+        for (Exception? cur = ex; cur is not null; cur = cur.InnerException)
+        {
+            if (cur is System.ComponentModel.Win32Exception w32 && w32.NativeErrorCode == 1 /* EPERM */)
+            {
+                return true;
+            }
+            if (cur.Message is string m
+                && m.Contains("operation not permitted", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 }
 

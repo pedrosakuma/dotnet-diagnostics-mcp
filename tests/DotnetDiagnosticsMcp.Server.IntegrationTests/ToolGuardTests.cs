@@ -64,6 +64,42 @@ public sealed class ToolGuardTests
         result.Error.Message.Should().Contain("PTRACE_ATTACH");
     }
 
+    [Fact]
+    public async Task InspectLiveHeap_OperationNotPermitted_TranslatesToPermissionDenied()
+    {
+        // Canonical EPERM message that ClrMD can produce when the kernel rejects ptrace
+        // before the runtime reaches the explicit "PTRACE" / "permission" wording. Without
+        // the EPERM-aware classifier, this falls through to Internal and the LLM loses
+        // the cue to suggest CAP_SYS_PTRACE / a dump fallback.
+        var inspector = new ThrowingDumpInspector(
+            new ClrDiagnosticsException("Operation not permitted"));
+        var handles = new MemoryDiagnosticHandleStore();
+
+        var result = await DiagnosticTools.InspectLiveHeap(
+            inspector, handles, processId: 7, cancellationToken: default);
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be("PermissionDenied");
+    }
+
+    [Fact]
+    public async Task InspectLiveHeap_NestedWin32EPERM_TranslatesToPermissionDenied()
+    {
+        // ClrMD often nests a Win32Exception (NativeErrorCode=1) inside its
+        // ClrDiagnosticsException. The classifier must walk InnerException, not just
+        // pattern-match the outer Message.
+        var inner = new System.ComponentModel.Win32Exception(1);
+        var outer = new ClrDiagnosticsException("Attach failed", inner);
+        var inspector = new ThrowingDumpInspector(outer);
+        var handles = new MemoryDiagnosticHandleStore();
+
+        var result = await DiagnosticTools.InspectLiveHeap(
+            inspector, handles, processId: 9, cancellationToken: default);
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be("PermissionDenied");
+    }
+
     private sealed class ThrowingDumpInspector : IDumpInspector
     {
         private readonly Exception _ex;
