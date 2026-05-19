@@ -17,7 +17,7 @@ public sealed class EnvironmentProvenanceCollector : IProvenanceCollector
         var container = ReadContainer();
         var build = ReadBuild(buildAssemblyName);
         var host = Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName;
-        return new InvestigationProvenance(build, container, host);
+        return new InvestigationProvenance(host) { Build = build, Container = container };
     }
 
     private static ContainerProvenance? ReadContainer()

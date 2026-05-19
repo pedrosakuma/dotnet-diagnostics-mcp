@@ -95,6 +95,6 @@ public class MethodIdentityHandoffTests
     private sealed class FixedProv : IProvenanceCollector
     {
         public InvestigationProvenance Collect(int processId, string? buildAssemblyName = null)
-            => new(Build: null, Container: null, Hostname: "test");
+            => new(Hostname: "test") { Build = null, Container = null };
     }
 }

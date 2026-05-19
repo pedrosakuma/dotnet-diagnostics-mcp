@@ -155,9 +155,10 @@ public class InvestigationMemoryTests
         public FixedProvenance(ContainerProvenance? container = null) { _container = container; }
 
         public InvestigationProvenance Collect(int processId, string? buildAssemblyName = null)
-            => new(
-                Build: buildAssemblyName is null ? null : new BuildProvenance(buildAssemblyName, null, null, null, null),
-                Container: _container,
-                Hostname: "test-host");
+            => new(Hostname: "test-host")
+            {
+                Build = buildAssemblyName is null ? null : new BuildProvenance(buildAssemblyName, null, null, null, null),
+                Container = _container,
+            };
     }
 }

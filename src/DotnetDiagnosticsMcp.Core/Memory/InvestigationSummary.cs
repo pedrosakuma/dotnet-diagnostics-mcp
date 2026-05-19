@@ -20,10 +20,11 @@ public sealed record InvestigationSummary(
 }
 
 /// <summary>Where the observation was made — build + container provenance survive re-deploys.</summary>
-public sealed record InvestigationProvenance(
-    BuildProvenance? Build,
-    ContainerProvenance? Container,
-    string? Hostname);
+public sealed record InvestigationProvenance(string? Hostname)
+{
+    public BuildProvenance? Build { get; init; }
+    public ContainerProvenance? Container { get; init; }
+}
 
 /// <summary>
 /// Build identity. <c>InformationalVersion</c> typically includes the git SHA when SourceLink
