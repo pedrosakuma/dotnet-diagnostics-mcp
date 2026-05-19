@@ -524,18 +524,21 @@ public sealed class DiagnosticTools
         [Description("Optional output directory. If null, defaults to <temp>/dotnet-diagnostics-mcp.")] string? outputDirectory = null,
         CancellationToken cancellationToken = default)
     {
-        var dump = await dumper.WriteDumpAsync(processId, dumpType, outputDirectory, cancellationToken).ConfigureAwait(false);
-        var hint = dumpType == ProcessDumpType.Mini
-            ? new NextActionHint("inspect_dump",
-                "Mini dump captured — heap walk unavailable. Re-capture with dumpType='WithHeap' for full inspection.",
-                new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath })
-            : new NextActionHint("inspect_dump",
-                "Inspect the dump's managed heap for top-retained types + handoff payload to dotnet-assembly-mcp.",
-                new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath, ["topTypes"] = 20 });
-        return DiagnosticResult.Ok(
-            dump,
-            $"Wrote {dumpType} dump for pid {dump.ProcessId} to {dump.FilePath} ({dump.FileSizeBytes:N0} bytes).",
-            hint);
+        return await GuardAttachAsync("collect_process_dump", processId, async () =>
+        {
+            var dump = await dumper.WriteDumpAsync(processId, dumpType, outputDirectory, cancellationToken).ConfigureAwait(false);
+            var hint = dumpType == ProcessDumpType.Mini
+                ? new NextActionHint("inspect_dump",
+                    "Mini dump captured — heap walk unavailable. Re-capture with dumpType='WithHeap' for full inspection.",
+                    new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath })
+                : new NextActionHint("inspect_dump",
+                    "Inspect the dump's managed heap for top-retained types + handoff payload to dotnet-assembly-mcp.",
+                    new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath, ["topTypes"] = 20 });
+            return DiagnosticResult.Ok(
+                dump,
+                $"Wrote {dumpType} dump for pid {dump.ProcessId} to {dump.FilePath} ({dump.FileSizeBytes:N0} bytes).",
+                hint);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     [McpServerTool(
@@ -565,31 +568,32 @@ public sealed class DiagnosticTools
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         CancellationToken cancellationToken = default)
     {
-        var snapshot = await inspector.InspectAsync(
-            dumpFilePath,
-            new DumpInspectionOptions(
-                TopTypes: topTypes,
-                IncludeRetentionPaths: includeRetentionPaths,
-                RetentionPathLimit: retentionPathLimit,
-                IncludeStaticFields: includeStaticFields,
-                IncludeDelegateTargets: includeDelegateTargets,
-                IncludeDuplicateStrings: includeDuplicateStrings),
-            cancellationToken).ConfigureAwait(false);
+        return await GuardAttachAsync("inspect_dump", processId: null, async () =>
+        {
+            var snapshot = await inspector.InspectAsync(
+                dumpFilePath,
+                new DumpInspectionOptions(
+                    TopTypes: topTypes,
+                    IncludeRetentionPaths: includeRetentionPaths,
+                    RetentionPathLimit: retentionPathLimit,
+                    IncludeStaticFields: includeStaticFields,
+                    IncludeDelegateTargets: includeDelegateTargets,
+                    IncludeDuplicateStrings: includeDuplicateStrings),
+                cancellationToken).ConfigureAwait(false);
 
-        // Dump-origin snapshots refer to a PID that may not be alive (or may be reused) on this
-        // host — opt out of process-exit eviction so the handle survives its full 10-min TTL.
-        var handle = handles.Register(snapshot.ProcessId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl, evictWhenProcessExits: false);
-        var inspection = snapshot.ToDumpInspection(topTypes, handle.Id);
+            var handle = handles.Register(snapshot.ProcessId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl, evictWhenProcessExits: false);
+            var inspection = snapshot.ToDumpInspection(topTypes, handle.Id);
 
-        var topByBytes = inspection.TopTypesByBytes;
-        var summary = topByBytes.Count == 0
-            ? $"Inspected {dumpFilePath} — runtime {inspection.Runtime.Name} {inspection.Runtime.Version}, heap walk produced no objects. Snapshot handle: `{handle.Id}`."
-            : $"Inspected {dumpFilePath} — heap {inspection.Heap.TotalBytes:N0} bytes; top retained type: `{topByBytes[0].TypeFullName}` ({topByBytes[0].TotalBytesPercent}% / {topByBytes[0].InstanceCount:N0} instances). Snapshot handle: `{handle.Id}`.";
+            var topByBytes = inspection.TopTypesByBytes;
+            var summary = topByBytes.Count == 0
+                ? $"Inspected {dumpFilePath} — runtime {inspection.Runtime.Name} {inspection.Runtime.Version}, heap walk produced no objects. Snapshot handle: `{handle.Id}`."
+                : $"Inspected {dumpFilePath} — heap {inspection.Heap.TotalBytes:N0} bytes; top retained type: `{topByBytes[0].TypeFullName}` ({topByBytes[0].TotalBytesPercent}% / {topByBytes[0].InstanceCount:N0} instances). Snapshot handle: `{handle.Id}`.";
 
-        var hint = BuildHeapDrilldownHint(handle.Id, topByBytes);
-        return hint is null
-            ? DiagnosticResult.Ok(inspection, summary)
-            : DiagnosticResult.Ok(inspection, summary, hint);
+            var hint = BuildHeapDrilldownHint(handle.Id, topByBytes);
+            return hint is null
+                ? DiagnosticResult.Ok(inspection, summary)
+                : DiagnosticResult.Ok(inspection, summary, hint);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     private static readonly TimeSpan HeapSnapshotHandleTtl = TimeSpan.FromMinutes(10);
@@ -653,29 +657,32 @@ public sealed class DiagnosticTools
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         CancellationToken cancellationToken = default)
     {
-        var snapshot = await inspector.InspectLiveAsync(
-            processId,
-            new DumpInspectionOptions(
-                TopTypes: topTypes,
-                IncludeRetentionPaths: includeRetentionPaths,
-                RetentionPathLimit: retentionPathLimit,
-                IncludeStaticFields: includeStaticFields,
-                IncludeDelegateTargets: includeDelegateTargets,
-                IncludeDuplicateStrings: includeDuplicateStrings),
-            cancellationToken).ConfigureAwait(false);
+        return await GuardAttachAsync("inspect_live_heap", processId, async () =>
+        {
+            var snapshot = await inspector.InspectLiveAsync(
+                processId,
+                new DumpInspectionOptions(
+                    TopTypes: topTypes,
+                    IncludeRetentionPaths: includeRetentionPaths,
+                    RetentionPathLimit: retentionPathLimit,
+                    IncludeStaticFields: includeStaticFields,
+                    IncludeDelegateTargets: includeDelegateTargets,
+                    IncludeDuplicateStrings: includeDuplicateStrings),
+                cancellationToken).ConfigureAwait(false);
 
-        var handle = handles.Register(processId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl);
-        var inspection = snapshot.ToLiveHeapInspection(topTypes, handle.Id);
+            var handle = handles.Register(processId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl);
+            var inspection = snapshot.ToLiveHeapInspection(topTypes, handle.Id);
 
-        var topByBytes = inspection.TopTypesByBytes;
-        var summary = topByBytes.Count == 0
-            ? $"Attached to pid {processId} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — runtime {inspection.Runtime.Name} {inspection.Runtime.Version}, heap walk produced no objects. Snapshot handle: `{handle.Id}`."
-            : $"Attached to pid {processId} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — heap {inspection.Heap.TotalBytes:N0} bytes; top retained type: `{topByBytes[0].TypeFullName}` ({topByBytes[0].TotalBytesPercent}% / {topByBytes[0].InstanceCount:N0} instances). Snapshot handle: `{handle.Id}`.";
+            var topByBytes = inspection.TopTypesByBytes;
+            var summary = topByBytes.Count == 0
+                ? $"Attached to pid {processId} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — runtime {inspection.Runtime.Name} {inspection.Runtime.Version}, heap walk produced no objects. Snapshot handle: `{handle.Id}`."
+                : $"Attached to pid {processId} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — heap {inspection.Heap.TotalBytes:N0} bytes; top retained type: `{topByBytes[0].TypeFullName}` ({topByBytes[0].TotalBytesPercent}% / {topByBytes[0].InstanceCount:N0} instances). Snapshot handle: `{handle.Id}`.";
 
-        var hint = BuildHeapDrilldownHint(handle.Id, topByBytes);
-        return hint is null
-            ? DiagnosticResult.Ok(inspection, summary)
-            : DiagnosticResult.Ok(inspection, summary, hint);
+            var hint = BuildHeapDrilldownHint(handle.Id, topByBytes);
+            return hint is null
+                ? DiagnosticResult.Ok(inspection, summary)
+                : DiagnosticResult.Ok(inspection, summary, hint);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     [McpServerTool(
@@ -953,40 +960,43 @@ public sealed class DiagnosticTools
         if (maxFramesPerThread < 1) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), "must be >= 1");
         if (maxFramesPerThread > ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), $"must be <= {ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap} (bounds the live-attach suspend window)");
 
-        var opts = new ThreadSnapshotOptions(maxFramesPerThread, includeRuntimeFrames, includeNativeFrames);
-        ThreadSnapshotArtifact snapshot;
-        bool evictOnExit;
-        if (hasPid)
+        return await GuardAttachAsync("collect_thread_snapshot", processId, async () =>
         {
-            snapshot = await inspector.InspectLiveAsync(processId!.Value, opts, cancellationToken).ConfigureAwait(false);
-            evictOnExit = true;
-        }
-        else
-        {
-            snapshot = await inspector.InspectDumpAsync(dumpFilePath!, opts, cancellationToken).ConfigureAwait(false);
-            evictOnExit = false;
-        }
+            var opts = new ThreadSnapshotOptions(maxFramesPerThread, includeRuntimeFrames, includeNativeFrames);
+            ThreadSnapshotArtifact snapshot;
+            bool evictOnExit;
+            if (hasPid)
+            {
+                snapshot = await inspector.InspectLiveAsync(processId!.Value, opts, cancellationToken).ConfigureAwait(false);
+                evictOnExit = true;
+            }
+            else
+            {
+                snapshot = await inspector.InspectDumpAsync(dumpFilePath!, opts, cancellationToken).ConfigureAwait(false);
+                evictOnExit = false;
+            }
 
-        var handle = handles.Register(snapshot.ProcessId, ThreadSnapshotKind, snapshot, ThreadSnapshotHandleTtl, evictWhenProcessExits: evictOnExit);
-        var origin = snapshot.Origin.ToString().ToLowerInvariant();
-        var blocked = snapshot.Threads.Count(t => t.IsLikelyBlocked);
-        var contended = snapshot.Locks.Count(l => l.IsContended);
-        var summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
-        var summaryView = new ThreadSnapshotQueryResult(handle.Id, "threads-summary", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
-        {
-            Threads = snapshot.Threads.Take(25).ToArray(),
-            Locks = snapshot.Locks.Take(25).ToArray(),
-        };
+            var handle = handles.Register(snapshot.ProcessId, ThreadSnapshotKind, snapshot, ThreadSnapshotHandleTtl, evictWhenProcessExits: evictOnExit);
+            var origin = snapshot.Origin.ToString().ToLowerInvariant();
+            var blocked = snapshot.Threads.Count(t => t.IsLikelyBlocked);
+            var contended = snapshot.Locks.Count(l => l.IsContended);
+            var summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
+            var summaryView = new ThreadSnapshotQueryResult(handle.Id, "threads-summary", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
+            {
+                Threads = snapshot.Threads.Take(25).ToArray(),
+                Locks = snapshot.Locks.Take(25).ToArray(),
+            };
 
-        var hint = blocked > 0 || contended > 0
-            ? new NextActionHint("query_thread_snapshot",
-                "Drill into the top blocked threads or the contended lock graph.",
-                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "top-blocked" })
-            : null;
+            var hint = blocked > 0 || contended > 0
+                ? new NextActionHint("query_thread_snapshot",
+                    "Drill into the top blocked threads or the contended lock graph.",
+                    new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "top-blocked" })
+                : null;
 
-        return hint is null
-            ? DiagnosticResult.Ok(summaryView, summary)
-            : DiagnosticResult.Ok(summaryView, summary, hint);
+            return hint is null
+                ? DiagnosticResult.Ok(summaryView, summary)
+                : DiagnosticResult.Ok(summaryView, summary, hint);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     [McpServerTool(
@@ -1384,6 +1394,82 @@ public sealed class DiagnosticTools
             $"Argument '{parameterName}' {requirement}.",
             new DiagnosticError("InvalidArgument", $"Argument '{parameterName}' {requirement}.", parameterName),
             new NextActionHint("get_diagnostic_capabilities", "Re-issue with valid arguments. See tool schema for ranges and defaults."));
+
+    /// <summary>
+    /// Wraps a tool body that attaches to a live process via ClrMD / EventPipe / dotnet-diagnostics
+    /// and translates known failure shapes into a structured <see cref="DiagnosticResult{T}"/>.
+    /// Without this, uncaught exceptions hit the MCP SDK envelope and the client only sees
+    /// "An error occurred invoking 'X'." — leaving the LLM blind to PTRACE/permission/process-exit
+    /// distinctions. See #32.
+    /// </summary>
+    private static async Task<DiagnosticResult<T>> GuardAttachAsync<T>(
+        string tool,
+        int? processId,
+        Func<Task<DiagnosticResult<T>>> body,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await body().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return ClassifyAttachFailure<T>(tool, processId, ex);
+        }
+    }
+
+    private static DiagnosticResult<T> ClassifyAttachFailure<T>(string tool, int? processId, Exception ex)
+    {
+        var typeName = ex.GetType().FullName ?? ex.GetType().Name;
+        var message = ex.Message ?? "(no message)";
+        var pidHint = processId is int p && p > 0 ? $" (pid {p})" : string.Empty;
+
+        if (ex is ServerNotAvailableException)
+        {
+            return DiagnosticResult.Fail<T>(
+                $"{tool} could not reach the diagnostic socket{pidHint}.",
+                new DiagnosticError("EndpointUnavailable", message, typeName),
+                new NextActionHint("list_dotnet_processes", "Re-list processes. Common cause: sidecar UID mismatch with target, or process has exited."));
+        }
+
+        // ClrMD wraps Linux ptrace failures (errno EPERM/ESRCH) in ClrDiagnosticsException.
+        // Match on type-name-suffix to avoid taking a hard reference here.
+        var isPtraceFailure = (typeName.EndsWith("ClrDiagnosticsException", StringComparison.Ordinal)
+                               && (message.Contains("PTRACE", StringComparison.OrdinalIgnoreCase)
+                                   || message.Contains("permission", StringComparison.OrdinalIgnoreCase)))
+                              || (ex is System.ComponentModel.Win32Exception w32 && w32.NativeErrorCode == 1 /* EPERM */);
+        if (isPtraceFailure)
+        {
+            return DiagnosticResult.Fail<T>(
+                $"{tool} could not attach{pidHint}: ptrace was denied. On Linux check kernel.yama.ptrace_scope, CAP_SYS_PTRACE on the sidecar, and that the MCP server runs as the target's UID.",
+                new DiagnosticError("PermissionDenied", message, typeName),
+                new NextActionHint("inspect_dump", "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
+                    processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null));
+        }
+
+        if (ex is UnauthorizedAccessException)
+        {
+            return DiagnosticResult.Fail<T>(
+                $"{tool} was denied access{pidHint}.",
+                new DiagnosticError("PermissionDenied", message, typeName),
+                new NextActionHint("list_dotnet_processes", "Verify the MCP server runs as the same UID as the target process."));
+        }
+
+        if (ex is ArgumentException or InvalidOperationException)
+        {
+            return DiagnosticResult.Fail<T>(
+                $"{tool} rejected the request{pidHint}: {message}",
+                new DiagnosticError("InvalidArgument", message, typeName));
+        }
+
+        return DiagnosticResult.Fail<T>(
+            $"{tool} failed{pidHint}: {message}",
+            new DiagnosticError("Internal", message, typeName));
+    }
 }
 
 /// <summary>Tool-facing projection of a <see cref="DotnetDiagnosticsMcp.Core.Jobs.CollectionJobSnapshot"/>.</summary>
