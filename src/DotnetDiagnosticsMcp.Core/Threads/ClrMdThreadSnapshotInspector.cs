@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -16,7 +17,11 @@ namespace DotnetDiagnosticsMcp.Core.Threads;
 public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
 {
     private readonly ILogger<ClrMdThreadSnapshotInspector> _logger;
-    private readonly Dictionary<string, Guid?> _mvidCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Guid?> _mvidCache = new(StringComparer.Ordinal);
+
+    /// <summary>Hard upper bound on captured frames per thread regardless of the caller's request.
+    /// Bounds the live-attach suspend window + allocation footprint (review wave-2 finding).</summary>
+    public const int MaxFramesPerThreadHardCap = 512;
 
     public ClrMdThreadSnapshotInspector(ILogger<ClrMdThreadSnapshotInspector>? logger = null)
     {
@@ -54,6 +59,10 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
         if (opts.MaxFramesPerThread <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(opts), "MaxFramesPerThread must be positive.");
+        }
+        if (opts.MaxFramesPerThread > MaxFramesPerThreadHardCap)
+        {
+            throw new ArgumentOutOfRangeException(nameof(opts), $"MaxFramesPerThread must be <= {MaxFramesPerThreadHardCap} (bounds the live-attach suspend window).");
         }
     }
 
@@ -162,13 +171,20 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
 
     private List<ManagedStackFrame> WalkStack(ClrThread t, ThreadSnapshotOptions opts)
     {
-        var frames = new List<ManagedStackFrame>(opts.MaxFramesPerThread);
+        // Capacity bounded independently of the (already-validated) request to keep the live-attach
+        // allocation footprint small even when callers ask for the hard cap and most threads have
+        // shallow stacks.
+        var frames = new List<ManagedStackFrame>(Math.Min(opts.MaxFramesPerThread, 64));
         foreach (var f in t.EnumerateStackTrace())
         {
             var kind = f.Kind.ToString();
-            var isRuntime = f.Kind != ClrStackFrameKind.ManagedMethod;
-            if (isRuntime && !opts.IncludeRuntimeFrames && f.Method is null) continue;
-            if (f.Method is null && !opts.IncludeNativeFrames && !opts.IncludeRuntimeFrames) continue;
+            // ClrStackFrameKind in 3.x: ManagedMethod / Runtime / Unknown.
+            // - ManagedMethod: always kept.
+            // - Runtime (CLR helpers, transition stubs): gated by IncludeRuntimeFrames.
+            // - Unknown / unresolved native trampolines (Method is null and kind != ManagedMethod):
+            //   gated by IncludeNativeFrames (independent of IncludeRuntimeFrames).
+            if (f.Kind == ClrStackFrameKind.Runtime && !opts.IncludeRuntimeFrames) continue;
+            if (f.Kind != ClrStackFrameKind.ManagedMethod && f.Method is null && !opts.IncludeNativeFrames) continue;
 
             var method = f.Method;
             var display = method?.Signature ?? method?.Name ?? f.FrameName ?? "<unknown>";
