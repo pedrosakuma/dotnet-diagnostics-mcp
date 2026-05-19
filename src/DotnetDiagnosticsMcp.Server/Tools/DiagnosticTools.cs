@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Capabilities;
+using DotnetDiagnosticsMcp.Core.Collection;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Dump;
@@ -158,6 +159,7 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<CounterSnapshot>> SnapshotCounters(
         ICounterCollector collector,
         IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 5.")] int durationSeconds = 5,
         [Description("Optional list of EventCounter provider names to subscribe to. " +
@@ -194,10 +196,16 @@ public sealed class DiagnosticTools
             : new NextActionHint("collect_gc_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
-        var ok = DiagnosticResult.Ok(
+        var handle = handles.Register(pid, CollectionHandleKinds.Counters, snapshot, CollectionHandleTtl);
+        var ok = DiagnosticResult.OkWithHandle(
             snapshot,
             $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.",
-            hint);
+            handle.Id,
+            handle.ExpiresAt,
+            hint,
+            new NextActionHint("query_collection",
+                "Drill into this counter snapshot without re-collecting (views: summary, byProvider).",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byProvider" }));
         return WithContext(ok, resolved.Context);
     }
 
@@ -381,6 +389,88 @@ public sealed class DiagnosticTools
 
     private static readonly TimeSpan CpuSampleHandleTtl = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// Default TTL applied to handles emitted by every windowed collector (counters, exceptions,
+    /// GC events, EventSource captures). Aligned with the other drill-down kinds so the LLM has
+    /// a single mental model: collect once, drill many times within ~10 minutes.
+    /// </summary>
+    private static readonly TimeSpan CollectionHandleTtl = TimeSpan.FromMinutes(10);
+
+    [McpServerTool(
+        Name = "query_collection",
+        Title = "Drill into a previously-collected artifact",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Re-projects a previously-collected counter/exception/GC/EventSource artifact under a " +
+        "named view, without re-running the underlying EventPipe session. Use the `handle` " +
+        "returned by snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source. " +
+        "Supported views per kind: counters → summary|byProvider; exception-snapshot → " +
+        "summary|byType|recent; gc-events → summary|events|pauseHistogram; event-source → " +
+        "summary|byEventName|events. Handles expire ~10 minutes after collection.")]
+    public static DiagnosticResult<CollectionQueryResult> QueryCollection(
+        IDiagnosticHandleStore handles,
+        [Description("Handle returned by a prior collection tool (snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source).")] string handle,
+        [Description("View name (kind-dependent). Defaults to 'summary'.")] string? view = null,
+        [Description("Cap on inline items for paginated views (recent / events / byType / byEventName). Must be >= 1. Defaults to 50.")] int topN = 50)
+    {
+        if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CollectionQueryResult>(nameof(handle), "is required");
+        if (topN < 1) return InvalidArg<CollectionQueryResult>(nameof(topN), "must be >= 1");
+
+        var entry = handles.TryGetWithKind(handle);
+        if (entry is null)
+        {
+            return DiagnosticResult.Fail<CollectionQueryResult>(
+                $"Handle '{handle}' is unknown or expired.",
+                new DiagnosticError(
+                    "HandleExpired",
+                    "Collection handles live ~10min and are invalidated when the target process exits.",
+                    handle),
+                new NextActionHint("snapshot_counters", "Re-run the original collector on the same pid to issue a fresh handle.", null));
+        }
+
+        var outcome = CollectionQueryDispatcher.Dispatch(entry.Value.Kind, view, entry.Value.Artifact, topN);
+
+        if (outcome.UnknownKind is not null)
+        {
+            return DiagnosticResult.Fail<CollectionQueryResult>(
+                $"Handle '{handle}' is of kind '{outcome.UnknownKind}' which query_collection does not support.",
+                new DiagnosticError(
+                    "UnsupportedHandleKind",
+                    $"query_collection dispatches over kinds: {string.Join(", ", new[] { CollectionHandleKinds.Counters, CollectionHandleKinds.ExceptionSnapshot, CollectionHandleKinds.GcEvents, CollectionHandleKinds.EventSource })}.",
+                    outcome.UnknownKind),
+                new NextActionHint("query_heap_snapshot", "Use the kind-specific drill-down tool for heap/thread/cpu handles.", null));
+        }
+        if (outcome.UnknownView is not null)
+        {
+            var allowed = outcome.AllowedViews ?? Array.Empty<string>();
+            return DiagnosticResult.Fail<CollectionQueryResult>(
+                $"View '{outcome.UnknownView}' is not defined for kind '{entry.Value.Kind}'.",
+                new DiagnosticError(
+                    "UnknownView",
+                    $"Allowed views: {string.Join(", ", allowed)}.",
+                    outcome.UnknownView),
+                new NextActionHint("query_collection", "Retry with one of the allowed views.",
+                    new Dictionary<string, object?> { ["handle"] = handle, ["view"] = allowed.Count > 0 ? allowed[0] : "summary" }));
+        }
+        if (outcome.InvalidArgument is not null)
+        {
+            return DiagnosticResult.Fail<CollectionQueryResult>(
+                $"Invalid argument: {outcome.InvalidArgument}.",
+                new DiagnosticError("InvalidArgument", outcome.InvalidArgument, nameof(topN)));
+        }
+
+        var result = outcome.Result!;
+        return DiagnosticResult.Ok(
+            result,
+            $"Rendered view '{result.View}' for kind '{result.Kind}' (collected {result.Duration.TotalSeconds:F1}s starting {result.StartedAt:HH:mm:ss}Z, pid {result.ProcessId}).",
+            new NextActionHint("query_collection",
+                $"Switch to another view: {string.Join(" | ", CollectionQueryDispatcher.ViewsFor(result.Kind))}.",
+                new Dictionary<string, object?> { ["handle"] = handle }));
+    }
+
     private static CallTreeNode? FindHighestRankedDescendant(CallTreeNode node, string substring)
     {
         CallTreeNode? best = null;
@@ -459,6 +549,7 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<ExceptionSnapshot>> CollectExceptions(
         IExceptionCollector collector,
         IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of individual exception details to return. Must be >= 1. Defaults to 100.")] int maxRecent = 100,
@@ -477,13 +568,23 @@ public sealed class DiagnosticTools
             ? $"No managed exceptions thrown in {durationSeconds}s. If you expected some, ensure the collection started before the workload."
             : $"{snap.TotalExceptions} exception(s) over {durationSeconds}s; most common: {topType?.ExceptionType} ({topType?.Count}).";
 
-        var hint = snap.TotalExceptions > 0
+        var primaryHint = snap.TotalExceptions > 0
             ? new NextActionHint("collect_event_source", "Subscribe to a domain-specific EventSource to correlate with the exception spikes.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 })
             : new NextActionHint("collect_gc_events", "No exception pressure — sweep GC events next.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
-        return WithContext(DiagnosticResult.Ok(snap, summary, hint), resolved.Context);
+        var handle = handles.Register(pid, CollectionHandleKinds.ExceptionSnapshot, snap, CollectionHandleTtl);
+        return WithContext(DiagnosticResult.OkWithHandle(
+            snap,
+            summary,
+            handle.Id,
+            handle.ExpiresAt,
+            primaryHint,
+            new NextActionHint("query_collection",
+                "Drill into this exception snapshot without re-collecting (views: summary, byType, recent).",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byType", ["topN"] = 20 })),
+            resolved.Context);
     }
 
     [McpServerTool(
@@ -500,6 +601,7 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<GcSummary>> CollectGcEvents(
         IGcCollector collector,
         IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of GC events to return. Must be >= 1. Defaults to 200.")] int maxEvents = 200,
@@ -517,14 +619,24 @@ public sealed class DiagnosticTools
             ? $"No GC activity in {durationSeconds}s — heap is quiet or the workload is idle."
             : $"{gc.TotalCollections} collection(s), max pause {gc.MaxPauseTime.TotalMilliseconds:F1}ms, total pause {gc.TotalPauseTime.TotalMilliseconds:F1}ms.";
 
-        var hint = gc.MaxPauseTime.TotalMilliseconds > 100
+        var primaryHint = gc.MaxPauseTime.TotalMilliseconds > 100
             ? new NextActionHint("collect_process_dump",
                 $"Max GC pause {gc.MaxPauseTime.TotalMilliseconds:F0}ms is high — capture a WithHeap dump for offline heap analysis.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["dumpType"] = "WithHeap" })
             : new NextActionHint("collect_event_source", "GC looks healthy — pivot to a domain EventSource (e.g. System.Net.Http) for application-level signal.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 });
 
-        return WithContext(DiagnosticResult.Ok(gc, summary, hint), resolved.Context);
+        var handle = handles.Register(pid, CollectionHandleKinds.GcEvents, gc, CollectionHandleTtl);
+        return WithContext(DiagnosticResult.OkWithHandle(
+            gc,
+            summary,
+            handle.Id,
+            handle.ExpiresAt,
+            primaryHint,
+            new NextActionHint("query_collection",
+                "Drill into these GC events without re-collecting (views: summary, events, pauseHistogram).",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "pauseHistogram" })),
+            resolved.Context);
     }
 
     [McpServerTool(
@@ -542,6 +654,7 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<EventSourceCapture>> CollectEventSource(
         IEventSourceCollector collector,
         IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
         [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'.")] string providerName,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the capture window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
@@ -565,9 +678,17 @@ public sealed class DiagnosticTools
             ? $"No events from '{providerName}' in {durationSeconds}s. Verify the provider name and that it's actually instrumented in the target."
             : $"Captured {capture.Events.Count} event(s) from '{providerName}' over {durationSeconds}s.";
 
-        return WithContext(DiagnosticResult.Ok(capture, summary,
+        var handle = handles.Register(pid, CollectionHandleKinds.EventSource, capture, CollectionHandleTtl);
+        return WithContext(DiagnosticResult.OkWithHandle(
+            capture,
+            summary,
+            handle.Id,
+            handle.ExpiresAt,
             new NextActionHint("snapshot_counters", "Cross-check captured events against runtime counters for the same window.",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds })),
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }),
+            new NextActionHint("query_collection",
+                "Drill into this capture without re-collecting (views: summary, byEventName, events).",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byEventName" })),
             resolved.Context);
     }
 

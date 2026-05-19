@@ -62,6 +62,24 @@ public sealed class MemoryDiagnosticHandleStore : IDiagnosticHandleStore
         return entry.Artifact as T;
     }
 
+    public HandleLookup? TryGetWithKind(string handle)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(handle);
+        if (!_entries.TryGetValue(handle, out var entry))
+        {
+            return null;
+        }
+
+        if (entry.Handle.ExpiresAt <= _clock.GetUtcNow())
+        {
+            _entries.TryRemove(handle, out _);
+            DisposeIfNeeded(entry.Artifact);
+            return null;
+        }
+
+        return new HandleLookup(entry.Handle, entry.Artifact);
+    }
+
     public bool Invalidate(string handle)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(handle);

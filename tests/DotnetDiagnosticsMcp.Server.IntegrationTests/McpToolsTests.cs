@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Capabilities;
+using DotnetDiagnosticsMcp.Core.Collection;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Dump;
@@ -51,7 +52,8 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "export_investigation_summary",
             "compare_to_baseline",
             "get_collection_status",
-            "cancel_collection");
+            "cancel_collection",
+            "query_collection");
 
         // Tools that historically required `processId` are now bootstrap-implicit (issue #42):
         // when omitted the server auto-selects the lone .NET process visible to it. The only
@@ -80,6 +82,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["compare_to_baseline"] = new[] { "baselineSummaryJson", "currentSummaryJson" },
             ["get_collection_status"] = new[] { "handle" },
             ["cancel_collection"] = new[] { "handle" },
+            ["query_collection"] = new[] { "handle" },
         };
 
         // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
@@ -101,6 +104,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "resolveSourceLines", "symbolPath", "maxResolvedSources",
             "topTypes", "includeRetentionPaths", "retentionPathLimit",
             "runAsJob",
+            "view",
         };
 
         foreach (var tool in tools)
@@ -487,6 +491,65 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 // best effort cleanup
             }
         }
+    }
+
+    [Fact]
+    public async Task QueryCollection_ReturnsHandleExpiredErrorForUnknownHandle()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "query_collection",
+            new Dictionary<string, object?>
+            {
+                ["handle"] = "DEADBEEFDEADBEEFDEAD",
+                ["view"] = "summary",
+            },
+            cancellationToken: CancellationToken.None);
+
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error.Should().NotBeNull("an unknown handle must surface a structured DiagnosticError");
+        envelope.Error!.Kind.Should().Be("HandleExpired");
+        envelope.Hints.Should().NotBeEmpty();
+    }
+
+    [Fact]
+    public async Task QueryCollection_DrillsIntoCollectExceptionsHandle()
+    {
+        await using var client = await ConnectAsync();
+
+        var collectResult = await client.CallToolAsync(
+            "collect_exceptions",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 2,
+                ["maxRecent"] = 10,
+            },
+            cancellationToken: CancellationToken.None);
+
+        collectResult.IsError.Should().NotBe(true);
+        var collectEnvelope = DeserializeEnvelope(collectResult);
+        collectEnvelope!.Handle.Should().NotBeNullOrWhiteSpace(
+            "every windowed collector must emit a handle so query_collection can drill (issue #43)");
+
+        var queryResult = await client.CallToolAsync(
+            "query_collection",
+            new Dictionary<string, object?>
+            {
+                ["handle"] = collectEnvelope.Handle!,
+                ["view"] = "byType",
+                ["topN"] = 25,
+            },
+            cancellationToken: CancellationToken.None);
+
+        queryResult.IsError.Should().NotBe(true);
+        var queried = DeserializeStructured<CollectionQueryResult>(queryResult);
+        queried.Should().NotBeNull();
+        queried!.Kind.Should().Be(CollectionHandleKinds.ExceptionSnapshot);
+        queried.View.Should().Be("byType");
+        queried.ProcessId.Should().Be(Environment.ProcessId);
     }
 
     [Fact]

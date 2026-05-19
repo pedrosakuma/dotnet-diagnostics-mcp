@@ -67,6 +67,43 @@ context window. Each prompt embeds the hypothesis tree from the playbook plus
 exact tool-call examples (with placeholder args reflecting bootstrap implícito).
 The LLM may always ignore a prompt and drive ad-hoc.
 
+### Handle chaining nos coletores (`query_collection`)
+
+Os 4 coletores windowed — `snapshot_counters`, `collect_exceptions`,
+`collect_gc_events`, `collect_event_source` — devolvem, junto do summary +
+top-N inline, um `handle` opaco (Crockford-base32, TTL ~10 min) registrado num
+store em memória. A LLM pode então re-projetar o mesmo artefato sob outra
+visão **sem rodar o EventPipe de novo** chamando `query_collection`:
+
+```jsonc
+// 1. coleta uma vez
+collect_exceptions(processId=4242, durationSeconds=10)
+  → { summary: "30 exceptions (3 types)", handle: "01H...XY", data: { … top-N } }
+
+// 2. drilldown N vezes dentro da janela TTL
+query_collection(handle="01H...XY", view="recent", topN=20)
+query_collection(handle="01H...XY", view="byType")
+```
+
+Visões disponíveis por `kind`:
+
+| Kind (`CollectionHandleKinds`) | Emitido por | Views aceitas |
+|---|---|---|
+| `counters` | `snapshot_counters` | `summary` (default), `byProvider` |
+| `exception-snapshot` | `collect_exceptions` | `summary` (default = `byType.Take(topN)`), `byType`, `recent` |
+| `gc-events` | `collect_gc_events` | `summary` (default), `events`, `pauseHistogram` |
+| `event-source` | `collect_event_source` | `summary` (default), `byEventName`, `events` |
+
+Handles invalidam quando: o TTL expira, o processo alvo morre (evicção
+automática), ou um restart do server zera o store. Acesso a handle
+desconhecido devolve `DiagnosticError { Kind: "HandleExpired" }` com um
+`NextActionHint` apontando o coletor original.
+
+Esse contrato é o equivalente "split collector, unified drilldown"
+(documentado em [`AGENTS.md`](../AGENTS.md)) aplicado aos coletores EventPipe
+— mesmo padrão que `inspect_dump`/`inspect_live_heap` → `query_heap_snapshot`
+e `collect_thread_snapshot` → `query_thread_snapshot`.
+
 ## Quick index
 
 | Tool | Cost | Requires CoreCLR? | Side effects |
