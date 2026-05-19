@@ -53,7 +53,7 @@ public class PerfScriptParserTests
     [Fact]
     public void Aggregate_RanksHotspots_AndProducesCallTree()
     {
-        var (total, hotspots, root) = PerfNativeAotCpuSampler.Aggregate(TwoSamplesFromPid1, processId: 1, topN: 5);
+        var (total, hotspots, root, _) = PerfNativeAotCpuSampler.Aggregate(TwoSamplesFromPid1, processId: 1, topN: 5);
 
         total.Should().Be(2);
         hotspots.Should().NotBeEmpty();

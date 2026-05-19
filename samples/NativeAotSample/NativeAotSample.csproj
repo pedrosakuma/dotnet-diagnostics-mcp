@@ -7,6 +7,12 @@
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
     <EventSourceSupport>true</EventSourceSupport>
+    <!--
+      Diagnostics opt-in: keep ELF text symbols in the published binary so perf can resolve
+      managed frames (issue #29). Costs ~5MB binary size for a tiny webapi but unlocks the
+      NativeAOT CPU-sampling fallback path. NativeAOT defaults to StripSymbols=true.
+    -->
+    <StripSymbols>false</StripSymbols>
   </PropertyGroup>
 
   <ItemGroup>

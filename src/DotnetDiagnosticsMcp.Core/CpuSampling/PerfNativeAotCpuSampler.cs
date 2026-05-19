@@ -106,9 +106,9 @@ public sealed class PerfNativeAotCpuSampler : ICpuSampler
         {
             await RecordAsync(processId, perfDataPath, duration, cancellationToken).ConfigureAwait(false);
             var script = await RunScriptAsync(perfDataPath, cancellationToken).ConfigureAwait(false);
-            var (total, hotspots, root) = Aggregate(script, processId, topN);
+            var (total, hotspots, root, symbolSource) = Aggregate(script, processId, topN);
             var summary = new CpuSample(processId, startedAt, duration, total, hotspots);
-            var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root, null, null);
+            var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root, null, null, symbolSource);
             return new CpuSampleResult(summary, artifact);
         }
         finally
@@ -195,28 +195,37 @@ public sealed class PerfNativeAotCpuSampler : ICpuSampler
         return stdout;
     }
 
-    internal static (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root) Aggregate(
+    internal static (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root, NativeAotSymbolDemangler.SymbolSource SymbolSource) Aggregate(
         string perfScriptOutput, int processId, int topN)
     {
         var samples = PerfScriptParser.Parse(perfScriptOutput, processId);
         var inclusive = new Dictionary<string, long>(StringComparer.Ordinal);
         var exclusive = new Dictionary<string, long>(StringComparer.Ordinal);
         var modules = new Dictionary<string, string>(StringComparer.Ordinal);
+        var displayCache = new Dictionary<string, string>(StringComparer.Ordinal);
         var builder = new CallTreeBuilder();
         long total = 0;
+        var aggregatedSource = NativeAotSymbolDemangler.SymbolSource.Unknown;
 
         foreach (var sample in samples)
         {
             if (sample.Frames.Count == 0) continue;
             total++;
 
-            // perf prints leaf→root; reverse to root→leaf for tree traversal.
+            // perf prints leaf→root; reverse to root→leaf for tree traversal. Demangle each
+            // symbol once and cache so the hotspot map + call tree share identical display strings.
             var rootToLeaf = new List<(string Key, string Module, string Display)>(sample.Frames.Count);
             for (var i = sample.Frames.Count - 1; i >= 0; i--)
             {
                 var f = sample.Frames[i];
-                var key = string.IsNullOrEmpty(f.Module) ? f.Symbol : f.Module + "!" + f.Symbol;
-                rootToLeaf.Add((key, f.Module, f.Symbol));
+                aggregatedSource = NativeAotSymbolDemangler.Combine(aggregatedSource, NativeAotSymbolDemangler.Classify(f.Symbol));
+                if (!displayCache.TryGetValue(f.Symbol, out var demangled))
+                {
+                    demangled = NativeAotSymbolDemangler.Demangle(f.Symbol);
+                    displayCache[f.Symbol] = demangled;
+                }
+                var key = string.IsNullOrEmpty(f.Module) ? demangled : f.Module + "!" + demangled;
+                rootToLeaf.Add((key, f.Module, demangled));
                 modules.TryAdd(key, f.Module);
             }
 
@@ -255,7 +264,14 @@ public sealed class PerfNativeAotCpuSampler : ICpuSampler
             })
             .ToList();
 
-        return (total, hotspots, builder.Build());
+        // If any frame was demangled, promote the rolled-up label to ElfDemangled because
+        // the artifact now ships demangled strings even when individual frames were raw.
+        if (aggregatedSource == NativeAotSymbolDemangler.SymbolSource.ElfMangled && displayCache.Any(kv => kv.Key != kv.Value))
+        {
+            aggregatedSource = NativeAotSymbolDemangler.SymbolSource.ElfDemangled;
+        }
+
+        return (total, hotspots, builder.Build(), aggregatedSource);
     }
 
     private static void TryDelete(string path)

@@ -30,7 +30,8 @@ public sealed record CpuSampleTraceArtifact(
     long TotalSamples,
     CallTreeNode Root,
     IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? ResolvedSources = null,
-    IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>? MethodIdentities = null)
+    IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>? MethodIdentities = null,
+    NativeAotSymbolDemangler.SymbolSource SymbolSource = NativeAotSymbolDemangler.SymbolSource.Unknown)
 {
     public IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation> ResolvedSources { get; init; }
         = ResolvedSources ?? EmptyResolved;
