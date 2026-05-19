@@ -140,9 +140,12 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         var prompts = await client.ListPromptsAsync(cancellationToken: CancellationToken.None);
 
         prompts.Select(p => p.Name).Should().BeEquivalentTo(
-            "diagnose-slow-app",
+            "diagnose-high-latency",
             "diagnose-memory-growth",
-            "diagnose-exception-storm");
+            "diagnose-5xx-errors",
+            "diagnose-slow-outbound-http",
+            "triage-nativeaot",
+            "diagnose-safely-in-prod");
 
         foreach (var prompt in prompts)
         {
@@ -151,23 +154,78 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         }
     }
 
+    [Theory]
+    [InlineData("diagnose-high-latency")]
+    [InlineData("diagnose-memory-growth")]
+    [InlineData("diagnose-5xx-errors")]
+    [InlineData("diagnose-slow-outbound-http")]
+    [InlineData("triage-nativeaot")]
+    [InlineData("diagnose-safely-in-prod")]
+    public async Task GetPrompt_RendersWellFormedToolCalls_ForEveryPrompt(string promptName)
+    {
+        await using var client = await ConnectAsync();
+
+        foreach (var args in new[]
+        {
+            (Dictionary<string, object?>?)null,
+            new Dictionary<string, object?> { ["processId"] = 1234 },
+        })
+        {
+            var result = await client.GetPromptAsync(promptName, args, cancellationToken: CancellationToken.None);
+            var text = string.Join("\n", result.Messages
+                .Select(m => m.Content)
+                .OfType<ModelContextProtocol.Protocol.TextContentBlock>()
+                .Select(b => b.Text));
+
+            text.Should().NotContain(", )", $"prompt {promptName} (args={(args is null ? "null" : "pid=1234")}) must not render a trailing comma before close-paren");
+            text.Should().NotContain("(,", $"prompt {promptName} (args={(args is null ? "null" : "pid=1234")}) must not render a leading comma after open-paren");
+            text.Should().NotContain(",,", $"prompt {promptName} (args={(args is null ? "null" : "pid=1234")}) must not render a double comma");
+            text.Should().NotContain("{{", $"prompt {promptName} (args={(args is null ? "null" : "pid=1234")}) must not leak unescaped interpolation placeholders");
+        }
+    }
+
     [Fact]
-    public async Task GetPrompt_RendersDiagnoseSlowAppWithProcessId()
+    public async Task GetPrompt_RendersDiagnoseHighLatencyWithProcessId()
     {
         await using var client = await ConnectAsync();
 
         var result = await client.GetPromptAsync(
-            "diagnose-slow-app",
+            "diagnose-high-latency",
             new Dictionary<string, object?> { ["processId"] = 4242 },
             cancellationToken: CancellationToken.None);
 
         result.Messages.Should().NotBeEmpty();
+        var msg = result.Messages.Single();
+        msg.Role.Should().Be(ModelContextProtocol.Protocol.Role.User);
+
+        var block = msg.Content.Should().BeOfType<ModelContextProtocol.Protocol.TextContentBlock>().Subject;
+        block.Text.Should().Contain("4242", "prompt body must interpolate the supplied processId");
+        block.Text.Should().Contain("snapshot_counters", "prompt must steer the LLM through the standard tool chain");
+        block.Annotations.Should().NotBeNull("audience metadata must be present per issue #44");
+        block.Annotations!.Audience.Should().NotBeNull();
+        block.Annotations.Audience!.Should().Contain(ModelContextProtocol.Protocol.Role.Assistant,
+            "prompts target the LLM, not the human user");
+    }
+
+    [Fact]
+    public async Task GetPrompt_RendersDiagnoseHighLatencyWithoutProcessId()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.GetPromptAsync(
+            "diagnose-high-latency",
+            arguments: null,
+            cancellationToken: CancellationToken.None);
+
         var text = string.Join("\n", result.Messages
             .Select(m => m.Content)
             .OfType<ModelContextProtocol.Protocol.TextContentBlock>()
             .Select(b => b.Text));
-        text.Should().Contain("4242", "prompt body must interpolate the supplied processId");
-        text.Should().Contain("snapshot_counters", "prompt must steer the LLM through the standard tool chain");
+
+        text.Should().Contain("snapshot_counters(durationSeconds=",
+            "when processId is omitted the body must drop the processId argument so bootstrap implícito kicks in");
+        text.Should().NotContain("processId=",
+            "no processId placeholder must leak into the rendered playbook when none was supplied");
     }
 
     [Fact]

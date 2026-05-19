@@ -63,6 +63,14 @@ Azure (App Service + Container Apps) recipes: [`deploy/azure/README.md`](./deplo
 > entirely. On ambiguity / nothing visible you get a structured error with the
 > candidate list inline. See [issue #42](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/42).
 
+> **Prompts (curated playbooks).** The server also exposes 6 MCP Prompts that
+> pre-package the recipes in [`docs/investigation-playbooks.md`](./docs/investigation-playbooks.md):
+> `diagnose-high-latency`, `diagnose-memory-growth`, `diagnose-5xx-errors`,
+> `diagnose-slow-outbound-http`, `triage-nativeaot`, `diagnose-safely-in-prod`.
+> Every input is optional, every body is annotated for the LLM (`audience: ["assistant"]`).
+> See [issue #44](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/44) and the
+> [Prompts section in `docs/tool-reference.md`](./docs/tool-reference.md#prompts-curated-playbooks).
+
 ## Install (consumers)
 
 Three distributions of the MCP server, all wire-compatible. Pick whichever fits your environment best — see [`docs/consumer-install.md`](./docs/consumer-install.md) for the full walkthrough including supervisor templates (systemd, Windows Scheduled Task, launchd) and `mcp-config.json` snippets.
