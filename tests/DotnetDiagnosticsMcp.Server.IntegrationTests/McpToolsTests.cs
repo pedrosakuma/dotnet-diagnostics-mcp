@@ -55,7 +55,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "get_collection_status",
             "cancel_collection",
             "query_collection",
-            "get_container_signals");
+            "get_container_signals",
+            "collect_off_cpu_sample",
+            "query_off_cpu_snapshot");
 
         // Tools that historically required `processId` are now bootstrap-implicit (issue #42):
         // when omitted the server auto-selects the lone .NET process visible to it. The only
@@ -86,6 +88,8 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["cancel_collection"] = new[] { "handle" },
             ["query_collection"] = new[] { "handle" },
             ["get_container_signals"] = Array.Empty<string>(),
+            ["collect_off_cpu_sample"] = Array.Empty<string>(),
+            ["query_off_cpu_snapshot"] = new[] { "handle" },
         };
 
         // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
@@ -108,6 +112,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "topTypes", "includeRetentionPaths", "retentionPathLimit",
             "runAsJob",
             "view",
+            "stackRank",
         };
 
         foreach (var tool in tools)

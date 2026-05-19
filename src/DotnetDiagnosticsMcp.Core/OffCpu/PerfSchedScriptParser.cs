@@ -1,0 +1,241 @@
+using System.Globalization;
+
+namespace DotnetDiagnosticsMcp.Core.OffCpu;
+
+/// <summary>
+/// Parses textual <c>perf script</c> output of a sched event capture into pairs of
+/// (off-CPU span, blocking stack). Each sched_switch event is both an OUT for the
+/// previous task and an IN for the next; we maintain a per-TID pending-out map and
+/// close it on the next IN matching the same TID. The blocking stack belongs to the
+/// task going OUT, exactly what off-CPU profiling wants.
+/// </summary>
+/// <remarks>
+/// Supports both <c>perf script</c> trace formats seen in the wild:
+/// <list type="bullet">
+///   <item>Long form: <c>prev_comm=X prev_pid=N prev_prio=P prev_state=S ==&gt; next_comm=Y next_pid=M next_prio=Q</c>.</item>
+///   <item>Compact form (default on recent perf): <c>X:N [P] S ==&gt; Y:M [Q]</c>.</item>
+/// </list>
+/// Trailing state flags like <c>S+</c> (preempted while sleeping) collapse to their first letter.
+/// Events whose TID is not in <c>targetTids</c> are still consumed (they may close a pending out for
+/// a non-target task) but never emit spans.
+/// </remarks>
+internal static class PerfSchedScriptParser
+{
+    internal sealed record SchedEvent(double TimestampSeconds, string PrevComm, int PrevTid, string PrevState,
+        string NextComm, int NextTid, List<OffCpuFrame> Stack);
+
+    /// <summary>
+    /// Records every sched_switch event observed for any TID in <paramref name="targetTids"/>
+    /// and returns the closed off-CPU spans plus the total switch count that was attributed
+    /// to the target (used for capture-density sanity checks).
+    /// </summary>
+    public static (IReadOnlyList<OffCpuSpan> Spans, long SchedSwitches) Parse(string output, HashSet<int> targetTids)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(targetTids);
+
+        var lines = output.Split('\n');
+        // Per-TID pending OUT awaiting a matching IN.
+        var pending = new Dictionary<int, (double Ts, string State, List<OffCpuFrame> Stack, string Comm)>();
+        var spans = new List<OffCpuSpan>();
+        long switches = 0;
+
+        var i = 0;
+        while (i < lines.Length)
+        {
+            var raw = lines[i].TrimEnd('\r');
+            if (raw.Length == 0 || raw.StartsWith('#'))
+            {
+                i++;
+                continue;
+            }
+
+            var ev = TryParseHeader(raw);
+            if (ev is null)
+            {
+                i++;
+                continue;
+            }
+
+            // Collect stack frames (indented) until blank line or next event header.
+            i++;
+            while (i < lines.Length)
+            {
+                var line = lines[i].TrimEnd('\r');
+                if (line.Length == 0) { i++; break; }
+                // A line containing the sched_switch marker is the next event — let outer loop handle it.
+                if (line.Contains(" sched:sched_switch:", StringComparison.Ordinal)) break;
+                if (!char.IsWhiteSpace(line[0])) break;
+                var frame = ParseFrame(line);
+                if (frame is not null) ev.Stack.Add(frame);
+                i++;
+            }
+
+            var prevIsTarget = targetTids.Contains(ev.PrevTid);
+            var nextIsTarget = targetTids.Contains(ev.NextTid);
+
+            // IN side: close any pending OUT for the next task.
+            if (nextIsTarget && pending.Remove(ev.NextTid, out var pendingOut))
+            {
+                var durMicros = (long)Math.Max(0, Math.Round((ev.TimestampSeconds - pendingOut.Ts) * 1_000_000.0));
+                spans.Add(new OffCpuSpan(
+                    Tid: ev.NextTid,
+                    Comm: pendingOut.Comm,
+                    DurationMicros: durMicros,
+                    PrevState: pendingOut.State,
+                    BlockingStack: pendingOut.Stack));
+            }
+
+            // OUT side: register a new pending OUT for the prev task.
+            if (prevIsTarget)
+            {
+                switches++;
+                pending[ev.PrevTid] = (ev.TimestampSeconds, NormalizeState(ev.PrevState), ev.Stack, ev.PrevComm);
+            }
+        }
+
+        return (spans, switches);
+    }
+
+    private static string NormalizeState(string s)
+    {
+        // Strip suffixes like "+", "|", multiple flags. Keep just first state letter.
+        if (string.IsNullOrEmpty(s)) return "?";
+        return s[0].ToString();
+    }
+
+    private static SchedEvent? TryParseHeader(string line)
+    {
+        // Header skeleton:
+        //   <comm padded>  <tid> [cpu]  <timestamp>: sched:sched_switch: <payload>
+        // We anchor on the literal " sched:sched_switch:" so any prefix variance is tolerated.
+        const string Marker = " sched:sched_switch:";
+        var markerIdx = line.IndexOf(Marker, StringComparison.Ordinal);
+        if (markerIdx < 0) return null;
+
+        var prefix = line[..markerIdx];
+        var payload = line[(markerIdx + Marker.Length)..].Trim();
+
+        // Timestamp is the last numeric token in the prefix ending with ':'. Walk back.
+        var colonIdx = prefix.LastIndexOf(':');
+        if (colonIdx < 0) return null;
+        var beforeColon = prefix[..colonIdx];
+        var lastSpace = beforeColon.LastIndexOf(' ');
+        if (lastSpace < 0) return null;
+        var tsToken = beforeColon[(lastSpace + 1)..];
+        if (!double.TryParse(tsToken, NumberStyles.Float, CultureInfo.InvariantCulture, out var ts))
+        {
+            return null;
+        }
+
+        if (!TryParsePayload(payload, out var prevComm, out var prevTid, out var prevState,
+                out var nextComm, out var nextTid))
+        {
+            return null;
+        }
+
+        return new SchedEvent(ts, prevComm, prevTid, prevState, nextComm, nextTid, new List<OffCpuFrame>());
+    }
+
+    private static bool TryParsePayload(string payload, out string prevComm, out int prevTid, out string prevState,
+        out string nextComm, out int nextTid)
+    {
+        prevComm = string.Empty; prevTid = 0; prevState = "?";
+        nextComm = string.Empty; nextTid = 0;
+
+        // Long form: prev_comm=X prev_pid=N prev_prio=P prev_state=S ==> next_comm=Y next_pid=M next_prio=Q
+        if (payload.Contains("prev_pid=", StringComparison.Ordinal))
+        {
+            prevComm = ExtractKv(payload, "prev_comm=");
+            prevTid = ExtractKvInt(payload, "prev_pid=");
+            prevState = ExtractKv(payload, "prev_state=");
+            nextComm = ExtractKv(payload, "next_comm=");
+            nextTid = ExtractKvInt(payload, "next_pid=");
+            return prevTid != 0 || nextTid != 0;
+        }
+
+        // Compact form: X:N [P] S ==> Y:M [Q]
+        var arrow = payload.IndexOf("==>", StringComparison.Ordinal);
+        if (arrow < 0) return false;
+        var left = payload[..arrow].Trim();
+        var right = payload[(arrow + 3)..].Trim();
+        if (!TryParseCompactSide(left, out prevComm, out prevTid, out prevState)) return false;
+        if (!TryParseCompactSide(right, out nextComm, out nextTid, out _)) return false;
+        return true;
+    }
+
+    private static bool TryParseCompactSide(string s, out string comm, out int tid, out string state)
+    {
+        comm = string.Empty; tid = 0; state = "?";
+        // Form: <comm>:<tid> [<prio>] [<state>]
+        // State letter is optional on the next-side.
+        var colon = s.LastIndexOf(':');
+        if (colon < 0) return false;
+        comm = s[..colon];
+        var rest = s[(colon + 1)..].Trim();
+        var firstSpace = rest.IndexOf(' ');
+        var tidToken = firstSpace > 0 ? rest[..firstSpace] : rest;
+        if (!int.TryParse(tidToken, NumberStyles.Integer, CultureInfo.InvariantCulture, out tid)) return false;
+
+        // Scan remaining tokens for a single-letter state outside brackets.
+        if (firstSpace > 0)
+        {
+            foreach (var token in rest[(firstSpace + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (token.StartsWith('[')) continue;
+                state = token;
+                break;
+            }
+        }
+        return true;
+    }
+
+    private static string ExtractKv(string payload, string key)
+    {
+        var idx = payload.IndexOf(key, StringComparison.Ordinal);
+        if (idx < 0) return string.Empty;
+        var start = idx + key.Length;
+        var end = payload.IndexOf(' ', start);
+        if (end < 0) end = payload.Length;
+        return payload[start..end];
+    }
+
+    private static int ExtractKvInt(string payload, string key)
+    {
+        var s = ExtractKv(payload, key);
+        return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : 0;
+    }
+
+    private static OffCpuFrame? ParseFrame(string line)
+    {
+        // Indented: "    <hex addr> <symbol+offset> (<module>)" — same shape as the on-CPU parser.
+        var trimmed = line.TrimStart();
+        if (trimmed.Length == 0) return null;
+
+        var lastOpen = trimmed.LastIndexOf('(');
+        var lastClose = trimmed.LastIndexOf(')');
+        string module;
+        string symbolPart;
+        if (lastOpen >= 0 && lastClose > lastOpen)
+        {
+            module = trimmed.Substring(lastOpen + 1, lastClose - lastOpen - 1);
+            symbolPart = trimmed[..lastOpen].TrimEnd();
+        }
+        else
+        {
+            module = string.Empty;
+            symbolPart = trimmed;
+        }
+
+        var firstSpace = symbolPart.IndexOf(' ');
+        var symbol = firstSpace > 0 ? symbolPart[(firstSpace + 1)..].TrimStart() : symbolPart;
+        var plus = symbol.LastIndexOf("+0x", StringComparison.Ordinal);
+        if (plus > 0) symbol = symbol[..plus];
+
+        if (symbol.Length == 0) return null;
+        return new OffCpuFrame(Module: module, Method: symbol);
+    }
+}
+
+/// <summary>One paired off-CPU span: thread went OUT at <c>ts</c> with <c>BlockingStack</c>, came back IN <c>DurationMicros</c> µs later.</summary>
+internal sealed record OffCpuSpan(int Tid, string Comm, long DurationMicros, string PrevState, IReadOnlyList<OffCpuFrame> BlockingStack);

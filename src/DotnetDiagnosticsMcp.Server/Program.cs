@@ -38,6 +38,8 @@ builder.Services.AddSingleton<EventPipeCpuSampler>();
 builder.Services.AddSingleton<PerfNativeAotCpuSampler>();
 builder.Services.AddSingleton<EtwNativeAotCpuSampler>();
 builder.Services.AddSingleton<ICpuSampler, RoutingCpuSampler>();
+builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.OffCpu.PerfSchedOffCpuSampler>();
+builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.OffCpu.IOffCpuSampler, DotnetDiagnosticsMcp.Core.OffCpu.RoutingOffCpuSampler>();
 builder.Services.AddSingleton<IExceptionCollector, EventPipeExceptionCollector>();
 builder.Services.AddSingleton<IGcCollector, EventPipeGcCollector>();
 builder.Services.AddSingleton<IEventSourceCollector, EventPipeEventSourceCollector>();

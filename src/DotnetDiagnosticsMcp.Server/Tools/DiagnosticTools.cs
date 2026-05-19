@@ -12,6 +12,7 @@ using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Investigation;
 using DotnetDiagnosticsMcp.Core.Memory;
+using DotnetDiagnosticsMcp.Core.OffCpu;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Threads;
 using Microsoft.Diagnostics.NETCore.Client;
@@ -483,6 +484,164 @@ public sealed class DiagnosticTools
             summary,
             new NextActionHint("get_call_tree", "Drill deeper by anchoring at a specific method.",
                 new Dictionary<string, object?> { ["handle"] = handle, ["rootMethodFilter"] = "<method substring>", ["maxDepth"] = 6 }));
+    }
+
+    [McpServerTool(
+        Name = "collect_off_cpu_sample",
+        Title = "Collect off-CPU blocking stacks",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Captures off-CPU stacks for the target process — where threads are blocked, for how long, and on which " +
+        "kernel/user frame. Companion to collect_cpu_sample: on-CPU sampling shows hot code, off-CPU shows time " +
+        "spent waiting (futex, IO, sleep, lock). Closes the 'latency high, CPU low' diagnostic gap that on-CPU " +
+        "samples can't see by definition. " +
+        "Backend: Linux only in this release — runs 'perf record -a -e sched:sched_switch --call-graph dwarf' " +
+        "for durationSeconds. Requires the perf binary in PATH and CAP_PERFMON (or perf_event_paranoid <= -1). " +
+        "Windows ETW kernel CSwitch support tracked in issue #41 sub-slice 2b. " +
+        "Returns the top-N blocking stacks inline and a handle for query_off_cpu_snapshot drilldown.")]
+    public static async Task<DiagnosticResult<OffCpuSnapshot>> CollectOffCpuSample(
+        IOffCpuSampler sampler,
+        IDiagnosticHandleStore handles,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Maximum number of blocking stacks returned inline (the full set lives behind the handle). Defaults to 25.")] int topN = 25,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1) return InvalidArg<OffCpuSnapshot>(nameof(durationSeconds), "must be >= 1");
+        if (topN < 1) return InvalidArg<OffCpuSnapshot>(nameof(topN), "must be >= 1");
+
+        var resolved = await ResolveContextAsync<OffCpuSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
+        OffCpuSampleResult result;
+        try
+        {
+            result = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (NotSupportedException ex)
+        {
+            return DiagnosticResult.Fail<OffCpuSnapshot>(
+                ex.Message,
+                new DiagnosticError("NotSupported", ex.Message, ex.GetType().FullName),
+                new NextActionHint("get_diagnostic_capabilities",
+                    "Confirm which signals are available on this host before retrying.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("perf", StringComparison.OrdinalIgnoreCase)
+                                                   || ex.Message.Contains("CAP_", StringComparison.OrdinalIgnoreCase)
+                                                   || ex.Message.Contains("paranoid", StringComparison.OrdinalIgnoreCase))
+        {
+            return DiagnosticResult.Fail<OffCpuSnapshot>(
+                ex.Message,
+                new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
+                new NextActionHint("get_diagnostic_capabilities",
+                    "Check capability matrix; install linux-perf and add CAP_PERFMON to the sidecar securityContext.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+        }
+
+        var summary = result.Summary;
+        var handle = handles.Register(pid, OffCpuHandleKind, result.Artifact, CpuSampleHandleTtl);
+
+        var topStack = summary.TopBlockingStacks.Count > 0 ? summary.TopBlockingStacks[0] : null;
+        var summaryText = topStack is not null
+            ? $"Captured {summary.SchedSwitches} switches across {summary.DistinctThreads} threads over {durationSeconds}s. " +
+              $"Total off-CPU: {summary.TotalOffCpuMicros / 1000.0:F1} ms. " +
+              $"Top blocker: {topStack.LeafFrame} ({topStack.OffCpuMicros / 1000.0:F1} ms, state={topStack.DominantState}). " +
+              $"Drill with query_off_cpu_snapshot(handle=\"{handle.Id}\")."
+            : $"Captured {summary.SchedSwitches} switches but no off-CPU spans closed within the window. " +
+              "Either no thread blocked, or wakeups landed outside the capture — try a longer durationSeconds.";
+
+        var ok = DiagnosticResult.OkWithHandle(
+            summary,
+            summaryText,
+            handle.Id,
+            handle.ExpiresAt,
+            new NextActionHint("query_off_cpu_snapshot", "Drill into per-thread off-CPU view or a specific stack.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byThread" }),
+            new NextActionHint("collect_cpu_sample", "Cross-reference with on-CPU hotspots to separate compute from wait.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 }));
+        return WithContext(ok, resolved.Context);
+    }
+
+    /// <summary>Canonical kind tag for handles backing an <see cref="OffCpuSnapshotArtifact"/>.</summary>
+    public const string OffCpuHandleKind = "off-cpu-snapshot";
+
+    [McpServerTool(
+        Name = "query_off_cpu_snapshot",
+        Title = "Drill into an off-CPU snapshot",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Re-projects a prior collect_off_cpu_sample artifact under a named view, without re-running perf. " +
+        "Views: 'topStacks' (default — blocking stacks ranked by off-CPU micros), 'byThread' (per-TID rollup), " +
+        "'stack' (full root→leaf frames of a specific stack rank). Use the handle returned by collect_off_cpu_sample. " +
+        "Handles expire ~10 minutes after collection.")]
+    public static DiagnosticResult<OffCpuQueryView> QueryOffCpuSnapshot(
+        IDiagnosticHandleStore handles,
+        [Description("Handle returned by a prior collect_off_cpu_sample call.")] string handle,
+        [Description("View name: topStacks (default), byThread, stack.")] string view = "topStacks",
+        [Description("Maximum items returned for topStacks/byThread. Defaults to 25.")] int topN = 25,
+        [Description("Required when view='stack' — 1-based rank of the stack in the top-stacks list.")] int? stackRank = null)
+    {
+        if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<OffCpuQueryView>(nameof(handle), "is required");
+        if (topN < 1) return InvalidArg<OffCpuQueryView>(nameof(topN), "must be >= 1");
+
+        var artifact = handles.TryGet<OffCpuSnapshotArtifact>(handle);
+        if (artifact is null)
+        {
+            return DiagnosticResult.Fail<OffCpuQueryView>(
+                $"Handle '{handle}' is unknown or expired.",
+                new DiagnosticError("HandleExpired", "Off-CPU handles live ~10min and are invalidated when the target process exits.", handle),
+                new NextActionHint("collect_off_cpu_sample", "Re-run the off-CPU sampler to issue a fresh handle.",
+                    new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
+        }
+
+        return view.ToLowerInvariant() switch
+        {
+            "bythread" => DiagnosticResult.Ok(
+                new OffCpuQueryView(view, artifact.ProcessId, artifact.TotalOffCpuMicros,
+                    Stacks: null,
+                    Threads: artifact.Threads.Take(topN).ToList(),
+                    Stack: null),
+                $"{Math.Min(topN, artifact.Threads.Count)} of {artifact.Threads.Count} threads ranked by off-CPU micros."),
+            "stack" => RenderStack(artifact, stackRank),
+            "topstacks" or _ => DiagnosticResult.Ok(
+                new OffCpuQueryView(view, artifact.ProcessId, artifact.TotalOffCpuMicros,
+                    Stacks: artifact.Stacks.Take(topN).ToList(),
+                    Threads: null,
+                    Stack: null),
+                $"Top {Math.Min(topN, artifact.Stacks.Count)} blocking stacks of {artifact.Stacks.Count} distinct."),
+        };
+    }
+
+    private static DiagnosticResult<OffCpuQueryView> RenderStack(OffCpuSnapshotArtifact artifact, int? stackRank)
+    {
+        if (stackRank is null || stackRank < 1)
+        {
+            return InvalidArg<OffCpuQueryView>(nameof(stackRank), "is required for view='stack' and must be >= 1");
+        }
+        var idx = stackRank.Value - 1;
+        if (idx >= artifact.Stacks.Count)
+        {
+            return DiagnosticResult.Fail<OffCpuQueryView>(
+                $"stackRank={stackRank} exceeds available {artifact.Stacks.Count} stacks.",
+                new DiagnosticError("OutOfRange", "Pick a rank within the topStacks list.", stackRank.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                new NextActionHint("query_off_cpu_snapshot", "List the top stacks first.",
+                    new Dictionary<string, object?> { ["view"] = "topStacks" }));
+        }
+        var s = artifact.Stacks[idx];
+        return DiagnosticResult.Ok(
+            new OffCpuQueryView("stack", artifact.ProcessId, artifact.TotalOffCpuMicros,
+                Stacks: null, Threads: null, Stack: s),
+            $"Rank {stackRank}/{artifact.Stacks.Count}: {s.LeafFrame} — {s.OffCpuMicros / 1000.0:F1} ms across {s.OccurrenceCount} switches (state={s.DominantState}).");
     }
 
     private static readonly TimeSpan CpuSampleHandleTtl = TimeSpan.FromMinutes(10);

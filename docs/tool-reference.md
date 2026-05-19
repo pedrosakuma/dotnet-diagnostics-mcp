@@ -137,6 +137,34 @@ configurada → throttling é observável).
 NextActionHints: throttle > 5% sugere `collect_cpu_sample` direto; memória >
 85% do limite sugere `inspect_live_heap` antes do OOM-kill.
 
+### Off-CPU sampling (`collect_off_cpu_sample` + `query_off_cpu_snapshot`)
+
+Complementa o `collect_cpu_sample` (que mostra **on-CPU** — onde o app gasta
+tempo executando) com **off-CPU** — onde threads ficaram **bloqueadas**
+(I/O, locks, condvars, monitor wait). Resolve o blind-spot clássico "CPU baixa
+mas latência alta": sampling on-CPU não enxerga porque as threads não estão
+rodando.
+
+- **Linux:** usa `perf record -a -e sched:sched_switch --call-graph dwarf` em
+  todo o sistema (o tracepoint `sched_switch` só dispara na thread que sai de
+  CPU, então restringir por PID perde o evento de IN). Spans são filtrados
+  pós-coleta pelo `/proc/<pid>/task/*` do alvo. Requer `CAP_PERFMON` (kernel
+  ≥ 5.8) ou `perf_event_paranoid <= -1`, e `perf` instalado
+  (`linux-tools-common` / `linux-tools-$(uname -r)` no Debian/Ubuntu).
+- **Windows:** ainda não implementado (sub-slice 2b de
+  [#41](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/41) cobre
+  ETW kernel CSwitch + ReadyThread). Devolve `NotSupported` com hint.
+- **Managed↔kernel stack merge:** ainda não — frames são puramente nativos /
+  kernel. Sub-slice 2c.
+
+`collect_off_cpu_sample(pid, durationSeconds=10, topN=10)` devolve `{handle,
+summary, top}` com os stacks que mais tempo passaram off-CPU.
+`query_off_cpu_snapshot(handle, view, ...)` segue o padrão **split collector,
+unified drilldown**: `view="topStacks"` (default), `view="byThread"`
+(agregado por TID com `TopBlockingLeaf` + estado dominante), ou
+`view="stack"` com `stackRank=N` (1-based) pra exportar o stack completo.
+
+
 ## Quick index
 
 | Tool | Cost | Requires CoreCLR? | Side effects |
@@ -145,6 +173,8 @@ NextActionHints: throttle > 5% sugere `collect_cpu_sample` direto; memória >
 | [`get_process_info`](#get_process_info) | cheap | no | none |
 | [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) | ~2 s | no | opens a short EventPipe probe |
 | [`get_container_signals`](#get_container_signals) | cheap | no | reads `/sys/fs/cgroup` + `/proc` files |
+| `collect_off_cpu_sample` (Linux) | window-bound | no | system-wide `perf record -e sched:sched_switch` |
+| `query_off_cpu_snapshot` | cheap | no | drilldown on handle from `collect_off_cpu_sample` |
 | [`snapshot_counters`](#snapshot_counters) | window-bound | no | opens an EventPipe session |
 | [`collect_cpu_sample`](#collect_cpu_sample) | window-bound | **yes** | EventPipe + temp `.nettrace` on disk |
 | [`collect_exceptions`](#collect_exceptions) | window-bound | no | EventPipe session |
