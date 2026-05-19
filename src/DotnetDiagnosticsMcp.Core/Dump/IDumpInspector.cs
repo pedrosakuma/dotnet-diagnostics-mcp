@@ -46,13 +46,27 @@ public interface IDumpInspector
 /// <param name="SnapshotRetentionPathTargets">Number of distinct types for which to compute retention paths
 /// when <paramref name="IncludeRetentionPaths"/> is set. Defaults to 10.</param>
 /// <param name="SnapshotFinalizerQueueTopTypes">Number of types retained in the finalizer-queue drilldown view. Defaults to 50.</param>
+/// <param name="IncludeStaticFields">When true, enumerate every loaded type's static reference fields and rank by the size of the directly-referenced object (cheap proxy for retained bytes). Off by default (visits every AppDomain × Module × Type).</param>
+/// <param name="SnapshotStaticFieldTopN">Number of static-field entries retained for the static-fields drilldown view. Defaults to 100.</param>
+/// <param name="IncludeDelegateTargets">When true, detect MulticastDelegate instances during the heap walk and group their invocation-list entries by target type + method. Cheap (folded into the existing single heap pass).</param>
+/// <param name="SnapshotDelegateTargetTopN">Number of (target type, method) entries retained for the delegate-targets drilldown view. Defaults to 100.</param>
+/// <param name="IncludeDuplicateStrings">When true, hash every System.String during the heap walk and rank by aggregate retained bytes (count × char-bytes). Cheap (folded into the existing single heap pass) but allocates one hash per unique string.</param>
+/// <param name="SnapshotDuplicateStringTopN">Number of duplicate-string entries retained for the duplicate-strings drilldown view. Defaults to 100.</param>
+/// <param name="DuplicateStringPreviewLength">Maximum characters of each string preview returned by the duplicate-strings view. Defaults to 80.</param>
 public sealed record DumpInspectionOptions(
     int TopTypes = 20,
     int SnapshotTopTypes = 200,
     bool IncludeRetentionPaths = false,
     int RetentionPathLimit = 8,
     int SnapshotRetentionPathTargets = 10,
-    int SnapshotFinalizerQueueTopTypes = 50);
+    int SnapshotFinalizerQueueTopTypes = 50,
+    bool IncludeStaticFields = false,
+    int SnapshotStaticFieldTopN = 100,
+    bool IncludeDelegateTargets = false,
+    int SnapshotDelegateTargetTopN = 100,
+    bool IncludeDuplicateStrings = false,
+    int SnapshotDuplicateStringTopN = 100,
+    int DuplicateStringPreviewLength = 80);
 
 /// <summary>Where a <see cref="HeapSnapshotArtifact"/> came from.</summary>
 public enum HeapSnapshotOrigin
@@ -92,6 +106,12 @@ public sealed record HeapSnapshotArtifact(
     public IReadOnlyList<FinalizableTypeStat>? FinalizableObjectsByType { get; init; }
     /// <summary>Per-segment heap layout (gen, kind, length, committed, free bytes). Drives the fragmentation drilldown view.</summary>
     public IReadOnlyList<SegmentStat>? Segments { get; init; }
+    /// <summary>Top static reference fields ranked by the directly-referenced object size. Gated by <see cref="DumpInspectionOptions.IncludeStaticFields"/>.</summary>
+    public IReadOnlyList<StaticFieldStat>? StaticFields { get; init; }
+    /// <summary>Delegate / event-handler subscribers grouped by (target type, method). Gated by <see cref="DumpInspectionOptions.IncludeDelegateTargets"/>.</summary>
+    public IReadOnlyList<DelegateTargetStat>? DelegateTargets { get; init; }
+    /// <summary>Top duplicate strings by aggregate retained bytes. Gated by <see cref="DumpInspectionOptions.IncludeDuplicateStrings"/>.</summary>
+    public IReadOnlyList<DuplicateStringStat>? DuplicateStrings { get; init; }
     /// <summary>Diagnostic warnings emitted during the walk (degraded data, ClrMD limitations, …).</summary>
     public IReadOnlyList<string>? Warnings { get; init; }
 }
@@ -138,6 +158,53 @@ public sealed record SegmentStat(
     /// <summary>Free bytes as a percentage of segment length, rounded to two decimals.</summary>
     public double FreePercent { get; init; }
 }
+
+/// <summary>
+/// One static reference field detected on a loaded type. <see cref="DirectlyReferencedBytes"/>
+/// is the size of the directly-referenced object (not the full retained graph — cheap proxy);
+/// arrays/dictionaries that retain a lot will surface via large Length on the referenced object.
+/// </summary>
+public sealed record StaticFieldStat(
+    string ContainingTypeFullName,
+    string? ModuleName,
+    string FieldName,
+    int FieldToken,
+    ulong ValueAddress,
+    string? ValueTypeFullName,
+    long DirectlyReferencedBytes,
+    int AppDomainId)
+{
+    /// <summary>Type identity of the *containing* type (the one declaring the static field).</summary>
+    public TypeIdentity? ContainingTypeIdentity { get; init; }
+}
+
+/// <summary>
+/// Aggregated delegate / event subscriber. One row per (TargetTypeFullName, MethodFullName) pair
+/// — e.g. <c>MyForm</c> → <c>MyForm.OnClick</c> appearing 1 000 times across leaked event handlers.
+/// </summary>
+public sealed record DelegateTargetStat(
+    string? TargetTypeFullName,
+    string DeclaringTypeFullName,
+    string MethodName,
+    string? MethodSignature,
+    string? ModuleName,
+    long SubscriberCount)
+{
+    /// <summary>Identity of the bound method (mvid + token) for handoff to dotnet-assembly-mcp.</summary>
+    public Memory.MethodIdentity? Method { get; init; }
+    /// <summary>True for static delegate targets (TargetObject is null). Closures over instances are false.</summary>
+    public bool IsStaticTarget { get; init; }
+}
+
+/// <summary>One row in the duplicate-strings drilldown. <see cref="TotalBytes"/> is
+/// <c>InstanceCount * (StringLength * 2 + headerBytes)</c> — i.e. what a string interner
+/// would reclaim if the duplicates were collapsed.</summary>
+public sealed record DuplicateStringStat(
+    string Preview,
+    int StringLength,
+    long InstanceCount,
+    long TotalBytes,
+    bool PreviewTruncated);
 
 /// <summary>Output of <see cref="IDumpInspector.InspectAsync"/> projected for inline tool consumption.</summary>
 public sealed record DumpInspection(

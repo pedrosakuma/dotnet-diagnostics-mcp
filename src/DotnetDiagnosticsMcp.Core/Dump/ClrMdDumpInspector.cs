@@ -105,7 +105,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             };
         }
 
-        var (byBytes, byInstances, heapSummary, retention, roots, finalizable, segments) = SummarizeRuntime(runtime, opts, warnings, ct);
+        var summary = SummarizeRuntime(runtime, opts, warnings, ct);
         sw.Stop();
 
         return new HeapSnapshotArtifact(
@@ -114,14 +114,17 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             CapturedAt: capturedAt,
             WalkDuration: sw.Elapsed,
             Runtime: runtimeInfo,
-            Heap: heapSummary,
-            TopTypesByBytes: byBytes,
-            TopTypesByInstances: byInstances)
+            Heap: summary.Heap,
+            TopTypesByBytes: summary.ByBytes,
+            TopTypesByInstances: summary.ByInstances)
         {
-            RetentionPaths = retention,
-            RootsByKind = roots,
-            FinalizableObjectsByType = finalizable,
-            Segments = segments,
+            RetentionPaths = summary.Retention,
+            RootsByKind = summary.Roots,
+            FinalizableObjectsByType = summary.Finalizable,
+            Segments = summary.Segments,
+            StaticFields = summary.StaticFields,
+            DelegateTargets = summary.DelegateTargets,
+            DuplicateStrings = summary.DuplicateStrings,
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
@@ -170,7 +173,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             };
         }
 
-        var (byBytes, byInstances, heapSummary, retention, roots, finalizable, segments) = SummarizeRuntime(runtime, opts, warnings, ct);
+        var summary = SummarizeRuntime(runtime, opts, warnings, ct);
         sw.Stop();
 
         return new HeapSnapshotArtifact(
@@ -179,24 +182,27 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             CapturedAt: capturedAt,
             WalkDuration: sw.Elapsed,
             Runtime: runtimeInfo,
-            Heap: heapSummary,
-            TopTypesByBytes: byBytes,
-            TopTypesByInstances: byInstances)
+            Heap: summary.Heap,
+            TopTypesByBytes: summary.ByBytes,
+            TopTypesByInstances: summary.ByInstances)
         {
             DumpFilePath = dumpFilePath,
             DumpFileSizeBytes = fileInfo.Length,
-            RetentionPaths = retention,
-            RootsByKind = roots,
-            FinalizableObjectsByType = finalizable,
-            Segments = segments,
+            RetentionPaths = summary.Retention,
+            RootsByKind = summary.Roots,
+            FinalizableObjectsByType = summary.Finalizable,
+            Segments = summary.Segments,
+            StaticFields = summary.StaticFields,
+            DelegateTargets = summary.DelegateTargets,
+            DuplicateStrings = summary.DuplicateStrings,
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
 
-    private (IReadOnlyList<TypeStat> ByBytes, IReadOnlyList<TypeStat> ByInstances, DumpHeapSummary Heap, IReadOnlyList<RetentionPath>? Retention, IReadOnlyList<RootKindStat> Roots, IReadOnlyList<FinalizableTypeStat> Finalizable, IReadOnlyList<SegmentStat> Segments) SummarizeRuntime(
+    private RuntimeSummary SummarizeRuntime(
         ClrRuntime runtime, DumpInspectionOptions opts, List<string> warnings, CancellationToken ct)
     {
-        var (typeStats, totalBytes, segments) = WalkHeap(runtime, ct);
+        var (typeStats, totalBytes, segments, delegateAgg, stringAgg) = WalkHeap(runtime, opts, warnings, ct);
         var heapSummary = SummarizeHeapFromSegments(segments);
 
         // The snapshot retains a richer top-N so follow-up drilldown queries (e.g. ask for top-100
@@ -224,14 +230,54 @@ public sealed class ClrMdDumpInspector : IDumpInspector
         var roots = WalkRoots(runtime, warnings, ct);
         var finalizable = WalkFinalizableObjects(runtime, opts.SnapshotFinalizerQueueTopTypes, warnings, ct);
 
-        return (byBytes, byInstances, heapSummary, retention, roots, finalizable, segments);
+        IReadOnlyList<StaticFieldStat>? statics = null;
+        if (opts.IncludeStaticFields)
+        {
+            statics = WalkStaticFields(runtime, opts.SnapshotStaticFieldTopN, warnings, ct);
+        }
+
+        IReadOnlyList<DelegateTargetStat>? delegates = null;
+        if (opts.IncludeDelegateTargets && delegateAgg is not null)
+        {
+            delegates = BuildDelegateStats(delegateAgg, opts.SnapshotDelegateTargetTopN);
+        }
+
+        IReadOnlyList<DuplicateStringStat>? duplicates = null;
+        if (opts.IncludeDuplicateStrings && stringAgg is not null)
+        {
+            duplicates = BuildDuplicateStringStats(stringAgg, opts.SnapshotDuplicateStringTopN, opts.DuplicateStringPreviewLength);
+        }
+
+        return new RuntimeSummary(byBytes, byInstances, heapSummary, retention, roots, finalizable, segments, statics, delegates, duplicates);
     }
 
-    private static (Dictionary<TypeKey, RawTypeStat> Stats, long TotalBytes, IReadOnlyList<SegmentStat> Segments) WalkHeap(ClrRuntime runtime, CancellationToken ct)
+    private readonly record struct RuntimeSummary(
+        IReadOnlyList<TypeStat> ByBytes,
+        IReadOnlyList<TypeStat> ByInstances,
+        DumpHeapSummary Heap,
+        IReadOnlyList<RetentionPath>? Retention,
+        IReadOnlyList<RootKindStat> Roots,
+        IReadOnlyList<FinalizableTypeStat> Finalizable,
+        IReadOnlyList<SegmentStat> Segments,
+        IReadOnlyList<StaticFieldStat>? StaticFields,
+        IReadOnlyList<DelegateTargetStat>? DelegateTargets,
+        IReadOnlyList<DuplicateStringStat>? DuplicateStrings);
+
+    private static (Dictionary<TypeKey, RawTypeStat> Stats, long TotalBytes, IReadOnlyList<SegmentStat> Segments, Dictionary<DelegateKey, RawDelegateStat>? Delegates, Dictionary<string, RawStringStat>? Strings) WalkHeap(
+        ClrRuntime runtime, DumpInspectionOptions opts, List<string> warnings, CancellationToken ct)
     {
         var stats = new Dictionary<TypeKey, RawTypeStat>();
         long total = 0;
         var segmentStats = new List<SegmentStat>(runtime.Heap.Segments.Length);
+        Dictionary<DelegateKey, RawDelegateStat>? delegates = opts.IncludeDelegateTargets ? new() : null;
+        Dictionary<string, RawStringStat>? strings = opts.IncludeDuplicateStrings ? new(StringComparer.Ordinal) : null;
+        // Wall-clock safety net on a per-object basis: a runaway delegate/string walk on a multi-GB
+        // heap could grow these dictionaries unbounded. We accept the dictionaries and cap their
+        // size to (snapshot top-N * 32) entries — far above the top-N we'll surface but bounded.
+        var delegateCap = opts.IncludeDelegateTargets ? Math.Max(opts.SnapshotDelegateTargetTopN * 32, 4096) : 0;
+        var stringCap = opts.IncludeDuplicateStrings ? Math.Max(opts.SnapshotDuplicateStringTopN * 32, 4096) : 0;
+        var delegateCapHit = false;
+        var stringCapHit = false;
 
         foreach (var segment in runtime.Heap.Segments)
         {
@@ -263,6 +309,18 @@ public sealed class ClrMdDumpInspector : IDumpInspector
                 }
                 s.Count++;
                 s.Bytes += size;
+
+                if (delegates is not null && obj.IsDelegate && !delegateCapHit)
+                {
+                    AggregateDelegate(obj, delegates);
+                    if (delegates.Count > delegateCap) delegateCapHit = true;
+                }
+
+                if (strings is not null && obj.Type.IsString && !stringCapHit)
+                {
+                    AggregateString(obj, size, strings);
+                    if (strings.Count > stringCap) stringCapHit = true;
+                }
             }
 
             var length = (long)segment.Length;
@@ -287,7 +345,184 @@ public sealed class ClrMdDumpInspector : IDumpInspector
                 FreePercent = freePct,
             });
         }
-        return (stats, total, segmentStats);
+
+        if (delegateCapHit) warnings.Add($"Delegate-target aggregation hit cap of {delegateCap} unique entries — results are truncated to the busiest entries seen so far.");
+        if (stringCapHit) warnings.Add($"Duplicate-string aggregation hit cap of {stringCap} unique entries — results are truncated.");
+
+        return (stats, total, segmentStats, delegates, strings);
+    }
+
+    private static void AggregateDelegate(ClrObject obj, Dictionary<DelegateKey, RawDelegateStat> sink)
+    {
+        try
+        {
+            var del = obj.AsDelegate();
+            foreach (var target in del.EnumerateDelegateTargets())
+            {
+                var method = target.Method;
+                if (method is null) continue;
+                var declaring = method.Type?.Name ?? "<unknown>";
+                var targetObj = target.TargetObject;
+                var targetType = targetObj.IsNull ? null : targetObj.Type?.Name;
+                var modulePath = method.Type?.Module?.Name;
+                var key = new DelegateKey(targetType, declaring, method.Name ?? "<unknown>", method.Signature, modulePath, (int)method.MetadataToken);
+                if (!sink.TryGetValue(key, out var entry))
+                {
+                    entry = new RawDelegateStat(key, method, targetObj.IsNull);
+                    sink[key] = entry;
+                }
+                entry.SubscriberCount++;
+            }
+        }
+        catch
+        {
+            // ClrMD can throw on corrupt delegate instances; skip without polluting warnings on every miss.
+        }
+    }
+
+    private static void AggregateString(ClrObject obj, long objSize, Dictionary<string, RawStringStat> sink)
+    {
+        try
+        {
+            // Bound the read length so a single oversized string can't dominate aggregation cost.
+            var content = obj.AsString(maxLength: 4096);
+            if (content is null) return;
+            if (!sink.TryGetValue(content, out var entry))
+            {
+                entry = new RawStringStat(content, content.Length, objSize);
+                sink[content] = entry;
+            }
+            entry.Count++;
+            entry.TotalBytes += objSize;
+        }
+        catch
+        {
+            // Ignore malformed strings.
+        }
+    }
+
+    private StaticFieldStat[] WalkStaticFields(
+        ClrRuntime runtime, int topN, List<string> warnings, CancellationToken ct)
+    {
+        var results = new List<StaticFieldStat>(capacity: Math.Min(topN * 4, 1024));
+        var visitedTypes = new HashSet<ulong>();
+        try
+        {
+            foreach (var domain in runtime.AppDomains)
+            {
+                ct.ThrowIfCancellationRequested();
+                foreach (var module in domain.Modules)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    foreach (var (mt, _) in module.EnumerateTypeDefToMethodTableMap())
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (!visitedTypes.Add(mt)) continue;
+                        ClrType? type;
+                        try { type = runtime.GetTypeByMethodTable(mt); }
+                        catch { continue; }
+                        if (type is null) continue;
+                        if (type.StaticFields.IsDefaultOrEmpty) continue;
+
+                        foreach (var field in type.StaticFields)
+                        {
+                            if (!field.IsObjectReference) continue;
+                            ClrObject value = default;
+                            try
+                            {
+                                if (!field.IsInitialized(domain)) continue;
+                                value = field.ReadObject(domain);
+                            }
+                            catch { continue; }
+                            if (value.IsNull || !value.IsValid) continue;
+
+                            var size = (long)value.Size;
+                            if (size <= 0) continue;
+
+                            var raw = new RawTypeStat(type.Name ?? "<unknown>", type.Module?.Name, type);
+                            var identity = BuildTypeIdentity(raw);
+                            results.Add(new StaticFieldStat(
+                                ContainingTypeFullName: type.Name ?? "<unknown>",
+                                ModuleName: type.Module?.Name is { } mn ? Path.GetFileName(mn) : null,
+                                FieldName: field.Name ?? "<unknown>",
+                                FieldToken: field.Token,
+                                ValueAddress: value.Address,
+                                ValueTypeFullName: value.Type?.Name,
+                                DirectlyReferencedBytes: size,
+                                AppDomainId: domain.Id)
+                            {
+                                ContainingTypeIdentity = identity,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Static-field walk aborted partway through: {ex.GetType().Name} ({ex.Message}).");
+        }
+
+        return results
+            .OrderByDescending(s => s.DirectlyReferencedBytes)
+            .Take(topN)
+            .ToArray();
+    }
+
+    private DelegateTargetStat[] BuildDelegateStats(Dictionary<DelegateKey, RawDelegateStat> agg, int topN)
+    {
+        return agg.Values
+            .OrderByDescending(d => d.SubscriberCount)
+            .Take(topN)
+            .Select(d =>
+            {
+                var moduleFile = d.Key.ModulePath is { } mp ? Path.GetFileName(mp) : null;
+                Memory.MethodIdentity? method = null;
+                if (d.Method is not null && d.Key.MetadataToken != 0)
+                {
+                    method = new Memory.MethodIdentity(
+                        ModuleName: moduleFile,
+                        ModulePath: d.Key.ModulePath,
+                        ModuleVersionId: TryReadMvid(d.Key.ModulePath),
+                        MetadataToken: d.Key.MetadataToken,
+                        TypeFullName: d.Key.DeclaringTypeFullName,
+                        MethodName: d.Key.MethodName,
+                        GenericArity: 0);
+                }
+                return new DelegateTargetStat(
+                    TargetTypeFullName: d.Key.TargetTypeFullName,
+                    DeclaringTypeFullName: d.Key.DeclaringTypeFullName,
+                    MethodName: d.Key.MethodName,
+                    MethodSignature: d.Key.MethodSignature,
+                    ModuleName: moduleFile,
+                    SubscriberCount: d.SubscriberCount)
+                {
+                    Method = method,
+                    IsStaticTarget = d.IsStaticTarget,
+                };
+            })
+            .ToArray();
+    }
+
+    private static DuplicateStringStat[] BuildDuplicateStringStats(
+        Dictionary<string, RawStringStat> agg, int topN, int previewLength)
+    {
+        return agg.Values
+            .Where(s => s.Count > 1)
+            .OrderByDescending(s => s.TotalBytes)
+            .Take(topN)
+            .Select(s =>
+            {
+                var truncated = s.Content.Length > previewLength;
+                var preview = truncated ? s.Content[..previewLength] : s.Content;
+                return new DuplicateStringStat(
+                    Preview: preview,
+                    StringLength: s.Length,
+                    InstanceCount: s.Count,
+                    TotalBytes: s.TotalBytes,
+                    PreviewTruncated: truncated);
+            })
+            .ToArray();
     }
 
     private static string ClassifySegmentGeneration(ClrSegment segment) => segment.Kind switch
@@ -649,5 +884,42 @@ public sealed class ClrMdDumpInspector : IDumpInspector
         public ClrType ClrType { get; }
         public long Count;
         public long Bytes;
+    }
+
+    private readonly record struct DelegateKey(
+        string? TargetTypeFullName,
+        string DeclaringTypeFullName,
+        string MethodName,
+        string? MethodSignature,
+        string? ModulePath,
+        int MetadataToken);
+
+    private sealed class RawDelegateStat
+    {
+        public RawDelegateStat(DelegateKey key, ClrMethod? method, bool isStaticTarget)
+        {
+            Key = key;
+            Method = method;
+            IsStaticTarget = isStaticTarget;
+        }
+        public DelegateKey Key { get; }
+        public ClrMethod? Method { get; }
+        public bool IsStaticTarget { get; }
+        public long SubscriberCount;
+    }
+
+    private sealed class RawStringStat
+    {
+        public RawStringStat(string content, int length, long firstObjBytes)
+        {
+            Content = content;
+            Length = length;
+            TotalBytes = 0;
+            _ = firstObjBytes; // consumed by AggregateString incrementally
+        }
+        public string Content { get; }
+        public int Length { get; }
+        public long Count;
+        public long TotalBytes;
     }
 }

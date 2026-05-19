@@ -559,11 +559,20 @@ public sealed class DiagnosticTools
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower.")] bool includeRetentionPaths = false,
         [Description("Cap on retention-chain depth when retention paths are enabled. Defaults to 8.")] int retentionPathLimit = 8,
+        [Description("When true, enumerate every loaded type's static reference fields ranked by directly-referenced object size — surfaces 'singleton that grew forever' leaks. Off by default; adds an extra pass over AppDomains × Modules × Types.")] bool includeStaticFields = false,
+        [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
+        [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         CancellationToken cancellationToken = default)
     {
         var snapshot = await inspector.InspectAsync(
             dumpFilePath,
-            new DumpInspectionOptions(TopTypes: topTypes, IncludeRetentionPaths: includeRetentionPaths, RetentionPathLimit: retentionPathLimit),
+            new DumpInspectionOptions(
+                TopTypes: topTypes,
+                IncludeRetentionPaths: includeRetentionPaths,
+                RetentionPathLimit: retentionPathLimit,
+                IncludeStaticFields: includeStaticFields,
+                IncludeDelegateTargets: includeDelegateTargets,
+                IncludeDuplicateStrings: includeDuplicateStrings),
             cancellationToken).ConfigureAwait(false);
 
         // Dump-origin snapshots refer to a PID that may not be alive (or may be reused) on this
@@ -638,11 +647,20 @@ public sealed class DiagnosticTools
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower and lengthens the suspend window.")] bool includeRetentionPaths = false,
         [Description("Cap on retention-chain depth when retention paths are enabled. Defaults to 8.")] int retentionPathLimit = 8,
+        [Description("When true, enumerate every loaded type's static reference fields ranked by directly-referenced object size — surfaces 'singleton that grew forever' leaks. Off by default; lengthens the suspend window.")] bool includeStaticFields = false,
+        [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
+        [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         CancellationToken cancellationToken = default)
     {
         var snapshot = await inspector.InspectLiveAsync(
             processId,
-            new DumpInspectionOptions(TopTypes: topTypes, IncludeRetentionPaths: includeRetentionPaths, RetentionPathLimit: retentionPathLimit),
+            new DumpInspectionOptions(
+                TopTypes: topTypes,
+                IncludeRetentionPaths: includeRetentionPaths,
+                RetentionPathLimit: retentionPathLimit,
+                IncludeStaticFields: includeStaticFields,
+                IncludeDelegateTargets: includeDelegateTargets,
+                IncludeDuplicateStrings: includeDuplicateStrings),
             cancellationToken).ConfigureAwait(false);
 
         var handle = handles.Register(processId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl);
@@ -674,13 +692,16 @@ public sealed class DiagnosticTools
         "`retention-paths` (filter the walked retention chains by target type substring; requires the original inspect call to have set includeRetentionPaths=true), " +
         "`roots-by-kind` (GC roots aggregated by ClrRootKind with pinned/interior counts), " +
         "`finalizer-queue` (objects waiting for finalization, top-N by retained bytes), " +
-        "`fragmentation` (per-segment Gen/Kind/Length/Committed/Free bytes — high FreePercent on Gen2/LOH signals fragmentation). " +
-        "Handles expire ~10 minutes after the capture and are invalidated when the target process exits.")]
+        "`fragmentation` (per-segment Gen/Kind/Length/Committed/Free bytes — high FreePercent on Gen2/LOH signals fragmentation), " +
+        "`static-fields` (top static reference fields by directly-referenced object size — requires the original inspect call to have set includeStaticFields=true), " +
+        "`delegate-targets` (delegate / event-handler subscribers grouped by (target type, method) — requires includeDelegateTargets=true), " +
+        "`duplicate-strings` (duplicate System.String contents ranked by aggregate retained bytes — requires includeDuplicateStrings=true). " +
+        "Handles expire ~10 minutes after the capture and are invalidated when the target process exits (live origin only).")]
     public static DiagnosticResult<HeapSnapshotQueryResult> QueryHeapSnapshot(
         IDiagnosticHandleStore handles,
         [Description("Snapshot handle returned by inspect_dump or inspect_live_heap.")] string handle,
-        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue' or 'fragmentation'.")] string view = "top-types",
-        [Description("For view='top-types'/'finalizer-queue'/'fragmentation': maximum entries to return. Ignored by 'roots-by-kind' and 'retention-paths'.")] int topN = 50,
+        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets' or 'duplicate-strings'.")] string view = "top-types",
+        [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings'). Ignored by 'roots-by-kind' and 'retention-paths'.")] int topN = 50,
         [Description("For view='top-types': ranking — 'bytes' (default) or 'instances'.")] string rankBy = "bytes",
         [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null)
     {
@@ -705,7 +726,10 @@ public sealed class DiagnosticTools
             "roots-by-kind" => QueryRootsByKind(snapshot, handle),
             "finalizer-queue" => QueryFinalizerQueue(snapshot, handle, topN),
             "fragmentation" => QueryFragmentation(snapshot, handle, topN),
-            _ => InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue' or 'fragmentation' (got '{view}')"),
+            "static-fields" => QueryStaticFields(snapshot, handle, topN),
+            "delegate-targets" => QueryDelegateTargets(snapshot, handle, topN),
+            "duplicate-strings" => QueryDuplicateStrings(snapshot, handle, topN),
+            _ => InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets' or 'duplicate-strings' (got '{view}')"),
         };
     }
 
@@ -822,6 +846,69 @@ public sealed class DiagnosticTools
         var result = new HeapSnapshotQueryResult(handle, "fragmentation", origin, snapshot.ProcessId, snapshot.CapturedAt)
         {
             Segments = ordered,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryStaticFields(
+        HeapSnapshotArtifact snapshot, string handle, int topN)
+    {
+        var origin = snapshot.Origin.ToString();
+        if (snapshot.StaticFields is null)
+        {
+            return DiagnosticResult.Fail<HeapSnapshotQueryResult>(
+                $"Snapshot '{handle}' was captured without static-field walking.",
+                new DiagnosticError("ViewNotCaptured", "Re-run inspect_dump / inspect_live_heap with includeStaticFields=true.", handle));
+        }
+        var slice = snapshot.StaticFields.Take(topN).ToArray();
+        var summary = slice.Length == 0
+            ? $"Snapshot '{handle}' has no static reference fields with directly-referenced objects."
+            : $"Returning {slice.Length} static field(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top retainer: `{slice[0].ContainingTypeFullName}.{slice[0].FieldName}` → `{slice[0].ValueTypeFullName ?? "<unknown>"}` ({slice[0].DirectlyReferencedBytes:N0} bytes).";
+        var result = new HeapSnapshotQueryResult(handle, "static-fields", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            StaticFields = slice,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryDelegateTargets(
+        HeapSnapshotArtifact snapshot, string handle, int topN)
+    {
+        var origin = snapshot.Origin.ToString();
+        if (snapshot.DelegateTargets is null)
+        {
+            return DiagnosticResult.Fail<HeapSnapshotQueryResult>(
+                $"Snapshot '{handle}' was captured without delegate-target aggregation.",
+                new DiagnosticError("ViewNotCaptured", "Re-run inspect_dump / inspect_live_heap with includeDelegateTargets=true.", handle));
+        }
+        var slice = snapshot.DelegateTargets.Take(topN).ToArray();
+        var summary = slice.Length == 0
+            ? $"Snapshot '{handle}' has no delegate targets (no MulticastDelegate instances detected)."
+            : $"Returning {slice.Length} delegate target group(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top subscriber: `{slice[0].DeclaringTypeFullName}.{slice[0].MethodName}` (target=`{slice[0].TargetTypeFullName ?? "<static>"}`) — {slice[0].SubscriberCount:N0} subscription(s). High subscription counts on long-lived publishers are a classic event-handler-leak signal.";
+        var result = new HeapSnapshotQueryResult(handle, "delegate-targets", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            DelegateTargets = slice,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryDuplicateStrings(
+        HeapSnapshotArtifact snapshot, string handle, int topN)
+    {
+        var origin = snapshot.Origin.ToString();
+        if (snapshot.DuplicateStrings is null)
+        {
+            return DiagnosticResult.Fail<HeapSnapshotQueryResult>(
+                $"Snapshot '{handle}' was captured without duplicate-string aggregation.",
+                new DiagnosticError("ViewNotCaptured", "Re-run inspect_dump / inspect_live_heap with includeDuplicateStrings=true.", handle));
+        }
+        var slice = snapshot.DuplicateStrings.Take(topN).ToArray();
+        var summary = slice.Length == 0
+            ? $"Snapshot '{handle}' has no duplicated System.String contents."
+            : $"Returning {slice.Length} duplicated string(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top waste: `{slice[0].Preview}` — {slice[0].InstanceCount:N0} copies, {slice[0].TotalBytes:N0} bytes. Consider string.Intern() / a cache for the hottest entries.";
+        var result = new HeapSnapshotQueryResult(handle, "duplicate-strings", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            DuplicateStrings = slice,
         };
         return DiagnosticResult.Ok(result, summary);
     }

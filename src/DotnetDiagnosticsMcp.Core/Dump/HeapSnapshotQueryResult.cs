@@ -26,4 +26,10 @@ public sealed record HeapSnapshotQueryResult(
     public IReadOnlyList<FinalizableTypeStat>? FinalizableObjects { get; init; }
     /// <summary>Populated when <see cref="View"/> is <c>"fragmentation"</c>.</summary>
     public IReadOnlyList<SegmentStat>? Segments { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"static-fields"</c>.</summary>
+    public IReadOnlyList<StaticFieldStat>? StaticFields { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"delegate-targets"</c>.</summary>
+    public IReadOnlyList<DelegateTargetStat>? DelegateTargets { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"duplicate-strings"</c>.</summary>
+    public IReadOnlyList<DuplicateStringStat>? DuplicateStrings { get; init; }
 }
