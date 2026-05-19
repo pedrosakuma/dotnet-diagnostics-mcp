@@ -215,6 +215,18 @@ public class MethodIdentityHandoffTests
     }
 
     [Fact]
+    public void Parser_TopLevelMain_WithoutParams_HasZeroArity()
+    {
+        // Regression for #34. <Main>$ uses < and > as part of the synthesized name; the
+        // trailing-`>` method-generic branch must NOT treat <Main> as a method-arg list.
+        var p = EventPipeCpuSampler.ParseFullMethodName("Program.<Main>$");
+        p.TypeFullName.Should().Be("Program");
+        p.MethodName.Should().Be("<Main>$");
+        p.GenericArity.Should().Be(0);
+        p.GenericTypeArguments.Should().BeNull();
+    }
+
+    [Fact]
     public void GenericInstantiation_RoundTripsThroughJsonContext()
     {
         var inst = new GenericInstantiation(new[] { "System.Int32" }, new[] { "System.String" });
