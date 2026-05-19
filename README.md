@@ -77,6 +77,43 @@ export MCP_BEARER_TOKEN="$(openssl rand -hex 32)"
 dotnet run --project src/DotnetDiagnosticsMcp.Server
 ```
 
+### Local shared instance (recommended for dev)
+
+The HTTP transport is multi-client, so a single shared MCP instance on
+`127.0.0.1:8787` serves any number of concurrent clients (multiple `gh copilot`
+sessions, editors, etc). Use the lifecycle wrapper for an idempotent,
+deterministic local setup:
+
+```bash
+scripts/local-mcp.sh start     # builds (Release) + starts in background; idempotent
+scripts/local-mcp.sh status
+scripts/local-mcp.sh logs -f
+scripts/local-mcp.sh restart
+scripts/local-mcp.sh stop
+```
+
+The script pins URL (`LOCAL_MCP_URL`, default `http://127.0.0.1:8787`) and bearer
+token (`MCP_BEARER_TOKEN`, default `demo-local-token-2026`), uses
+`--no-launch-profile` so `launchSettings.json` can't silently override the port,
+and stores its PID at `/tmp/dotnet-diagnostics-mcp.pid` and logs at
+`/tmp/dotnet-diagnostics-mcp.log` (overridable via `LOCAL_MCP_PIDFILE` /
+`LOCAL_MCP_LOGFILE`). Pair with the matching entry in `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "dotnet-diagnostics": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": { "Authorization": "Bearer demo-local-token-2026" }
+    }
+  }
+}
+```
+
+There is also a dedicated `local-mcp` launch profile for one-off foreground runs:
+`dotnet run --project src/DotnetDiagnosticsMcp.Server --launch-profile local-mcp`.
+
 ## Roadmap
 
 See [`docs/`](./docs) (to be filled in) and the planning notes in the session workspace.
