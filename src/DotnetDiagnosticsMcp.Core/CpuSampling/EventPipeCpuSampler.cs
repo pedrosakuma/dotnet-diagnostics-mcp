@@ -312,6 +312,13 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         var methodArgs = Array.Empty<string>();
         var arity = 0;
 
+        // Strip a trailing IL parameter signature `(...)`. Some EventPipe paths (notably
+        // perf-script frames and synthesized entry points like `Program.<Main>$(class
+        // System.String[])`) bleed the params into the FullMethodName. Without this strip
+        // the dot inside `System.String` ends up being chosen by FindLastTopLevelDot and
+        // the typeFullName/methodName boundary lands inside the parameter list. See #31.
+        name = StripTrailingParameterSignature(name);
+
         // Method-level generic args: trailing <...>. Has to be parsed against the full
         // raw string before any other slicing, because the < / > nest with type-level
         // args in pathological cases (a method-level arg that is itself a generic type).
@@ -356,6 +363,34 @@ public sealed class EventPipeCpuSampler : ICpuSampler
     {
         if (typeArgs.Length == 0 && methodArgs.Length == 0) return null;
         return new DotnetDiagnosticsMcp.Core.Memory.GenericInstantiation(typeArgs, methodArgs);
+    }
+
+    /// <summary>Strips a trailing IL parameter signature <c>(...)</c> from a FullMethodName,
+    /// respecting brackets nested inside the parens. Returns the input unchanged when there
+    /// is no trailing <c>)</c> or when the parens are unbalanced.</summary>
+    private static string StripTrailingParameterSignature(string s)
+    {
+        if (s.Length == 0 || s[^1] != ')') return s;
+        var paren = 0;
+        var angle = 0;
+        var square = 0;
+        for (var i = s.Length - 1; i >= 0; i--)
+        {
+            var c = s[i];
+            switch (c)
+            {
+                case ']': square++; break;
+                case '[': square--; break;
+                case '>': angle++; break;
+                case '<': angle--; break;
+                case ')' when square == 0 && angle == 0: paren++; break;
+                case '(' when square == 0 && angle == 0:
+                    paren--;
+                    if (paren == 0) return s.Substring(0, i);
+                    break;
+            }
+        }
+        return s;
     }
 
     /// <summary>Returns the index of the <c>&lt;</c> matching the <c>&gt;</c> at

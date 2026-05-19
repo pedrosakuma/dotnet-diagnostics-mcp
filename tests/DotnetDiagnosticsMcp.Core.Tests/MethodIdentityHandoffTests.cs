@@ -179,6 +179,42 @@ public class MethodIdentityHandoffTests
     }
 
     [Fact]
+    public void Parser_StripsTrailingParameterSignature_TopLevelMain()
+    {
+        // Regression for #31: minimal-API / top-level-statement synthesized entry point.
+        // Without param-signature stripping the inner `.` of `System.String[]` was chosen
+        // by FindLastTopLevelDot, splitting "Program.<Main>$(class System" / "String[])".
+        var p = EventPipeCpuSampler.ParseFullMethodName("Program.<Main>$(class System.String[])");
+        p.TypeFullName.Should().Be("Program");
+        p.MethodName.Should().Be("<Main>$");
+        p.GenericArity.Should().Be(0);
+        p.GenericTypeArguments.Should().BeNull();
+    }
+
+    [Fact]
+    public void Parser_StripsTrailingParameterSignature_GenericMethodWithParams()
+    {
+        // Method-level generics + params: ensure the trailing `(...)` is stripped before
+        // the trailing-`>` branch parses method args, so `Echo<int>` survives.
+        var p = EventPipeCpuSampler.ParseFullMethodName(
+            "MyApp.Helper.Echo<System.Int32>(class System.Int32)");
+        p.TypeFullName.Should().Be("MyApp.Helper");
+        p.MethodName.Should().Be("Echo");
+        p.GenericArity.Should().Be(1);
+        p.GenericTypeArguments!.Method.Should().Equal("System.Int32");
+    }
+
+    [Fact]
+    public void Parser_StripsTrailingParameterSignature_DottedParamType()
+    {
+        var p = EventPipeCpuSampler.ParseFullMethodName(
+            "MyApp.OrderService.Process(class MyApp.Models.Order)");
+        p.TypeFullName.Should().Be("MyApp.OrderService");
+        p.MethodName.Should().Be("Process");
+        p.GenericArity.Should().Be(0);
+    }
+
+    [Fact]
     public void GenericInstantiation_RoundTripsThroughJsonContext()
     {
         var inst = new GenericInstantiation(new[] { "System.Int32" }, new[] { "System.String" });
