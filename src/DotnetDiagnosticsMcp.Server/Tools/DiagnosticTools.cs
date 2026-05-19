@@ -1013,11 +1013,12 @@ public sealed class DiagnosticTools
     [Description(
         "Captures a single-point-in-time snapshot of all managed threads (state, stack frames with " +
         "MethodIdentity handoff, inferred wait reason) plus the SyncBlock-based lock graph (object " +
-        "address, owning thread, waiter count). Exactly ONE of processId or dumpFilePath must be " +
-        "supplied: processId attaches via ClrMD with suspend (typically sub-second on ≤100 threads); " +
-        "dumpFilePath analyses an already-captured WithHeap/Full dump offline. Returns inline " +
-        "threads-summary + lock-graph headlines plus a handle (~10min TTL) the LLM can drill into " +
-        "via query_thread_snapshot. Dump-origin handles are NOT evicted when the producer PID exits.")]
+        "address, owning thread, waiter count). Supply at most ONE of processId or dumpFilePath: " +
+        "processId attaches via ClrMD with suspend (typically sub-second on ≤100 threads); " +
+        "dumpFilePath analyses an already-captured WithHeap/Full dump offline. When both are omitted " +
+        "the server auto-selects a live .NET process (live mode). Returns inline threads-summary + " +
+        "lock-graph headlines plus a handle (~10min TTL) the LLM can drill into via " +
+        "query_thread_snapshot. Dump-origin handles are NOT evicted when the producer PID exits.")]
     public static async Task<DiagnosticResult<ThreadSnapshotQueryResult>> CollectThreadSnapshot(
         IThreadSnapshotInspector inspector,
         IDiagnosticHandleStore handles,
@@ -1029,7 +1030,7 @@ public sealed class DiagnosticTools
         [Description("Include pure native frames where ClrMD cannot resolve a method. Off by default.")] bool includeNativeFrames = false,
         CancellationToken cancellationToken = default)
     {
-        var hasExplicitPid = processId.HasValue && processId.Value > 0;
+        var hasExplicitPid = processId.HasValue && processId.Value != 0;
         var hasDump = !string.IsNullOrWhiteSpace(dumpFilePath);
         if (hasExplicitPid && hasDump)
         {

@@ -42,9 +42,22 @@ public sealed class ProcessContextResolver : IProcessContextResolver
 
     public async Task<ProcessContextResolution> ResolveAsync(int? requestedProcessId, CancellationToken cancellationToken)
     {
-        if (requestedProcessId is { } pid && pid > 0)
+        if (requestedProcessId is { } requested)
         {
-            return await ResolveExplicitAsync(pid, autoResolved: false, cancellationToken).ConfigureAwait(false);
+            if (requested < 0)
+            {
+                return new ProcessContextResolution(
+                    Context: null,
+                    Error: new DiagnosticError(
+                        "InvalidArgument",
+                        $"processId must be a positive process id (or null/0 for auto-resolution). Got {requested}.",
+                        "Omit processId entirely (or pass 0) to auto-resolve when exactly one .NET process is reachable; otherwise pass the pid from list_dotnet_processes."));
+            }
+
+            if (requested > 0)
+            {
+                return await ResolveExplicitAsync(requested, autoResolved: false, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         var processes = _discovery.ListProcesses();

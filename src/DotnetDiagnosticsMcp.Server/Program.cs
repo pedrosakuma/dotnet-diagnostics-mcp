@@ -83,16 +83,19 @@ builder.Services
 
             Recommended call order for a fresh investigation:
 
-              1. `list_dotnet_processes` — discover attachable .NET processes by pid.
-              2. `get_diagnostic_capabilities` — confirms CoreCLR vs NativeAOT and which
-                 collectors are supported (NativeAOT lacks CPU sampling and gcdump).
-              3. `snapshot_counters` — cheap first signal: CPU, working set, GC pressure,
-                 thread pool, requests/sec. Use this before reaching for sampling/dumps.
-              4. From the symptom narrow down: high CPU → `collect_cpu_sample`; allocations
+              1. `snapshot_counters` — cheap first signal: CPU, working set, GC pressure,
+                 thread pool, requests/sec. When exactly one .NET process is reachable the
+                 server auto-selects it; `processId` is optional on every live-process tool.
+              2. From the symptom narrow down: high CPU → `collect_cpu_sample`; allocations
                  or GC pauses → `collect_gc_events`; errors → `collect_exceptions`;
                  framework-specific signals → `collect_event_source` with the right provider.
-              5. `collect_process_dump` is the heavyweight last resort (Mini < Triage <
+              3. `collect_process_dump` is the heavyweight last resort (Mini < Triage <
                  WithHeap < Full). Use only when live collectors are insufficient.
+
+            Use `list_dotnet_processes` only when auto-resolution fails (zero or multiple
+            .NET processes visible — the error response will tell you). Use
+            `get_diagnostic_capabilities` to confirm CoreCLR vs NativeAOT before reaching
+            for NativeAOT-incompatible collectors (CPU sampling, gcdump).
 
             Always prefer the shortest collection window that answers the question
             (`durationSeconds`) and bound result lists (`topN`, `maxRecent`, `maxEvents`)
@@ -100,10 +103,11 @@ builder.Services
             which writes a dump file to disk and is marked Destructive.
 
             This server never requests Elicitation: every tool ships with sensible
-            defaults for every parameter except `processId` (and `providerName` for
-            `collect_event_source`). Pick a default and re-run with refined arguments
-            if the first attempt is too noisy or too sparse — the response `hints`
-            will tell you how.
+            defaults for every parameter. `processId` is optional — omit it to auto-select
+            the lone reachable .NET process, or pass an explicit pid from
+            `list_dotnet_processes` when several are visible. Pick a default and re-run
+            with refined arguments if the first attempt is too noisy or too sparse — the
+            response `hints` will tell you how.
 
             For a longer playbook (HTTP latency, exception storms, GC retention,
             NativeAOT caveats), read the `diag://guides/investigation` resource or

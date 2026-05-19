@@ -24,6 +24,21 @@ public sealed class ProcessContextResolverTests
         Notes: "");
 
     [Fact]
+    public async Task ResolveAsync_NegativePid_ReturnsInvalidArgumentAndDoesNotProbeDetector()
+    {
+        var discovery = new StubDiscovery(new DotnetProcess(1234, "/myapp", "linux", "x64", "10.0.0", "myapp"));
+        var detector = new StubDetector(_ => DefaultCaps);
+        var resolver = new ProcessContextResolver(discovery, detector, new FakeTimeProvider(), TimeSpan.FromSeconds(60));
+
+        var result = await resolver.ResolveAsync(requestedProcessId: -1, default);
+
+        result.Context.Should().BeNull();
+        result.Error.Should().NotBeNull();
+        result.Error!.Kind.Should().Be("InvalidArgument");
+        detector.CallCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task ResolveAsync_NoProcesses_ReturnsNoDotnetProcessFound()
     {
         var discovery = new StubDiscovery();
