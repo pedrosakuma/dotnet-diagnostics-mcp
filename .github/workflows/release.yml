@@ -94,6 +94,7 @@ jobs:
             --self-contained true \
             -p:PublishSingleFile=true \
             -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:AssemblyName=dotnet-diagnostics-mcp \
             -p:Version=${{ needs.pack-tool.outputs.version }} \
             -o artifacts/${{ matrix.rid }}
 
@@ -102,9 +103,9 @@ jobs:
         run: |
           cd artifacts/${{ matrix.rid }}
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a ../dotnet-diagnostics-mcp-${{ needs.pack-tool.outputs.version }}-${{ matrix.rid }}.zip dotnet-diagnostics-mcp* appsettings*.json 2>/dev/null || true
+            7z a ../dotnet-diagnostics-mcp-${{ needs.pack-tool.outputs.version }}-${{ matrix.rid }}.zip dotnet-diagnostics-mcp.exe appsettings*.json
           else
-            tar -czf ../dotnet-diagnostics-mcp-${{ needs.pack-tool.outputs.version }}-${{ matrix.rid }}.tar.gz dotnet-diagnostics-mcp* appsettings*.json 2>/dev/null || true
+            tar -czf ../dotnet-diagnostics-mcp-${{ needs.pack-tool.outputs.version }}-${{ matrix.rid }}.tar.gz dotnet-diagnostics-mcp appsettings*.json
           fi
 
       - name: Upload binary artifact
@@ -143,6 +144,8 @@ jobs:
     needs: [pack-tool, publish-binaries]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download nupkg
         uses: actions/download-artifact@v4
         with:
