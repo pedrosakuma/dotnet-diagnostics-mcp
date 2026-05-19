@@ -34,6 +34,7 @@ builder.Services.AddSingleton<ICapabilityDetector, CapabilityDetector>();
 builder.Services.AddSingleton<ICounterCollector, EventPipeCounterCollector>();
 builder.Services.AddSingleton<EventPipeCpuSampler>();
 builder.Services.AddSingleton<PerfNativeAotCpuSampler>();
+builder.Services.AddSingleton<EtwNativeAotCpuSampler>();
 builder.Services.AddSingleton<ICpuSampler, RoutingCpuSampler>();
 builder.Services.AddSingleton<IExceptionCollector, EventPipeExceptionCollector>();
 builder.Services.AddSingleton<IGcCollector, EventPipeGcCollector>();

@@ -19,11 +19,16 @@ public sealed class CapabilityDetector : ICapabilityDetector
     private static readonly TimeSpan ProbeWindow = TimeSpan.FromSeconds(2);
     private readonly ILogger<CapabilityDetector> _logger;
     private readonly PerfNativeAotCpuSampler? _perfSampler;
+    private readonly EtwNativeAotCpuSampler? _etwSampler;
 
-    public CapabilityDetector(ILogger<CapabilityDetector>? logger = null, PerfNativeAotCpuSampler? perfSampler = null)
+    public CapabilityDetector(
+        ILogger<CapabilityDetector>? logger = null,
+        PerfNativeAotCpuSampler? perfSampler = null,
+        EtwNativeAotCpuSampler? etwSampler = null)
     {
         _logger = logger ?? NullLogger<CapabilityDetector>.Instance;
         _perfSampler = perfSampler;
+        _etwSampler = etwSampler;
     }
 
     public async Task<DiagnosticCapabilities> DetectAsync(int processId, CancellationToken cancellationToken = default)
@@ -36,8 +41,9 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var runtime = ClassifyRuntime(snapshot, probe);
 
         var perfAvailable = _perfSampler is not null && _perfSampler.IsAvailable();
+        var etwAvailable = _etwSampler is not null && _etwSampler.IsAvailable();
         var canSampleCpu = (runtime == RuntimeFlavor.CoreClr && probe.SampleEventsReceived > 0) ||
-                           (runtime == RuntimeFlavor.NativeAot && perfAvailable);
+                           (runtime == RuntimeFlavor.NativeAot && (perfAvailable || etwAvailable));
         var canCollectGcDump = runtime == RuntimeFlavor.CoreClr;
         var canReadCounters = probe.SessionStarted;
         var canCollectExceptions = probe.SessionStarted;
@@ -45,7 +51,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var canCollectCustomEs = probe.SessionStarted;
         var canCollectDump = true;
 
-        var notes = BuildNotes(runtime, probe, perfAvailable);
+        var notes = BuildNotes(runtime, probe, perfAvailable, etwAvailable);
 
         return new DiagnosticCapabilities(
             ProcessId: processId,
@@ -169,7 +175,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return RuntimeFlavor.NativeAot;
     }
 
-    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable)
+    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable, bool etwAvailable)
     {
         if (!probe.SessionStarted)
         {
@@ -180,13 +186,17 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return runtime switch
         {
             RuntimeFlavor.CoreClr => "CoreCLR runtime detected; all diagnostic tools available.",
+            RuntimeFlavor.NativeAot when etwAvailable =>
+                "NativeAOT detected (SampleProfiler emitted no events). CPU sampling is available via Windows ETW " +
+                "kernel profiling (native symbols from PDB/export table). gcdump is not supported.",
             RuntimeFlavor.NativeAot when perfAvailable =>
                 "NativeAOT detected (SampleProfiler emitted no events). CPU sampling is available via the Linux 'perf' fallback " +
                 "(native symbols only, no managed IL handoff). gcdump is not supported.",
             RuntimeFlavor.NativeAot =>
                 "NativeAOT detected (SampleProfiler emitted no events). " +
                 "CPU sampling and gcdump are not available; counters, exceptions and EventSources still work. " +
-                "Install Linux 'perf' to enable the native CPU sampling fallback.",
+                "On Windows, run as Administrator to enable ETW kernel profiling. " +
+                "On Linux, install 'perf' with CAP_PERFMON to enable the native CPU sampling fallback.",
             _ => "Could not classify runtime flavor."
         };
     }
