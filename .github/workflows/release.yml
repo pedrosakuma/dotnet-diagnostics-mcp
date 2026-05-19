@@ -94,9 +94,22 @@ jobs:
             --self-contained true \
             -p:PublishSingleFile=true \
             -p:IncludeNativeLibrariesForSelfExtract=true \
-            -p:AssemblyName=dotnet-diagnostics-mcp \
             -p:Version=${{ needs.pack-tool.outputs.version }} \
             -o artifacts/${{ matrix.rid }}
+
+      - name: Rename binary to dotnet-diagnostics-mcp
+        shell: bash
+        # We rename post-publish (instead of -p:AssemblyName=...) because passing
+        # AssemblyName as a global MSBuild property propagates to the referenced
+        # Core project, renaming its DLL to the same name and triggering NETSDK1152
+        # "multiple publish output files with the same relative path".
+        run: |
+          cd artifacts/${{ matrix.rid }}
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            mv DotnetDiagnosticsMcp.Server.exe dotnet-diagnostics-mcp.exe
+          else
+            mv DotnetDiagnosticsMcp.Server dotnet-diagnostics-mcp
+          fi
 
       - name: Zip artifact
         shell: bash
