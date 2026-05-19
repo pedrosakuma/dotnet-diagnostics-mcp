@@ -28,11 +28,12 @@ public sealed class CgroupV2SignalsCollectorTests : IDisposable
         try { Directory.Delete(_root, recursive: true); } catch { /* best effort */ }
     }
 
-    private CgroupV2SignalsCollector NewCollector() => new(
+    private CgroupV2SignalsCollector NewCollector(string? rootFs = null) => new(
         logger: null,
         clock: TimeProvider.System,
         cgroupRoot: _cgroupRoot,
-        procRoot: _procRoot);
+        procRoot: _procRoot,
+        rootFs: rootFs ?? Path.Combine(_root, "rootfs-empty"));
 
     private void MarkAsCgroupV2() =>
         File.WriteAllText(Path.Combine(_cgroupRoot, "cgroup.controllers"), "cpu memory pids io\n");
@@ -133,6 +134,75 @@ public sealed class CgroupV2SignalsCollectorTests : IDisposable
         signals.Pressure.Should().BeNull();
         signals.Cpu.Should().NotBeNull("missing PSI must not poison other signals");
         signals.Notes.Should().Contain(n => n.Contains("pressure", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PrivateCgroupNamespace_DetectsContainerViaDockerEnvMarker()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        MarkAsCgroupV2();
+        // Process sees its own cgroup-namespace root ("0::/") — typical with Docker's
+        // default --cgroupns=private on cgroup v2.
+        var podDir = SetupPodCgroup(101, "/");
+        File.WriteAllText(Path.Combine(podDir, "cpu.stat"),
+            "usage_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n");
+        File.WriteAllText(Path.Combine(podDir, "cpu.max"), "max 100000\n");
+        File.WriteAllText(Path.Combine(podDir, "memory.current"), "1024\n");
+        File.WriteAllText(Path.Combine(podDir, "memory.max"), "max\n");
+        File.WriteAllText(Path.Combine(podDir, "pids.current"), "1\n");
+        File.WriteAllText(Path.Combine(podDir, "pids.max"), "max\n");
+
+        var fakeRoot = Path.Combine(_root, "rootfs-docker");
+        Directory.CreateDirectory(fakeRoot);
+        File.WriteAllText(Path.Combine(fakeRoot, ".dockerenv"), string.Empty);
+
+        var signals = await NewCollector(rootFs: fakeRoot).CollectAsync(101);
+
+        signals.InContainer.Should().BeTrue("private cgroup ns + .dockerenv marker = container");
+        signals.CgroupPath.Should().Be("/");
+        signals.Notes.Should().Contain(n => n.Contains("private cgroup namespace", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PrivateCgroupNamespace_DetectsContainerViaActiveLimits()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        MarkAsCgroupV2();
+        var podDir = SetupPodCgroup(202, "/");
+        File.WriteAllText(Path.Combine(podDir, "cpu.stat"),
+            "usage_usec 0\nnr_periods 100\nnr_throttled 0\nthrottled_usec 0\n");
+        // Limits are set even though cgroup path looks like "/".
+        File.WriteAllText(Path.Combine(podDir, "cpu.max"), "150000 100000\n");
+        File.WriteAllText(Path.Combine(podDir, "memory.current"), "10\n");
+        File.WriteAllText(Path.Combine(podDir, "memory.max"), "max\n");
+        File.WriteAllText(Path.Combine(podDir, "pids.current"), "1\n");
+        File.WriteAllText(Path.Combine(podDir, "pids.max"), "max\n");
+
+        var signals = await NewCollector().CollectAsync(202);
+
+        signals.InContainer.Should().BeTrue("cpu quota set on root cgroup ⇒ containerised");
+        signals.Cpu!.QuotaCores.Should().BeApproximately(1.5, 0.001);
+        signals.Notes.Should().Contain(n => n.Contains("active cpu/memory limits", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TrueHost_RootCgroupWithoutLimitsOrMarkers_IsNotContainer()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        MarkAsCgroupV2();
+        var hostDir = SetupPodCgroup(303, "/");
+        File.WriteAllText(Path.Combine(hostDir, "cpu.stat"),
+            "usage_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n");
+        File.WriteAllText(Path.Combine(hostDir, "cpu.max"), "max 100000\n");
+        File.WriteAllText(Path.Combine(hostDir, "memory.current"), "10\n");
+        File.WriteAllText(Path.Combine(hostDir, "memory.max"), "max\n");
+        File.WriteAllText(Path.Combine(hostDir, "pids.current"), "1\n");
+        File.WriteAllText(Path.Combine(hostDir, "pids.max"), "max\n");
+
+        var signals = await NewCollector().CollectAsync(303);
+
+        signals.InContainer.Should().BeFalse();
+        signals.CgroupPath.Should().Be("/");
     }
 
     [Fact]

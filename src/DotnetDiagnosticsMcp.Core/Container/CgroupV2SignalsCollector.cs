@@ -21,6 +21,7 @@ public sealed class CgroupV2SignalsCollector : IContainerSignalsCollector
 {
     private readonly string _cgroupRoot;
     private readonly string _procRoot;
+    private readonly string _rootFs;
     private readonly ILogger<CgroupV2SignalsCollector> _logger;
     private readonly TimeProvider _clock;
 
@@ -28,12 +29,14 @@ public sealed class CgroupV2SignalsCollector : IContainerSignalsCollector
         ILogger<CgroupV2SignalsCollector>? logger = null,
         TimeProvider? clock = null,
         string cgroupRoot = "/sys/fs/cgroup",
-        string procRoot = "/proc")
+        string procRoot = "/proc",
+        string rootFs = "/")
     {
         _logger = logger ?? NullLogger<CgroupV2SignalsCollector>.Instance;
         _clock = clock ?? TimeProvider.System;
         _cgroupRoot = cgroupRoot;
         _procRoot = procRoot;
+        _rootFs = rootFs;
     }
 
     public Task<ContainerSignals> CollectAsync(int processId, CancellationToken cancellationToken = default)
@@ -65,8 +68,6 @@ public sealed class CgroupV2SignalsCollector : IContainerSignalsCollector
         }
 
         var cgroupPath = TryReadCgroupPath(processId, notes);
-        var inContainer = !string.IsNullOrEmpty(cgroupPath) && cgroupPath != "/";
-
         var dir = string.IsNullOrEmpty(cgroupPath) ? _cgroupRoot : _cgroupRoot + cgroupPath;
 
         var cpu = ReadCpu(dir, notes);
@@ -75,8 +76,36 @@ public sealed class CgroupV2SignalsCollector : IContainerSignalsCollector
         var pids = ReadPids(dir, notes);
         var oom = ReadOomScore(processId, notes);
 
+        // Container detection is fuzzy on cgroup v2: with the default Docker --cgroupns=private
+        // (and most K8s setups), /proc/<pid>/cgroup reports "0::/" because the process sees its
+        // own cgroup namespace root. Falling back to filesystem markers and "limits are set"
+        // heuristics catches those cases. See cgroup_namespaces(7).
+        var pathLooksContainerised = !string.IsNullOrEmpty(cgroupPath) && cgroupPath != "/";
+        var hasContainerMarker = HasContainerMarker();
+        var hasLimits = (cpu?.QuotaCores is > 0) || (memory?.MaxBytes is > 0);
+        var inContainer = pathLooksContainerised || hasContainerMarker || hasLimits;
+        if (!pathLooksContainerised && inContainer)
+        {
+            notes.Add("cgroup path is \"/\" (private cgroup namespace likely); inferred container from "
+                + (hasContainerMarker ? "/.dockerenv or /run/.containerenv marker" : "active cpu/memory limits") + ".");
+        }
+
         return new ContainerSignals(processId, collectedAt, inContainer, version, cgroupPath,
             cpu, memory, pressure, pids, oom, notes);
+    }
+
+    private bool HasContainerMarker()
+    {
+        try
+        {
+            if (File.Exists(Path.Combine(_rootFs, ".dockerenv"))) return true;
+            if (File.Exists(Path.Combine(_rootFs, "run", ".containerenv"))) return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            // Best-effort; absence is not proof of non-container.
+        }
+        return false;
     }
 
     private CgroupVersion DetectCgroupVersion(List<string> notes)
