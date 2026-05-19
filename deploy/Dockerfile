@@ -8,11 +8,6 @@
 # pod-level requirements (shareProcessNamespace + shared emptyDir over /tmp).
 
 ARG DOTNET_VERSION=10.0
-# Default runtime base is Microsoft's recommended Ubuntu Noble image. The lean
-# variant uses it as-is; the perf variant overrides RUNTIME_BASE to a Debian
-# bookworm-slim image (publish-container.yml passes this) because Ubuntu Noble
-# does not ship the `linux-perf` package, while Debian bookworm does.
-ARG RUNTIME_BASE=mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION}
 
 FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 WORKDIR /src
@@ -33,7 +28,7 @@ RUN dotnet publish src/DotnetDiagnosticsMcp.Server/DotnetDiagnosticsMcp.Server.c
     --no-restore \
     /p:UseAppHost=false
 
-FROM ${RUNTIME_BASE} AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION} AS runtime
 WORKDIR /app
 
 # Kestrel listens on 8080 by default in our ASPNETCORE_URLS below.
@@ -46,15 +41,19 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
 RUN groupadd --system --gid 10001 diagnosticsmcp \
  && useradd --system --uid 10001 --gid diagnosticsmcp --create-home --shell /usr/sbin/nologin diagnosticsmcp
 
-# Optionally install Linux perf for NativeAOT CPU sampling fallback.
-# Pass --build-arg INSTALL_PERF=true to enable; default off to keep the image lean
-# (perf + linux-tools pulls ~20-30 MB and is only useful for NativeAOT targets).
+# Optionally install Linux perf for NativeAOT CPU sampling fallback + off-CPU sched
+# capture. Ubuntu Noble (the .NET 10 base) does not ship the transitional
+# `linux-perf` meta-package, so we install `linux-tools-common` (the perf wrapper)
+# plus `linux-tools-generic` (which pulls a versioned linux-tools-<kernel>-generic
+# carrying the actual perf binary). Mismatch with the host kernel is benign for our
+# usage — PerfBinaryResolver iterates /usr/lib/linux-tools-* to locate the binary.
+# Pass --build-arg INSTALL_PERF=true to enable; default off to keep the image lean.
 # At runtime the container additionally needs CAP_PERFMON (or perf_event_paranoid <= 1
 # on the host) — see deploy/k8s/ephemeral-attach.patch.json for the K8s recipe.
 ARG INSTALL_PERF=false
 RUN if [ "$INSTALL_PERF" = "true" ]; then \
         apt-get update \
-     && apt-get install -y --no-install-recommends linux-perf \
+     && apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic \
      && rm -rf /var/lib/apt/lists/*; \
     fi
 

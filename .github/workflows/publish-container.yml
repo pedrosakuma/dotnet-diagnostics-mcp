@@ -42,13 +42,9 @@ jobs:
         include:
           - variant: lean
             install_perf: 'false'
-            runtime_base: 'mcr.microsoft.com/dotnet/aspnet:10.0'
             suffix: ''
           - variant: perf
             install_perf: 'true'
-            # Debian bookworm-slim has the `linux-perf` package; Ubuntu Noble
-            # (the default .NET aspnet base) does not.
-            runtime_base: 'mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim'
             suffix: '-perf'
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +95,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             INSTALL_PERF=${{ matrix.install_perf }}
-            RUNTIME_BASE=${{ matrix.runtime_base }}
           cache-from: type=gha,scope=container-${{ matrix.variant }}
           cache-to: type=gha,scope=container-${{ matrix.variant }},mode=max
           provenance: true
