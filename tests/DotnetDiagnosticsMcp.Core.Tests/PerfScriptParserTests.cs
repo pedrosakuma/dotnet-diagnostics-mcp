@@ -131,4 +131,26 @@ public class PerfScriptParserTests
         samples[0].Frames[0].Symbol.Should().Be("[unknown]");
         samples[0].Frames[0].Module.Should().BeEmpty();
     }
+
+    [Fact]
+    public void Aggregate_ReportsSymbolSource_SoCpuSampleCanCarryIt()
+    {
+        // Regression for #35: the aggregate SymbolSource computed during NativeAOT
+        // aggregation must be propagated all the way to the primary CpuSample record
+        // — see PerfNativeAotCpuSampler.SampleAsync. This test just locks in that the
+        // value is non-Unknown for a typical mangled-frame trace so consumers don't
+        // have to drill into the trace artifact to learn whether demangling ran.
+        const string mangledSample = """
+            sample-target  1 [000] 1.0: cpu-clock:
+                            ffffabcd11110000 S_P_CoreLib_System_Threading_Thread__ThreadEntryPoint (/app/NativeAotSample)
+                            ffffabcd11110100 S_P_CoreLib_System_Threading_Thread__StartHelper (/app/NativeAotSample)
+                            7f1234560000 __libc_start_main+0x80 (/lib/libc.so.6)
+
+            """;
+
+        var (_, _, _, symbolSource) = PerfNativeAotCpuSampler.Aggregate(mangledSample, processId: 0, topN: 5);
+
+        symbolSource.Should().NotBe(NativeAotSymbolDemangler.SymbolSource.Unknown,
+            "the aggregator must surface a concrete provenance so CpuSample.SymbolSource is informative");
+    }
 }

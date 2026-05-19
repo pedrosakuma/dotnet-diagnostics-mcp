@@ -278,6 +278,7 @@ public static class NativeAotSymbolDemangler
 
     /// <summary>Provenance of a frame's display name. Threaded into <c>CpuSampleTraceArtifact</c>
     /// so the LLM knows whether to trust the name as-is or treat it as a heuristic guess.</summary>
+    [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<SymbolSource>))]
     public enum SymbolSource
     {
         Unknown = 0,

@@ -110,7 +110,7 @@ public sealed class PerfNativeAotCpuSampler : ICpuSampler
             // a /proc/<pid>/task post-hoc race that would discard samples from threadpool /
             // GC workers that exited between recording and parsing.
             var (total, hotspots, root, symbolSource) = Aggregate(script, processId: 0, topN);
-            var summary = new CpuSample(processId, startedAt, duration, total, hotspots);
+            var summary = new CpuSample(processId, startedAt, duration, total, hotspots) { SymbolSource = symbolSource };
             var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root, null, null, symbolSource);
             return new CpuSampleResult(summary, artifact);
         }

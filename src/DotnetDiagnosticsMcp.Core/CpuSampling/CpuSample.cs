@@ -16,4 +16,14 @@ public sealed record CpuSample(
     DateTimeOffset StartedAt,
     TimeSpan Duration,
     long TotalSamples,
-    IReadOnlyList<Hotspot> TopHotspots);
+    IReadOnlyList<Hotspot> TopHotspots)
+{
+    /// <summary>
+    /// Aggregate symbol-resolution quality of <see cref="TopHotspots"/>. Always populated for
+    /// NativeAOT samples by <c>PerfNativeAotCpuSampler</c>; <c>null</c> for CoreCLR samples
+    /// since the EventPipe path resolves managed methods via TraceEvent and the concept does
+    /// not apply uniformly. See #29 / #35 — surfacing this avoids forcing the consumer to
+    /// drill into the trace artifact just to know whether demangling succeeded.
+    /// </summary>
+    public NativeAotSymbolDemangler.SymbolSource? SymbolSource { get; init; }
+}

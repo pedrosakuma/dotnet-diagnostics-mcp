@@ -205,9 +205,25 @@ top-N hotspots by inclusive and exclusive sample counts.
       "inclusiveSamples": 1820,
       "exclusiveSamples": 320
     }
-  ]
+  ],
+  "symbolSource": "ElfDemangled"
 }
 ```
+
+`symbolSource` is populated for **NativeAOT** samples only (see #35) and
+reports the aggregate symbol-resolution quality of `topHotspots`:
+
+- `ElfDemangled` — every managed frame went through the demangler. Trust the
+  names as-is.
+- `ElfMangled` — perf returned managed-looking symbols but demangling did not
+  apply (e.g. lookup table missing). Names are still usable but may be `S_P_…`-style.
+- `Native` — frames are non-managed (libc / P/Invoke / kernel). Expected for
+  threadpool/GC threads.
+- `Stripped` — perf returned `[unknown]` or raw addresses; names are not
+  actionable. Likely missing build-id / PDB on the host.
+- `Mixed` — quality varies across `topHotspots`. Inspect per-frame.
+- `Unknown` / omitted — CoreCLR sample (the EventPipe path resolves managed
+  names directly; this field does not apply).
 
 **Requires CoreCLR.** Returns `not_supported` style behaviour (empty samples) on
 NativeAOT — confirm via `get_diagnostic_capabilities` first.
