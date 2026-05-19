@@ -41,6 +41,18 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
 RUN groupadd --system --gid 10001 diagnosticsmcp \
  && useradd --system --uid 10001 --gid diagnosticsmcp --create-home --shell /usr/sbin/nologin diagnosticsmcp
 
+# Optionally install Linux perf for NativeAOT CPU sampling fallback.
+# Pass --build-arg INSTALL_PERF=true to enable; default off to keep the image lean
+# (perf + linux-tools pulls ~20-30 MB and is only useful for NativeAOT targets).
+# At runtime the container additionally needs CAP_PERFMON (or perf_event_paranoid <= 1
+# on the host) — see deploy/k8s/ephemeral-attach.patch.json for the K8s recipe.
+ARG INSTALL_PERF=false
+RUN if [ "$INSTALL_PERF" = "true" ]; then \
+        apt-get update \
+     && apt-get install -y --no-install-recommends linux-perf \
+     && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 COPY --from=build /app/publish ./
 RUN chown -R diagnosticsmcp:diagnosticsmcp /app
 USER diagnosticsmcp

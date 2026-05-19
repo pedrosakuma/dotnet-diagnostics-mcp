@@ -187,7 +187,8 @@ public sealed class DiagnosticTools
         UseStructuredContent = true)]
     [Description(
         "Captures a CPU sample from the target process and returns the top-N hotspots aggregated by method. " +
-        "Requires CoreCLR — NativeAOT processes do not implement the SampleProfiler EventSource. " +
+        "On CoreCLR uses EventPipe SampleProfiler (managed frames with mvid+token handoff). " +
+        "On NativeAOT (Linux) falls back to 'perf record' when available — frames are native symbols only, MethodIdentity is null. " +
         "Each hotspot reports both inclusive and exclusive sample counts. Run after snapshot_counters shows elevated cpu-usage.")]
     public static async Task<DiagnosticResult<CpuSample>> CollectCpuSample(
         ICpuSampler sampler,

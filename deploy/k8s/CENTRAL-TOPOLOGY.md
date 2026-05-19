@@ -168,3 +168,28 @@ PID namespace.
   the diagnostic socket. A future iteration may add `/proc/<pid>/root/tmp`
   traversal in the diag server (requires running the ephemeral container
   as root with `CAP_SYS_PTRACE`).
+
+## NativeAOT CPU sampling (opt-in)
+
+`collect_cpu_sample` against a NativeAOT target falls back to Linux `perf`
+since SampleProfiler is absent. To enable it inside the ephemeral diag
+container two changes are required:
+
+1. **Build the image with perf bundled** —
+   `docker build --build-arg INSTALL_PERF=true -t dotnet-diagnostics-mcp:dev-perf -f deploy/Dockerfile .`
+2. **Patch `ephemeral-attach.patch.json`** to grant the relevant
+   capabilities on the ephemeral container's `securityContext`:
+
+```json
+"securityContext": {
+  "runAsUser": 10001,
+  "runAsGroup": 10001,
+  "runAsNonRoot": true,
+  "capabilities": { "add": ["PERFMON", "SYS_PTRACE"] }
+}
+```
+
+The host's `kernel.perf_event_paranoid` must also be `<= 1` (or `<= 2`
+with `CAP_PERFMON`). Frames returned by the perf path are native symbols
+only — `MethodIdentity` is `null`, so the assembly-MCP handoff is
+unavailable for NativeAOT hotspots.

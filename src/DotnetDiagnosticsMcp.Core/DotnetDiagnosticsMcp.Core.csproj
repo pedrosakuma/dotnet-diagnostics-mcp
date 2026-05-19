@@ -13,4 +13,8 @@
     <PackageReference Include="Microsoft.Extensions.Logging" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotnetDiagnosticsMcp.Core.Tests" />
+  </ItemGroup>
+
 </Project>

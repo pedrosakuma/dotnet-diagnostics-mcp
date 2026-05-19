@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Internal;
 using Microsoft.Diagnostics.NETCore.Client;
 using Microsoft.Extensions.Logging;
@@ -9,16 +10,20 @@ namespace DotnetDiagnosticsMcp.Core.Capabilities;
 /// Detects diagnostic capabilities by combining the process info (when available) with an active
 /// EventPipe probe: it attempts a short-lived session with the SampleProfiler provider and checks
 /// whether any sample events are emitted. SampleProfiler is implemented by CoreCLR and absent in
-/// NativeAOT, so the absence of events is a strong NativeAOT indicator.
+/// NativeAOT, so the absence of events is a strong NativeAOT indicator. When the target is
+/// NativeAOT and Linux <c>perf</c> is available, CPU sampling is reported as supported via the
+/// perf-based fallback (managed frames will be unresolved native symbols).
 /// </summary>
 public sealed class CapabilityDetector : ICapabilityDetector
 {
     private static readonly TimeSpan ProbeWindow = TimeSpan.FromSeconds(2);
     private readonly ILogger<CapabilityDetector> _logger;
+    private readonly PerfNativeAotCpuSampler? _perfSampler;
 
-    public CapabilityDetector(ILogger<CapabilityDetector>? logger = null)
+    public CapabilityDetector(ILogger<CapabilityDetector>? logger = null, PerfNativeAotCpuSampler? perfSampler = null)
     {
         _logger = logger ?? NullLogger<CapabilityDetector>.Instance;
+        _perfSampler = perfSampler;
     }
 
     public async Task<DiagnosticCapabilities> DetectAsync(int processId, CancellationToken cancellationToken = default)
@@ -30,7 +35,9 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var probe = await ProbeSampleProfilerAsync(client, cancellationToken).ConfigureAwait(false);
         var runtime = ClassifyRuntime(snapshot, probe);
 
-        var canSampleCpu = runtime == RuntimeFlavor.CoreClr && probe.SampleEventsReceived > 0;
+        var perfAvailable = _perfSampler is not null && _perfSampler.IsAvailable();
+        var canSampleCpu = (runtime == RuntimeFlavor.CoreClr && probe.SampleEventsReceived > 0) ||
+                           (runtime == RuntimeFlavor.NativeAot && perfAvailable);
         var canCollectGcDump = runtime == RuntimeFlavor.CoreClr;
         var canReadCounters = probe.SessionStarted;
         var canCollectExceptions = probe.SessionStarted;
@@ -38,7 +45,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var canCollectCustomEs = probe.SessionStarted;
         var canCollectDump = true;
 
-        var notes = BuildNotes(runtime, probe);
+        var notes = BuildNotes(runtime, probe, perfAvailable);
 
         return new DiagnosticCapabilities(
             ProcessId: processId,
@@ -162,7 +169,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return RuntimeFlavor.NativeAot;
     }
 
-    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe)
+    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable)
     {
         if (!probe.SessionStarted)
         {
@@ -173,8 +180,13 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return runtime switch
         {
             RuntimeFlavor.CoreClr => "CoreCLR runtime detected; all diagnostic tools available.",
-            RuntimeFlavor.NativeAot => "NativeAOT detected (SampleProfiler emitted no events). " +
-                                       "CPU sampling and gcdump are not available; counters, exceptions and EventSources still work.",
+            RuntimeFlavor.NativeAot when perfAvailable =>
+                "NativeAOT detected (SampleProfiler emitted no events). CPU sampling is available via the Linux 'perf' fallback " +
+                "(native symbols only, no managed IL handoff). gcdump is not supported.",
+            RuntimeFlavor.NativeAot =>
+                "NativeAOT detected (SampleProfiler emitted no events). " +
+                "CPU sampling and gcdump are not available; counters, exceptions and EventSources still work. " +
+                "Install Linux 'perf' to enable the native CPU sampling fallback.",
             _ => "Could not classify runtime flavor."
         };
     }
