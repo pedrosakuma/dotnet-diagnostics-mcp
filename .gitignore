@@ -30,3 +30,6 @@ Thumbs.db
 # Local env
 .env
 .env.local
+
+# Bicep build artifacts (compiled ARM templates)
+deploy/azure/**/main.json

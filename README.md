@@ -54,6 +54,7 @@ Full schemas and return shapes: [`docs/tool-reference.md`](./docs/tool-reference
 Common investigation recipes: [`docs/investigation-playbooks.md`](./docs/investigation-playbooks.md).
 Client setup (C# SDK, GUI clients, curl): [`docs/client-setup.md`](./docs/client-setup.md).
 Kubernetes sidecar: [`deploy/k8s/README.md`](./deploy/k8s/README.md).
+Azure (App Service + Container Apps) recipes: [`deploy/azure/README.md`](./deploy/azure/README.md).
 
 ## Build & test
 
@@ -87,7 +88,8 @@ Phases:
 4. ✅ Advanced tools (GC, exceptions, custom EventSources, dumps)
 5. ✅ Kubernetes sidecar topology + manifests (see [`deploy/k8s/`](./deploy/k8s))
 6. ✅ Documentation polish (tool reference, investigation playbooks, client setup)
-7. ⏳ Future: cloud-native integrations (Azure / AWS / GCP), NativeAOT fallback profiling, ClrMD dump inspection
+7. ✅ Cloud-native integrations: Azure App Service + Container Apps (see [`deploy/azure/`](./deploy/azure)). AWS / GCP tracked as follow-up issues.
+8. ⏳ Future: NativeAOT publish, AWS ECS / Fargate, GCP Cloud Run.
 
 ## License
 
