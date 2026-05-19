@@ -151,11 +151,19 @@ rodando.
   pós-coleta pelo `/proc/<pid>/task/*` do alvo. Requer `CAP_PERFMON` (kernel
   ≥ 5.8) ou `perf_event_paranoid <= -1`, e `perf` instalado
   (`linux-tools-common` / `linux-tools-$(uname -r)` no Debian/Ubuntu).
-- **Windows:** ainda não implementado (sub-slice 2b de
-  [#41](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/41) cobre
-  ETW kernel CSwitch + ReadyThread). Devolve `NotSupported` com hint.
+  `SymbolSource: "perf-sched-dwarf"`.
+- **Windows:** usa a sessão NT Kernel Logger via `TraceEvent` com
+  `ContextSwitch + Dispatcher + ImageLoad/Process/Thread`, stack walk no
+  `ContextSwitch` (a stack capturada na hora do switch-out é exatamente a
+  chamada bloqueante). Wait reason do kernel
+  (`UserRequest` / `WrLpcReceive` / `WrQueue`...) vira o `PrevState` do span,
+  mirror direto do `S/D/I` do Linux. Spans pendentes ao fim da janela viram
+  censored (`IsCensored=true`) com duração lower-bound, igual ao Linux.
+  Requer **elevação administrativa** (ou `SeSystemProfilePrivilege`); sem isso
+  devolve `InvalidOperation` com hint pra rodar o sidecar como Administrator.
+  `SymbolSource: "etw-cswitch-pdb"` (resolve PDBs locais + `_NT_SYMBOL_PATH`).
 - **Managed↔kernel stack merge:** ainda não — frames são puramente nativos /
-  kernel. Sub-slice 2c.
+  kernel em ambas as plataformas. Sub-slice 2c.
 
 `collect_off_cpu_sample(pid, durationSeconds=10, topN=10)` devolve `{handle,
 summary, top}` com os stacks que mais tempo passaram off-CPU.
@@ -173,7 +181,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`get_process_info`](#get_process_info) | cheap | no | none |
 | [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) | ~2 s | no | opens a short EventPipe probe |
 | [`get_container_signals`](#get_container_signals) | cheap | no | reads `/sys/fs/cgroup` + `/proc` files |
-| `collect_off_cpu_sample` (Linux) | window-bound | no | system-wide `perf record -e sched:sched_switch` |
+| `collect_off_cpu_sample` (Linux/Windows) | window-bound | no | system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
 | `query_off_cpu_snapshot` | cheap | no | drilldown on handle from `collect_off_cpu_sample` |
 | [`snapshot_counters`](#snapshot_counters) | window-bound | no | opens an EventPipe session |
 | [`collect_cpu_sample`](#collect_cpu_sample) | window-bound | **yes** | EventPipe + temp `.nettrace` on disk |

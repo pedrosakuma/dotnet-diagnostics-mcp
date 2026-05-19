@@ -9,7 +9,7 @@ public sealed class RoutingOffCpuSamplerTests
     public async Task OnNonLinux_NonWindows_Throws_NotSupportedException()
     {
         if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows()) return; // exercised on macOS or other only
-        var router = new RoutingOffCpuSampler(new PerfSchedOffCpuSampler());
+        var router = new RoutingOffCpuSampler(new PerfSchedOffCpuSampler(), new EtwOffCpuSampler());
         router.IsAvailable().Should().BeFalse();
 
         var act = async () => await router.SampleAsync(processId: 1, TimeSpan.FromSeconds(1));
@@ -17,17 +17,23 @@ public sealed class RoutingOffCpuSamplerTests
     }
 
     [Fact]
-    public async Task OnWindows_Throws_NotSupportedException_WithIssueReference()
+    public async Task OnWindows_WithoutElevation_Throws_InvalidOperation_WithAdminHint()
     {
         if (!OperatingSystem.IsWindows()) return;
-        var router = new RoutingOffCpuSampler(new PerfSchedOffCpuSampler());
+        // Tests run unelevated in CI, so we expect the router to bail with an actionable message.
+        // If a developer happens to run the suite elevated locally the sampler is available and the
+        // call would proceed to ETW capture against pid=1, which would fail differently — skip
+        // the assertion in that case rather than introduce flakiness.
+        var sampler = new EtwOffCpuSampler();
+        if (sampler.IsAvailable()) return;
+
+        var router = new RoutingOffCpuSampler(new PerfSchedOffCpuSampler(), sampler);
         router.IsAvailable().Should().BeFalse();
 
         var act = async () => await router.SampleAsync(processId: 1, TimeSpan.FromSeconds(1));
-        var ex = await act.Should().ThrowAsync<NotSupportedException>();
-        ex.Which.Message.Should().Contain("Windows");
+        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
         ex.Which.Message.Should().Contain("ETW");
-        ex.Which.Message.Should().Contain("#41");
+        ex.Which.Message.Should().Contain("administrative", because: "the LLM needs the actionable elevation hint");
     }
 }
 
