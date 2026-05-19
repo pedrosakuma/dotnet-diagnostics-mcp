@@ -16,10 +16,12 @@ namespace DotnetDiagnosticsMcp.Core.CpuSampling;
 public sealed class EventPipeCpuSampler : ICpuSampler
 {
     private readonly ILogger<EventPipeCpuSampler> _logger;
+    private readonly MvidReader _mvidReader;
 
-    public EventPipeCpuSampler(ILogger<EventPipeCpuSampler>? logger = null)
+    public EventPipeCpuSampler(ILogger<EventPipeCpuSampler>? logger = null, MvidReader? mvidReader = null)
     {
         _logger = logger ?? NullLogger<EventPipeCpuSampler>.Instance;
+        _mvidReader = mvidReader ?? new MvidReader();
     }
 
     public async Task<CpuSampleResult> SampleAsync(
@@ -45,9 +47,9 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         try
         {
             await CollectTraceAsync(processId, tracePath, duration, cancellationToken).ConfigureAwait(false);
-            var (total, hotspots, root, sources) = AggregateHotspots(tracePath, processId, topN, sourceResolution);
+            var (total, hotspots, root, sources, identities) = AggregateHotspots(tracePath, processId, topN, sourceResolution);
             var summary = new CpuSample(processId, startedAt, duration, total, hotspots);
-            var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root, sources);
+            var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root, sources, identities);
             return new CpuSampleResult(summary, artifact);
         }
         finally
@@ -106,7 +108,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         }
     }
 
-    private (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? Sources) AggregateHotspots(string tracePath, int pid, int topN, SourceResolutionOptions? sourceResolution)
+    private (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? Sources, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>? Identities) AggregateHotspots(string tracePath, int pid, int topN, SourceResolutionOptions? sourceResolution)
     {
         var etlxPath = TraceLog.CreateFromEventPipeDataFile(tracePath);
         try
@@ -116,7 +118,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
             if (process is null)
             {
                 _logger.LogDebug("Process {Pid} not found in trace.", pid);
-                return (0, Array.Empty<Hotspot>(), EmptyRoot(), null);
+                return (0, Array.Empty<Hotspot>(), EmptyRoot(), null, null);
             }
 
             var inclusive = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -141,13 +143,17 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 }
 
                 total++;
-                var stackFrames = new List<(string Key, string Module)>();
+                var stackFrames = new List<(string Key, string Module, string Display)>();
                 var frame = callStack;
                 while (frame is not null)
                 {
-                    var key = FormatFrame(frame);
+                    var display = FormatFrame(frame);
                     var module = frame.CodeAddress?.ModuleFile?.Name ?? string.Empty;
-                    stackFrames.Add((key, module));
+                    // Aggregate by (module, methodName) — two distinct methods in different
+                    // modules can share FullMethodName and we must not merge them, or we'd
+                    // hand the assembly MCP an identity from the wrong module.
+                    var key = string.IsNullOrEmpty(module) ? display : module + "!" + display;
+                    stackFrames.Add((key, module, display));
                     modules.TryAdd(key, module);
                     if (frame.CodeAddress is not null)
                     {
@@ -163,7 +169,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 exclusive[leafKey] = exclusive.GetValueOrDefault(leafKey) + 1;
 
                 var seenInThisStack = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var (key, _) in stackFrames)
+                foreach (var (key, _, _) in stackFrames)
                 {
                     if (seenInThisStack.Add(key))
                     {
@@ -171,7 +177,11 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                     }
                 }
 
-                rootBuilder.AddStack(stackFrames, leafKey);
+                // CallTreeBuilder still wants frames — pass module + display name so the
+                // tree shows clean method names (the composite key is internal only).
+                var treeFrames = new List<(string Key, string Module, string Display)>(stackFrames.Count);
+                foreach (var (k, m, d) in stackFrames) treeFrames.Add((k, m, d));
+                rootBuilder.AddStack(treeFrames, leafKey);
             }
 
             var ranked = inclusive
@@ -179,27 +189,127 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 .Take(topN)
                 .ToArray();
 
-            var hotspots = ranked
-                .Select(kv => new Hotspot(
-                    Frame: new SampledFrame(
-                        Module: modules.GetValueOrDefault(kv.Key, string.Empty),
-                        Method: kv.Key),
-                    InclusiveSamples: kv.Value,
-                    ExclusiveSamples: exclusive.GetValueOrDefault(kv.Key)))
-                .ToList();
-
             IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? sources = null;
             if (sourceResolution is { Enabled: true })
             {
                 sources = ResolveSources(traceLog, ranked, modules, codeAddressByKey, sourceResolution);
             }
 
-            return (total, hotspots, rootBuilder.Build(), sources);
+            var identities = BuildMethodIdentities(ranked, modules, codeAddressByKey);
+
+            var hotspots = ranked
+                .Select(kv =>
+                {
+                    var module = modules.GetValueOrDefault(kv.Key, string.Empty);
+                    var methodDisplay = !string.IsNullOrEmpty(module) && kv.Key.StartsWith(module + "!", StringComparison.Ordinal)
+                        ? kv.Key[(module.Length + 1)..]
+                        : kv.Key;
+                    var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, methodDisplay);
+                    identities.TryGetValue(symbol, out var identity);
+                    return new Hotspot(
+                        Frame: new SampledFrame(Module: module, Method: methodDisplay),
+                        InclusiveSamples: kv.Value,
+                        ExclusiveSamples: exclusive.GetValueOrDefault(kv.Key),
+                        Identity: identity);
+                })
+                .ToList();
+
+            return (total, hotspots, rootBuilder.Build(), sources, identities);
         }
         finally
         {
             TryDelete(etlxPath);
         }
+    }
+
+    private Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> BuildMethodIdentities(
+        KeyValuePair<string, long>[] ranked,
+        Dictionary<string, string> modules,
+        Dictionary<string, Microsoft.Diagnostics.Tracing.Etlx.TraceCodeAddress> codeAddressByKey)
+    {
+        var result = new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>();
+        foreach (var (key, _) in ranked)
+        {
+            if (!codeAddressByKey.TryGetValue(key, out var addr)) continue;
+            var method = addr.Method;
+            if (method is null) continue;
+
+            var moduleFile = method.MethodModuleFile;
+            var modulePath = moduleFile?.FilePath;
+            var moduleName = !string.IsNullOrEmpty(modulePath)
+                ? Path.GetFileName(modulePath)
+                : (moduleFile?.Name is { Length: > 0 } n ? n : modules.GetValueOrDefault(key, string.Empty));
+
+            var token = method.MethodToken;
+            var (typeFull, methodName, arity) = SplitFullMethodName(method.FullMethodName);
+            var mvid = _mvidReader.TryRead(modulePath);
+
+            // Skip frames where we have nothing useful for the handoff at all
+            // (e.g. native frames with no module path and no IL token).
+            if (mvid is null && token == 0 && string.IsNullOrEmpty(modulePath) && string.IsNullOrEmpty(moduleName))
+            {
+                continue;
+            }
+
+            var module = modules.GetValueOrDefault(key, moduleName ?? string.Empty);
+            var methodDisplay = !string.IsNullOrEmpty(module) && key.StartsWith(module + "!", StringComparison.Ordinal)
+                ? key[(module.Length + 1)..]
+                : key;
+            var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, methodDisplay);
+            result[symbol] = new DotnetDiagnosticsMcp.Core.Memory.MethodIdentity(
+                ModuleName: moduleName,
+                ModulePath: modulePath,
+                ModuleVersionId: mvid,
+                MetadataToken: token > 0 ? token : null,
+                TypeFullName: typeFull,
+                MethodName: methodName,
+                GenericArity: arity);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Splits a TraceEvent <c>FullMethodName</c> (shape: <c>Namespace.Type.Method</c>; generic
+    /// methods may surface as <c>Type.Method&lt;T&gt;</c> depending on the runtime) into the
+    /// (typeFullName, methodName, genericArity) tuple consumed by the handoff contract.
+    /// </summary>
+    internal static (string? TypeFullName, string MethodName, int GenericArity) SplitFullMethodName(string? fullName)
+    {
+        if (string.IsNullOrEmpty(fullName)) return (null, string.Empty, 0);
+
+        var name = fullName!;
+        var arity = 0;
+        var genericOpen = name.IndexOf('<', StringComparison.Ordinal);
+        if (genericOpen >= 0)
+        {
+            var genericClose = name.LastIndexOf('>');
+            if (genericClose > genericOpen)
+            {
+                var genericArgs = name.Substring(genericOpen + 1, genericClose - genericOpen - 1);
+                arity = CountTopLevelCommas(genericArgs) + 1;
+                name = name.Remove(genericOpen, genericClose - genericOpen + 1);
+            }
+        }
+
+        var lastDot = name.LastIndexOf('.');
+        if (lastDot <= 0 || lastDot == name.Length - 1)
+        {
+            return (null, name, arity);
+        }
+
+        return (name[..lastDot], name[(lastDot + 1)..], arity);
+    }
+
+    private static int CountTopLevelCommas(string s)
+    {
+        int depth = 0, count = 0;
+        foreach (var c in s)
+        {
+            if (c == '<') depth++;
+            else if (c == '>') depth--;
+            else if (c == ',' && depth == 0) count++;
+        }
+        return count;
     }
 
     private Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation> ResolveSources(
@@ -264,7 +374,10 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                     var loc = addr.GetSourceLine(reader);
                     if (loc is null) continue;
                     var module = modules.GetValueOrDefault(key, string.Empty);
-                    var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, key);
+                    var methodDisplay = !string.IsNullOrEmpty(module) && key.StartsWith(module + "!", StringComparison.Ordinal)
+                        ? key[(module.Length + 1)..]
+                        : key;
+                    var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, methodDisplay);
                     var file = loc.SourceFile?.BuildTimeFilePath;
                     var url = loc.SourceFile?.Url;
                     int? line = loc.LineNumber > 0 ? loc.LineNumber : null;
@@ -294,16 +407,16 @@ public sealed class EventPipeCpuSampler : ICpuSampler
     {
         private readonly Node _root = new(new SampledFrame(string.Empty, "<root>"));
 
-        public void AddStack(List<(string Key, string Module)> rootToLeaf, string leafKey)
+        public void AddStack(List<(string Key, string Module, string Display)> rootToLeaf, string leafKey)
         {
             var current = _root;
             current.Inclusive++;
             for (var i = 0; i < rootToLeaf.Count; i++)
             {
-                var (key, module) = rootToLeaf[i];
+                var (key, module, display) = rootToLeaf[i];
                 if (!current.Children.TryGetValue(key, out var child))
                 {
-                    child = new Node(new SampledFrame(module, key));
+                    child = new Node(new SampledFrame(module, display));
                     current.Children[key] = child;
                 }
                 child.Inclusive++;

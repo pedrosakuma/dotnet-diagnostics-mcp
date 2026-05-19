@@ -7,7 +7,8 @@ public sealed record SampledFrame(string Module, string Method);
 public sealed record Hotspot(
     SampledFrame Frame,
     long InclusiveSamples,
-    long ExclusiveSamples);
+    long ExclusiveSamples,
+    DotnetDiagnosticsMcp.Core.Memory.MethodIdentity? Identity = null);
 
 /// <summary>Aggregated CPU sample over a window.</summary>
 public sealed record CpuSample(

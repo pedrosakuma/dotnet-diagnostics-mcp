@@ -62,7 +62,8 @@ public sealed record HotspotSummary(
     long ExclusiveSamples,
     double InclusivePercent,
     double ExclusivePercent,
-    SourceLocation? Source = null);
+    SourceLocation? Source = null,
+    MethodIdentity? Identity = null);
 
 public sealed record SymbolRef(string Module, string MethodFullName);
 
@@ -72,6 +73,29 @@ public sealed record SymbolRef(string Module, string MethodFullName);
 /// HTTP URL embedded in the PDB when available, ready to paste into a PR comment.
 /// </summary>
 public sealed record SourceLocation(string? File, int? StartLine, string? SourceLink);
+
+/// <summary>
+/// Canonical, machine-readable identity of a managed method observed in a diagnostic
+/// trace (issue #18 — handoff with <c>dotnet-assembly-mcp</c>). The <c>(ModuleVersionId,
+/// MetadataToken)</c> pair round-trips exactly to a single <c>MethodDefinition</c> in the
+/// PE metadata regardless of name mangling, generic instantiations, or compiler-synthesized
+/// closure names. All other fields are display aids.
+/// </summary>
+/// <param name="ModuleName">Simple module file name (e.g. <c>MyApp.dll</c>).</param>
+/// <param name="ModulePath">Absolute path on disk when known by the sidecar.</param>
+/// <param name="ModuleVersionId">PE module MVID — stable across copies of the same binary.</param>
+/// <param name="MetadataToken">IL method-def metadata token (table 0x06).</param>
+/// <param name="TypeFullName">Declaring type FQN (namespace + nested type chain).</param>
+/// <param name="MethodName">Bare method name (no signature).</param>
+/// <param name="GenericArity">Number of generic method parameters; 0 for non-generic methods.</param>
+public sealed record MethodIdentity(
+    string? ModuleName,
+    string? ModulePath,
+    Guid? ModuleVersionId,
+    int? MetadataToken,
+    string? TypeFullName,
+    string MethodName,
+    int GenericArity);
 
 /// <summary>Optional declaration that this investigation targets / proposes a fix.</summary>
 public sealed record InvestigationFixTarget(

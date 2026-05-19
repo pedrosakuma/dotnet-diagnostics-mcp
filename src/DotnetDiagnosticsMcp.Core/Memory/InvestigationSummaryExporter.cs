@@ -79,13 +79,15 @@ public sealed class InvestigationSummaryExporter : IInvestigationSummaryExporter
             .Select(g =>
             {
                 artifact.ResolvedSources.TryGetValue(g.Symbol, out var src);
+                artifact.MethodIdentities.TryGetValue(g.Symbol, out var id);
                 return new HotspotSummary(
                     Symbol: g.Symbol,
                     InclusiveSamples: g.Inclusive,
                     ExclusiveSamples: g.Exclusive,
                     InclusivePercent: Math.Round(100.0 * g.Inclusive / total, 2),
                     ExclusivePercent: Math.Round(100.0 * g.Exclusive / total, 2),
-                    Source: src);
+                    Source: src,
+                    Identity: id);
             })
             .ToArray();
 
@@ -161,8 +163,8 @@ public sealed class InvestigationSummaryExporter : IInvestigationSummaryExporter
         var f = s.Findings;
         sb.Append("- Samples: `").Append(f.TotalSamples).Append("` over `").Append(f.Duration.TotalSeconds).AppendLine("s`");
         sb.AppendLine();
-        sb.AppendLine("| # | Method | Module | Incl % | Excl % | Source |");
-        sb.AppendLine("|---|---|---|---:|---:|---|");
+        sb.AppendLine("| # | Method | Module | Incl % | Excl % | Source | Handoff (mvid · token) |");
+        sb.AppendLine("|---|---|---|---:|---:|---|---|");
         var i = 1;
         foreach (var h in f.TopHotspots)
         {
@@ -184,6 +186,13 @@ public sealed class InvestigationSummaryExporter : IInvestigationSummaryExporter
                     if (src.StartLine is int ln) sb.Append(':').Append(ln);
                     sb.Append('`');
                 }
+            }
+            sb.Append(" | ");
+            if (h.Identity is { } id && id.ModuleVersionId is Guid mvid && id.MetadataToken is int tok)
+            {
+                sb.Append('`').Append(mvid.ToString("D")).Append("` · `0x")
+                  .Append(tok.ToString("X8", System.Globalization.CultureInfo.InvariantCulture))
+                  .Append('`');
             }
             sb.AppendLine(" |");
         }

@@ -158,6 +158,38 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
             "with PDBs side-by-side the sampler should auto-discover the symbol path and resolve at least one hotspot");
     }
 
+    [Fact]
+    public async Task CpuSampler_EmitsMethodIdentities_ForUserCode()
+    {
+        EnsureSampleRunning();
+
+        var sampleDll = LocateSampleDll()
+            ?? throw new InvalidOperationException("CoreClrSample.dll not found.");
+
+        var expectedMvid = new MvidReader().TryRead(sampleDll);
+        expectedMvid.Should().NotBeNull("the published sample DLL must have a readable MVID for the handoff contract test");
+
+        var sampler = new EventPipeCpuSampler();
+        var result = await sampler.SampleAsync(
+            Pid,
+            TimeSpan.FromSeconds(3),
+            topN: 50,
+            cancellationToken: CancellationToken.None);
+
+        result.Artifact.MethodIdentities.Should().NotBeNull();
+        result.Artifact.MethodIdentities.Should().NotBeEmpty(
+            "the sampler must always emit a handoff payload for ranked hotspots");
+
+        // At least one hotspot should map to a method from CoreClrSample itself.
+        var userCodeIdentity = result.Artifact.MethodIdentities.Values
+            .FirstOrDefault(id => id.ModuleVersionId == expectedMvid);
+
+        userCodeIdentity.Should().NotBeNull(
+            "the sampler must resolve user-code hotspots to the publishing assembly's MVID for the assembly-mcp handoff");
+        userCodeIdentity!.MetadataToken.Should().BeGreaterThan(0, "the handoff pair (MVID, token) must round-trip to the assembly-mcp");
+        userCodeIdentity.MethodName.Should().NotBeNullOrEmpty();
+    }
+
     private void EnsureSampleRunning()
     {
         if (_sampleProcess is null || _sampleProcess.HasExited)
