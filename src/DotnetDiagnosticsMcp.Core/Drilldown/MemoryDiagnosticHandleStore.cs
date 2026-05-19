@@ -25,7 +25,7 @@ public sealed class MemoryDiagnosticHandleStore : IDiagnosticHandleStore
         _clock = clock ?? TimeProvider.System;
     }
 
-    public DiagnosticHandle Register(int processId, string kind, object artifact, TimeSpan ttl)
+    public DiagnosticHandle Register(int processId, string kind, object artifact, TimeSpan ttl, bool evictWhenProcessExits = true)
     {
         ArgumentNullException.ThrowIfNull(artifact);
         ArgumentException.ThrowIfNullOrWhiteSpace(kind);
@@ -40,7 +40,7 @@ public sealed class MemoryDiagnosticHandleStore : IDiagnosticHandleStore
         var id = NewHandleId();
         var expiresAt = _clock.GetUtcNow().Add(ttl);
         var handle = new DiagnosticHandle(id, expiresAt, processId, kind);
-        _entries[id] = new Entry(handle, artifact);
+        _entries[id] = new Entry(handle, artifact, evictWhenProcessExits);
         return handle;
     }
 
@@ -94,13 +94,17 @@ public sealed class MemoryDiagnosticHandleStore : IDiagnosticHandleStore
         return removed;
     }
 
-    /// <summary>Distinct PIDs currently referenced by live (non-expired) handles.</summary>
+    /// <summary>Distinct PIDs currently referenced by live (non-expired) handles that opted into
+    /// process-exit eviction. Offline-origin handles (e.g. dump files registered with
+    /// <c>evictWhenProcessExits: false</c>) are intentionally excluded so they survive PID reuse
+    /// on another host.</summary>
     public IReadOnlyCollection<int> RegisteredProcessIds()
     {
         var now = _clock.GetUtcNow();
         var set = new HashSet<int>();
         foreach (var kv in _entries)
         {
+            if (!kv.Value.EvictWhenProcessExits) continue;
             if (kv.Value.Handle.ExpiresAt > now)
             {
                 set.Add(kv.Value.Handle.ProcessId);
@@ -184,5 +188,5 @@ public sealed class MemoryDiagnosticHandleStore : IDiagnosticHandleStore
         return new string(chars, 0, outIndex);
     }
 
-    private sealed record Entry(DiagnosticHandle Handle, object Artifact);
+    private sealed record Entry(DiagnosticHandle Handle, object Artifact, bool EvictWhenProcessExits = true);
 }

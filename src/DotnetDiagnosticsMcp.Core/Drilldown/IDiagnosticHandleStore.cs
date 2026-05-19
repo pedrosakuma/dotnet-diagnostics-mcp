@@ -11,12 +11,17 @@ public interface IDiagnosticHandleStore
     /// Stores <paramref name="artifact"/> under a fresh handle. The artifact is evicted after
     /// <paramref name="ttl"/> elapses or after the store's capacity is reached.
     /// </summary>
-    /// <param name="processId">PID the artifact was collected from. Used for invalidation.</param>
+    /// <param name="processId">PID the artifact was collected from. Used for invalidation when
+    /// <paramref name="evictWhenProcessExits"/> is true.</param>
     /// <param name="kind">Short discriminator (e.g. "cpu-sample", "gc-dump").</param>
     /// <param name="artifact">Opaque payload retained in memory.</param>
     /// <param name="ttl">Maximum age before automatic eviction.</param>
+    /// <param name="evictWhenProcessExits">When true (default), the handle is dropped as soon as
+    /// the eviction background service notices the PID is no longer alive. Set to <c>false</c> for
+    /// artifacts collected from an offline source (dump files, imported traces) whose <c>ProcessId</c>
+    /// refers to a process on another host or a PID that may have been reused locally.</param>
     /// <returns>The newly-issued handle.</returns>
-    DiagnosticHandle Register(int processId, string kind, object artifact, TimeSpan ttl);
+    DiagnosticHandle Register(int processId, string kind, object artifact, TimeSpan ttl, bool evictWhenProcessExits = true);
 
     /// <summary>
     /// Retrieves the artifact previously stored under <paramref name="handle"/>, casting it

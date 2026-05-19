@@ -507,13 +507,26 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             sampleInstances[typeName] = obj;
         }
 
-        var rootByObject = BuildRootByObjectMap(runtime, sampleInstances.Values, depthLimit, ct);
+        var targetAddresses = new HashSet<ulong>(sampleInstances.Values.Select(o => o.Address));
+        var rootByObject = BuildRootByObjectMap(runtime, targetAddresses, depthLimit, ct, out var bfsCapHit);
+        if (bfsCapHit)
+        {
+            warnings.Add($"Retention-path BFS hit its safety cap before reaching every target type; deeply-retained instances may report Truncated=true with no chain found.");
+        }
 
         var results = new List<RetentionPath>(sampleInstances.Count);
         foreach (var (typeName, instance) in sampleInstances)
         {
             ct.ThrowIfCancellationRequested();
+            var reachedByBfs = rootByObject.ContainsKey(instance.Address);
             var chain = WalkUp(instance, rootByObject, depthLimit, out var truncated);
+            // If the target wasn't reachable from any root within the BFS budget the chain only
+            // contains the target itself — surface that as Truncated so the LLM doesn't mistake
+            // "no root found" for "this object has no retainer (impossible for a live object)".
+            if (!reachedByBfs)
+            {
+                truncated = true;
+            }
             results.Add(new RetentionPath(
                 TargetTypeFullName: typeName,
                 TargetObjectAddress: instance.Address,
@@ -525,30 +538,43 @@ public sealed class ClrMdDumpInspector : IDumpInspector
 
     private static Dictionary<ulong, (ulong From, string? RootKind)> BuildRootByObjectMap(
         ClrRuntime runtime,
-        IEnumerable<ClrObject> _,
+        HashSet<ulong> targets,
         int depthLimit,
-        CancellationToken ct)
+        CancellationToken ct,
+        out bool bfsCapHit)
     {
         // Map each reachable object to its first-seen retainer (object address or root).
+        // We short-circuit as soon as every target has been observed by the BFS so we don't pay
+        // for the rest of the heap.
+        bfsCapHit = false;
         var retainer = new Dictionary<ulong, (ulong From, string? RootKind)>();
         var visited = new HashSet<ulong>();
         var queue = new Queue<(ulong Address, int Depth)>();
+        var remainingTargets = new HashSet<ulong>(targets);
 
         foreach (var root in runtime.Heap.EnumerateRoots())
         {
             ct.ThrowIfCancellationRequested();
             var addr = root.Object.Address;
-            if (addr == 0 || visited.Contains(addr)) continue;
-            visited.Add(addr);
+            if (addr == 0 || !visited.Add(addr)) continue;
             retainer[addr] = (0UL, root.RootKind.ToString());
             queue.Enqueue((addr, 0));
+            if (remainingTargets.Remove(addr) && remainingTargets.Count == 0) return retainer;
         }
+
+        // Safety cap: scale with depthLimit but allow enough breathing room to reach a typical
+        // managed object (LLM-facing depthLimit defaults to 8; 8 * 32 = 256 BFS depth is generous).
+        var bfsDepthCap = Math.Max(depthLimit * 32, 256);
 
         while (queue.Count > 0)
         {
             ct.ThrowIfCancellationRequested();
             var (addr, depth) = queue.Dequeue();
-            if (depth >= depthLimit * 8) continue; // safety cap on the BFS itself
+            if (depth >= bfsDepthCap)
+            {
+                bfsCapHit = true;
+                continue;
+            }
             ClrObject obj;
             try { obj = runtime.Heap.GetObject(addr); }
             catch { continue; }
@@ -559,6 +585,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
                 if (child.Address == 0 || !visited.Add(child.Address)) continue;
                 retainer[child.Address] = (addr, null);
                 queue.Enqueue((child.Address, depth + 1));
+                if (remainingTargets.Remove(child.Address) && remainingTargets.Count == 0) return retainer;
             }
         }
         return retainer;

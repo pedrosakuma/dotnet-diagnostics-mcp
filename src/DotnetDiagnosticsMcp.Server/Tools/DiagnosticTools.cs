@@ -565,7 +565,9 @@ public sealed class DiagnosticTools
             new DumpInspectionOptions(TopTypes: topTypes, IncludeRetentionPaths: includeRetentionPaths, RetentionPathLimit: retentionPathLimit),
             cancellationToken).ConfigureAwait(false);
 
-        var handle = handles.Register(snapshot.ProcessId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl);
+        // Dump-origin snapshots refer to a PID that may not be alive (or may be reused) on this
+        // host — opt out of process-exit eviction so the handle survives its full 10-min TTL.
+        var handle = handles.Register(snapshot.ProcessId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl, evictWhenProcessExits: false);
         var inspection = snapshot.ToDumpInspection(topTypes, handle.Id);
 
         var topByBytes = inspection.TopTypesByBytes;
