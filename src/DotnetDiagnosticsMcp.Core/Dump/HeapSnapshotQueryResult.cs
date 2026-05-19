@@ -20,4 +20,10 @@ public sealed record HeapSnapshotQueryResult(
     public IReadOnlyList<RetentionPath>? RetentionPaths { get; init; }
     /// <summary>Echoes the substring filter applied to retention-path queries, if any.</summary>
     public string? FilterTypeFullName { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"roots-by-kind"</c>.</summary>
+    public IReadOnlyList<RootKindStat>? RootsByKind { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"finalizer-queue"</c>.</summary>
+    public IReadOnlyList<FinalizableTypeStat>? FinalizableObjects { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"fragmentation"</c>.</summary>
+    public IReadOnlyList<SegmentStat>? Segments { get; init; }
 }

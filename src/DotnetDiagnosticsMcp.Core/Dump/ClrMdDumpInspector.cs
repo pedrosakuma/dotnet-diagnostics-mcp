@@ -105,7 +105,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             };
         }
 
-        var (byBytes, byInstances, heapSummary, retention) = SummarizeRuntime(runtime, opts, warnings, ct);
+        var (byBytes, byInstances, heapSummary, retention, roots, finalizable, segments) = SummarizeRuntime(runtime, opts, warnings, ct);
         sw.Stop();
 
         return new HeapSnapshotArtifact(
@@ -119,6 +119,9 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             TopTypesByInstances: byInstances)
         {
             RetentionPaths = retention,
+            RootsByKind = roots,
+            FinalizableObjectsByType = finalizable,
+            Segments = segments,
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
@@ -167,7 +170,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             };
         }
 
-        var (byBytes, byInstances, heapSummary, retention) = SummarizeRuntime(runtime, opts, warnings, ct);
+        var (byBytes, byInstances, heapSummary, retention, roots, finalizable, segments) = SummarizeRuntime(runtime, opts, warnings, ct);
         sw.Stop();
 
         return new HeapSnapshotArtifact(
@@ -183,15 +186,18 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             DumpFilePath = dumpFilePath,
             DumpFileSizeBytes = fileInfo.Length,
             RetentionPaths = retention,
+            RootsByKind = roots,
+            FinalizableObjectsByType = finalizable,
+            Segments = segments,
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
 
-    private (IReadOnlyList<TypeStat> ByBytes, IReadOnlyList<TypeStat> ByInstances, DumpHeapSummary Heap, IReadOnlyList<RetentionPath>? Retention) SummarizeRuntime(
+    private (IReadOnlyList<TypeStat> ByBytes, IReadOnlyList<TypeStat> ByInstances, DumpHeapSummary Heap, IReadOnlyList<RetentionPath>? Retention, IReadOnlyList<RootKindStat> Roots, IReadOnlyList<FinalizableTypeStat> Finalizable, IReadOnlyList<SegmentStat> Segments) SummarizeRuntime(
         ClrRuntime runtime, DumpInspectionOptions opts, List<string> warnings, CancellationToken ct)
     {
-        var (typeStats, totalBytes) = WalkHeap(runtime, ct);
-        var heapSummary = SummarizeHeap(runtime);
+        var (typeStats, totalBytes, segments) = WalkHeap(runtime, ct);
+        var heapSummary = SummarizeHeapFromSegments(segments);
 
         // The snapshot retains a richer top-N so follow-up drilldown queries (e.g. ask for top-100
         // when the tool returned top-20 inline) don't pay the walk cost a second time.
@@ -215,30 +221,175 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             retention = ResolveRetentionPaths(runtime, byBytes, opts.RetentionPathLimit, opts.SnapshotRetentionPathTargets, warnings, ct);
         }
 
-        return (byBytes, byInstances, heapSummary, retention);
+        var roots = WalkRoots(runtime, warnings, ct);
+        var finalizable = WalkFinalizableObjects(runtime, opts.SnapshotFinalizerQueueTopTypes, warnings, ct);
+
+        return (byBytes, byInstances, heapSummary, retention, roots, finalizable, segments);
     }
 
-    private static (Dictionary<TypeKey, RawTypeStat> Stats, long TotalBytes) WalkHeap(ClrRuntime runtime, CancellationToken ct)
+    private static (Dictionary<TypeKey, RawTypeStat> Stats, long TotalBytes, IReadOnlyList<SegmentStat> Segments) WalkHeap(ClrRuntime runtime, CancellationToken ct)
     {
         var stats = new Dictionary<TypeKey, RawTypeStat>();
         long total = 0;
-        foreach (var obj in runtime.Heap.EnumerateObjects())
+        var segmentStats = new List<SegmentStat>(runtime.Heap.Segments.Length);
+
+        foreach (var segment in runtime.Heap.Segments)
         {
             ct.ThrowIfCancellationRequested();
-            if (obj.Type is null) continue;
-            var size = (long)obj.Size;
-            total += size;
+            long segUsed = 0, segFree = 0, segObjs = 0, segFreeObjs = 0;
 
-            var key = new TypeKey(obj.Type.Name ?? "<unknown>", obj.Type.Module?.Name);
-            if (!stats.TryGetValue(key, out var s))
+            foreach (var obj in segment.EnumerateObjects())
             {
-                s = new RawTypeStat(key.TypeName, key.ModuleName, obj.Type);
-                stats[key] = s;
+                ct.ThrowIfCancellationRequested();
+                if (obj.Type is null) continue;
+                var size = (long)obj.Size;
+                segObjs++;
+
+                if (obj.IsFree)
+                {
+                    segFree += size;
+                    segFreeObjs++;
+                    continue;
+                }
+
+                segUsed += size;
+                total += size;
+
+                var key = new TypeKey(obj.Type.Name ?? "<unknown>", obj.Type.Module?.Name);
+                if (!stats.TryGetValue(key, out var s))
+                {
+                    s = new RawTypeStat(key.TypeName, key.ModuleName, obj.Type);
+                    stats[key] = s;
+                }
+                s.Count++;
+                s.Bytes += size;
             }
-            s.Count++;
-            s.Bytes += size;
+
+            var length = (long)segment.Length;
+            var committed = (long)(segment.CommittedMemory.End - segment.CommittedMemory.Start);
+            var reserved = (long)(segment.ReservedMemory.End - segment.ReservedMemory.Start);
+            var freePct = length > 0 ? Math.Round(100.0 * segFree / length, 2) : 0.0;
+
+            segmentStats.Add(new SegmentStat(
+                LogicalHeap: segment.SubHeap.Index,
+                Kind: segment.Kind.ToString(),
+                Generation: ClassifySegmentGeneration(segment),
+                Start: segment.Start,
+                End: segment.End,
+                Length: length,
+                CommittedBytes: committed,
+                ReservedBytes: reserved,
+                UsedBytes: segUsed,
+                FreeBytes: segFree,
+                ObjectCount: segObjs - segFreeObjs,
+                FreeObjectCount: segFreeObjs)
+            {
+                FreePercent = freePct,
+            });
         }
-        return (stats, total);
+        return (stats, total, segmentStats);
+    }
+
+    private static string ClassifySegmentGeneration(ClrSegment segment) => segment.Kind switch
+    {
+        GCSegmentKind.Generation0 => "Gen0",
+        GCSegmentKind.Generation1 => "Gen1",
+        GCSegmentKind.Generation2 => "Gen2",
+        GCSegmentKind.Large => "LOH",
+        GCSegmentKind.Pinned => "POH",
+        GCSegmentKind.Ephemeral => "Ephemeral",
+        GCSegmentKind.Frozen => "Frozen",
+        _ => segment.Kind.ToString(),
+    };
+
+    private static RootKindStat[] WalkRoots(ClrRuntime runtime, List<string> warnings, CancellationToken ct)
+    {
+        // Bucket every reachable root by ClrRootKind. We deliberately do NOT do a per-root
+        // retention walk here (that's O(roots × heap) and would dwarf the heap walk itself).
+        // DirectlyReferencedBytes is the sum of the IMMEDIATE target object's size, summed across
+        // distinct objects per kind. Useful for spotting "I have 50k pinning handles holding X MB".
+        var byKind = new Dictionary<string, RawRootStat>(StringComparer.Ordinal);
+
+        try
+        {
+            foreach (var root in runtime.Heap.EnumerateRoots())
+            {
+                ct.ThrowIfCancellationRequested();
+                var kind = root.RootKind.ToString();
+                if (!byKind.TryGetValue(kind, out var bucket))
+                {
+                    bucket = new RawRootStat();
+                    byKind[kind] = bucket;
+                }
+                bucket.RootCount++;
+                if (root.IsPinned) bucket.PinnedCount++;
+                if (root.IsInterior) bucket.InteriorCount++;
+
+                var addr = root.Object.Address;
+                if (addr != 0 && bucket.SeenObjects.Add(addr))
+                {
+                    bucket.DistinctTargets++;
+                    if (!root.Object.IsNull && root.Object.Type is not null)
+                    {
+                        bucket.DirectBytes += (long)root.Object.Size;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Root enumeration aborted partway through: {ex.GetType().Name} ({ex.Message}).");
+        }
+
+        return byKind
+            .Select(kvp => new RootKindStat(
+                RootKind: kvp.Key,
+                RootCount: kvp.Value.RootCount,
+                DistinctTargetObjects: kvp.Value.DistinctTargets,
+                DirectlyReferencedBytes: kvp.Value.DirectBytes,
+                PinnedRootCount: kvp.Value.PinnedCount,
+                InteriorRootCount: kvp.Value.InteriorCount))
+            .OrderByDescending(r => r.DirectlyReferencedBytes)
+            .ThenByDescending(r => r.RootCount)
+            .ToArray();
+    }
+
+    private static FinalizableTypeStat[] WalkFinalizableObjects(
+        ClrRuntime runtime, int topN, List<string> warnings, CancellationToken ct)
+    {
+        var byType = new Dictionary<TypeKey, RawTypeStat>();
+        try
+        {
+            foreach (var addr in runtime.Heap.EnumerateFinalizableObjects())
+            {
+                ct.ThrowIfCancellationRequested();
+                var obj = runtime.Heap.GetObject(addr);
+                if (obj.Type is null) continue;
+                var key = new TypeKey(obj.Type.Name ?? "<unknown>", obj.Type.Module?.Name);
+                if (!byType.TryGetValue(key, out var bucket))
+                {
+                    bucket = new RawTypeStat(key.TypeName, key.ModuleName, obj.Type);
+                    byType[key] = bucket;
+                }
+                bucket.Count++;
+                bucket.Bytes += (long)obj.Size;
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Finalizer queue enumeration aborted partway through: {ex.GetType().Name} ({ex.Message}).");
+        }
+
+        return byType.Values
+            .OrderByDescending(b => b.Bytes)
+            .ThenByDescending(b => b.Count)
+            .Take(topN)
+            .Select(b => new FinalizableTypeStat(
+                TypeFullName: b.TypeName,
+                ModuleName: b.ModuleName is { } mn ? Path.GetFileName(mn) : null,
+                InstanceCount: b.Count,
+                TotalBytes: b.Bytes))
+            .ToArray();
     }
 
     private TypeStat ToTypeStat(RawTypeStat raw, long totalBytes)
@@ -306,26 +457,23 @@ public sealed class ClrMdDumpInspector : IDumpInspector
 
     private readonly Dictionary<string, Guid?> _mvidCache = new(StringComparer.Ordinal);
 
-    private static DumpHeapSummary SummarizeHeap(ClrRuntime runtime)
+    private static DumpHeapSummary SummarizeHeapFromSegments(IReadOnlyList<SegmentStat> segments)
     {
         long total = 0, gen0 = 0, gen1 = 0, gen2 = 0, loh = 0, poh = 0, committed = 0;
-        foreach (var segment in runtime.Heap.Segments)
+        foreach (var s in segments)
         {
-            var len = (long)segment.Length;
-            total += len;
-            committed += (long)(segment.CommittedMemory.End - segment.CommittedMemory.Start);
-            switch (segment.Kind)
+            total += s.Length;
+            committed += s.CommittedBytes;
+            switch (s.Generation)
             {
-                case GCSegmentKind.Generation0: gen0 += len; break;
-                case GCSegmentKind.Generation1: gen1 += len; break;
-                case GCSegmentKind.Generation2: gen2 += len; break;
-                case GCSegmentKind.Large: loh += len; break;
-                case GCSegmentKind.Pinned: poh += len; break;
-                case GCSegmentKind.Ephemeral:
-                    // Workstation GC keeps gen0/gen1 in a single segment whose bytes are
-                    // reported per generation by Length-of-region rather than per-segment.
-                    // Bucket into gen0 — close enough for the LLM-facing summary.
-                    gen0 += len;
+                case "Gen0": gen0 += s.Length; break;
+                case "Gen1": gen1 += s.Length; break;
+                case "Gen2": gen2 += s.Length; break;
+                case "LOH": loh += s.Length; break;
+                case "POH": poh += s.Length; break;
+                case "Ephemeral":
+                    // Workstation GC keeps gen0/gen1 in a single segment; bucket into gen0 for the LLM-facing summary.
+                    gen0 += s.Length;
                     break;
             }
         }
@@ -450,6 +598,16 @@ public sealed class ClrMdDumpInspector : IDumpInspector
     }
 
     private readonly record struct TypeKey(string TypeName, string? ModuleName);
+
+    private sealed class RawRootStat
+    {
+        public long RootCount;
+        public long DistinctTargets;
+        public long DirectBytes;
+        public long PinnedCount;
+        public long InteriorCount;
+        public HashSet<ulong> SeenObjects { get; } = new();
+    }
 
     private sealed class RawTypeStat
     {

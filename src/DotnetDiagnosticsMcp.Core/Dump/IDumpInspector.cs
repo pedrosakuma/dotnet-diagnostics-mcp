@@ -45,12 +45,14 @@ public interface IDumpInspector
 /// <param name="RetentionPathLimit">When retention paths are enabled, cap the depth of each chain (defaults to 8 frames).</param>
 /// <param name="SnapshotRetentionPathTargets">Number of distinct types for which to compute retention paths
 /// when <paramref name="IncludeRetentionPaths"/> is set. Defaults to 10.</param>
+/// <param name="SnapshotFinalizerQueueTopTypes">Number of types retained in the finalizer-queue drilldown view. Defaults to 50.</param>
 public sealed record DumpInspectionOptions(
     int TopTypes = 20,
     int SnapshotTopTypes = 200,
     bool IncludeRetentionPaths = false,
     int RetentionPathLimit = 8,
-    int SnapshotRetentionPathTargets = 10);
+    int SnapshotRetentionPathTargets = 10,
+    int SnapshotFinalizerQueueTopTypes = 50);
 
 /// <summary>Where a <see cref="HeapSnapshotArtifact"/> came from.</summary>
 public enum HeapSnapshotOrigin
@@ -83,8 +85,58 @@ public sealed record HeapSnapshotArtifact(
     public long? DumpFileSizeBytes { get; init; }
     /// <summary>Retention paths walked for the top-N retained types (gated by <see cref="DumpInspectionOptions.IncludeRetentionPaths"/>).</summary>
     public IReadOnlyList<RetentionPath>? RetentionPaths { get; init; }
+    /// <summary>GC roots aggregated by ClrRootKind. Populated unconditionally for every successful walk.</summary>
+    public IReadOnlyList<RootKindStat>? RootsByKind { get; init; }
+    /// <summary>Objects sitting on the finalizer queue grouped by managed type (top-N by retained bytes).
+    /// A growing finalizer queue is a classic memory pressure smell.</summary>
+    public IReadOnlyList<FinalizableTypeStat>? FinalizableObjectsByType { get; init; }
+    /// <summary>Per-segment heap layout (gen, kind, length, committed, free bytes). Drives the fragmentation drilldown view.</summary>
+    public IReadOnlyList<SegmentStat>? Segments { get; init; }
     /// <summary>Diagnostic warnings emitted during the walk (degraded data, ClrMD limitations, …).</summary>
     public IReadOnlyList<string>? Warnings { get; init; }
+}
+
+/// <summary>
+/// Roll-up of GC roots for a single <c>ClrRootKind</c>. <see cref="DirectlyReferencedBytes"/> is the
+/// sum of the sizes of the immediate target objects (not their reachable closures — that would
+/// require a per-root retention walk and is too expensive for an always-on stat).
+/// </summary>
+public sealed record RootKindStat(
+    string RootKind,
+    long RootCount,
+    long DistinctTargetObjects,
+    long DirectlyReferencedBytes,
+    long PinnedRootCount,
+    long InteriorRootCount);
+
+/// <summary>Type-aggregated entry from the finalizer queue.</summary>
+public sealed record FinalizableTypeStat(
+    string TypeFullName,
+    string? ModuleName,
+    long InstanceCount,
+    long TotalBytes);
+
+/// <summary>
+/// Per-segment view used by the <c>fragmentation</c> drilldown. <see cref="FreeBytes"/> is the
+/// sum of <c>obj.IsFree</c> sizes encountered during the walk — a high free-to-length ratio on
+/// gen-2 or LOH is the classic fragmentation signal.
+/// </summary>
+public sealed record SegmentStat(
+    int LogicalHeap,
+    string Kind,
+    string Generation,
+    ulong Start,
+    ulong End,
+    long Length,
+    long CommittedBytes,
+    long ReservedBytes,
+    long UsedBytes,
+    long FreeBytes,
+    long ObjectCount,
+    long FreeObjectCount)
+{
+    /// <summary>Free bytes as a percentage of segment length, rounded to two decimals.</summary>
+    public double FreePercent { get; init; }
 }
 
 /// <summary>Output of <see cref="IDumpInspector.InspectAsync"/> projected for inline tool consumption.</summary>

@@ -665,16 +665,19 @@ public sealed class DiagnosticTools
         UseStructuredContent = true)]
     [Description(
         "Returns a slice of a heap snapshot previously captured by inspect_dump or inspect_live_heap, addressed by its handle. " +
-        "Lets the LLM ask for a richer top-N (snapshot retains ~200 types), retention paths filtered by type substring, or the full " +
-        "snapshot metadata — without paying the walk cost a second time. Views: " +
+        "Lets the LLM ask for a richer top-N (snapshot retains ~200 types), retention paths filtered by type substring, " +
+        "GC roots grouped by kind, the finalizer queue, or per-segment heap layout — without paying the walk cost a second time. Views: " +
         "`top-types` (expand the inline top-N to up to snapshot capacity), " +
-        "`retention-paths` (filter the walked retention chains by target type substring; requires the original inspect call to have set includeRetentionPaths=true). " +
+        "`retention-paths` (filter the walked retention chains by target type substring; requires the original inspect call to have set includeRetentionPaths=true), " +
+        "`roots-by-kind` (GC roots aggregated by ClrRootKind with pinned/interior counts), " +
+        "`finalizer-queue` (objects waiting for finalization, top-N by retained bytes), " +
+        "`fragmentation` (per-segment Gen/Kind/Length/Committed/Free bytes — high FreePercent on Gen2/LOH signals fragmentation). " +
         "Handles expire ~10 minutes after the capture and are invalidated when the target process exits.")]
     public static DiagnosticResult<HeapSnapshotQueryResult> QueryHeapSnapshot(
         IDiagnosticHandleStore handles,
         [Description("Snapshot handle returned by inspect_dump or inspect_live_heap.")] string handle,
-        [Description("Which slice of the snapshot to return: 'top-types' or 'retention-paths'.")] string view = "top-types",
-        [Description("For view='top-types': maximum number of types to return per ranking (bytes/instances). Capped by the snapshot's retained top-N.")] int topN = 50,
+        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue' or 'fragmentation'.")] string view = "top-types",
+        [Description("For view='top-types'/'finalizer-queue'/'fragmentation': maximum entries to return. Ignored by 'roots-by-kind' and 'retention-paths'.")] int topN = 50,
         [Description("For view='top-types': ranking — 'bytes' (default) or 'instances'.")] string rankBy = "bytes",
         [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null)
     {
@@ -696,7 +699,10 @@ public sealed class DiagnosticTools
         {
             "top-types" => QueryTopTypes(snapshot, handle, topN, rankBy),
             "retention-paths" => QueryRetentionPaths(snapshot, handle, typeFullName, topN),
-            _ => InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types' or 'retention-paths' (got '{view}')"),
+            "roots-by-kind" => QueryRootsByKind(snapshot, handle),
+            "finalizer-queue" => QueryFinalizerQueue(snapshot, handle, topN),
+            "fragmentation" => QueryFragmentation(snapshot, handle, topN),
+            _ => InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue' or 'fragmentation' (got '{view}')"),
         };
     }
 
@@ -760,6 +766,59 @@ public sealed class DiagnosticTools
         {
             RetentionPaths = slice,
             FilterTypeFullName = typeFullName,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryRootsByKind(
+        HeapSnapshotArtifact snapshot, string handle)
+    {
+        var origin = snapshot.Origin.ToString();
+        var roots = snapshot.RootsByKind ?? Array.Empty<RootKindStat>();
+        var summary = roots.Count == 0
+            ? $"Snapshot '{handle}' has no recorded GC roots (heap walk produced 0 objects or root enumeration failed)."
+            : $"Returning {roots.Count} root kind(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top: `{roots[0].RootKind}` — {roots[0].RootCount:N0} roots, {roots[0].DistinctTargetObjects:N0} distinct targets, {roots[0].DirectlyReferencedBytes:N0} bytes directly referenced.";
+        var result = new HeapSnapshotQueryResult(handle, "roots-by-kind", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            RootsByKind = roots,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryFinalizerQueue(
+        HeapSnapshotArtifact snapshot, string handle, int topN)
+    {
+        var origin = snapshot.Origin.ToString();
+        var finalizable = snapshot.FinalizableObjectsByType ?? Array.Empty<FinalizableTypeStat>();
+        var slice = finalizable.Take(topN).ToArray();
+        var summary = slice.Length == 0
+            ? $"Snapshot '{handle}' has no objects waiting on the finalizer queue."
+            : $"Returning {slice.Length} finalizable type(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top: `{slice[0].TypeFullName}` — {slice[0].InstanceCount:N0} instances, {slice[0].TotalBytes:N0} bytes. A growing finalizer queue is a classic memory-pressure smell.";
+        var result = new HeapSnapshotQueryResult(handle, "finalizer-queue", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            FinalizableObjects = slice,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryFragmentation(
+        HeapSnapshotArtifact snapshot, string handle, int topN)
+    {
+        var origin = snapshot.Origin.ToString();
+        var segments = snapshot.Segments ?? Array.Empty<SegmentStat>();
+        // Most fragmented first — only Gen2/LOH/POH free bytes count as actionable fragmentation;
+        // ephemeral generations turn over too fast for it to matter.
+        var ordered = segments
+            .OrderByDescending(s => s.FreeBytes)
+            .ThenByDescending(s => s.FreePercent)
+            .Take(topN)
+            .ToArray();
+        var summary = ordered.Length == 0
+            ? $"Snapshot '{handle}' has no recorded segments."
+            : $"Returning {ordered.Length} segment(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Most fragmented: `{ordered[0].Generation}` segment @ 0x{ordered[0].Start:x} — {ordered[0].FreeBytes:N0}/{ordered[0].Length:N0} bytes free ({ordered[0].FreePercent}%).";
+        var result = new HeapSnapshotQueryResult(handle, "fragmentation", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            Segments = ordered,
         };
         return DiagnosticResult.Ok(result, summary);
     }
