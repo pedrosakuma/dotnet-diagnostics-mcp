@@ -43,6 +43,30 @@ a single `<tool>` call when there is only one .NET process visible to the
 sidecar. The capability digest is cached per pid for 60 seconds so back-to-back
 tool calls within an investigation pay the probe cost once.
 
+### Prompts (curated playbooks)
+
+In addition to tools, the server exposes 6 MCP **Prompts** that pre-package the
+investigation strategies from [`investigation-playbooks.md`](./investigation-playbooks.md)
+so the LLM can opt into a baked recipe instead of re-planning the next call
+after every step. Prompts do not consume the tool-slot budget — clients
+discover them via `prompts/list` and request a specific one via `prompts/get`.
+
+| Prompt | Source playbook | Required inputs |
+|---|---|---|
+| `diagnose-high-latency` | "The app feels slow / high latency" | none (all optional: `processId?`, `durationSeconds?`, `symptom?`) |
+| `diagnose-memory-growth` | "Memory keeps growing" | none (`processId?`, `windowSeconds?`, `symptom?`) |
+| `diagnose-5xx-errors` | "We're seeing 5xxs in production" | none (`processId?`, `symptom?`) |
+| `diagnose-slow-outbound-http` | "Slow outbound HTTP calls" | none (`processId?`, `durationSeconds?`, `symptom?`) |
+| `triage-nativeaot` | "Is this a NativeAOT app?" | none (`processId?`) |
+| `diagnose-safely-in-prod` | "Safest investigation in production" | none (`processId?`) |
+
+Every prompt returns a single `user`-role message whose content is annotated
+with `audience: ["assistant"]` so MCP clients that distinguish user-facing
+templates from assistant-facing context route them directly into the LLM's
+context window. Each prompt embeds the hypothesis tree from the playbook plus
+exact tool-call examples (with placeholder args reflecting bootstrap implícito).
+The LLM may always ignore a prompt and drive ad-hoc.
+
 ## Quick index
 
 | Tool | Cost | Requires CoreCLR? | Side effects |

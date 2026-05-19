@@ -111,8 +111,9 @@ builder.Services
 
             For a longer playbook (HTTP latency, exception storms, GC retention,
             NativeAOT caveats), read the `diag://guides/investigation` resource or
-            invoke one of the Prompts (`diagnose-slow-app`, `diagnose-memory-growth`,
-            `diagnose-exception-storm`).
+            invoke one of the Prompts (`diagnose-high-latency`, `diagnose-memory-growth`,
+            `diagnose-5xx-errors`, `diagnose-slow-outbound-http`, `triage-nativeaot`,
+            `diagnose-safely-in-prod`).
             """;
     })
     .WithHttpTransport()
