@@ -53,27 +53,29 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "get_collection_status",
             "cancel_collection");
 
-        // Tools may only require `processId` (and `providerName` for collect_event_source,
-        // `handle` for get_call_tree). Anything else must have a default so clients without
-        // elicitation can call the tool unattended.
+        // Tools that historically required `processId` are now bootstrap-implicit (issue #42):
+        // when omitted the server auto-selects the lone .NET process visible to it. The only
+        // genuinely required parameters left are domain values the LLM cannot guess (provider
+        // names, handles, dump paths, snapshot blobs). `collect_event_source` keeps
+        // `providerName` as required because there is no sensible default.
         var allowedRequired = new Dictionary<string, string[]>
         {
             ["list_dotnet_processes"] = Array.Empty<string>(),
-            ["get_process_info"] = new[] { "processId" },
-            ["get_diagnostic_capabilities"] = new[] { "processId" },
-            ["snapshot_counters"] = new[] { "processId" },
-            ["collect_cpu_sample"] = new[] { "processId" },
-            ["collect_exceptions"] = new[] { "processId" },
-            ["collect_gc_events"] = new[] { "processId" },
-            ["collect_event_source"] = new[] { "processId", "providerName" },
-            ["collect_process_dump"] = new[] { "processId" },
+            ["get_process_info"] = Array.Empty<string>(),
+            ["get_diagnostic_capabilities"] = Array.Empty<string>(),
+            ["snapshot_counters"] = Array.Empty<string>(),
+            ["collect_cpu_sample"] = Array.Empty<string>(),
+            ["collect_exceptions"] = Array.Empty<string>(),
+            ["collect_gc_events"] = Array.Empty<string>(),
+            ["collect_event_source"] = new[] { "providerName" },
+            ["collect_process_dump"] = Array.Empty<string>(),
             ["inspect_dump"] = new[] { "dumpFilePath" },
-            ["inspect_live_heap"] = new[] { "processId" },
+            ["inspect_live_heap"] = Array.Empty<string>(),
             ["query_heap_snapshot"] = new[] { "handle" },
             ["collect_thread_snapshot"] = Array.Empty<string>(),
             ["query_thread_snapshot"] = new[] { "handle" },
             ["get_call_tree"] = new[] { "handle" },
-            ["start_investigation"] = new[] { "processId" },
+            ["start_investigation"] = Array.Empty<string>(),
             ["export_investigation_summary"] = new[] { "handle" },
             ["compare_to_baseline"] = new[] { "baselineSummaryJson", "currentSummaryJson" },
             ["get_collection_status"] = new[] { "handle" },
@@ -90,6 +92,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         // equality assertions.
         var mustNotBeRequired = new[]
         {
+            "processId",
             "durationSeconds", "topN", "maxRecent", "maxEvents", "eventLevel",
             "dumpType", "outputDirectory", "rootMethodFilter", "maxDepth", "maxNodes",
             "intervalSeconds", "symptom", "hypothesis", "baseline", "maxToolCalls",

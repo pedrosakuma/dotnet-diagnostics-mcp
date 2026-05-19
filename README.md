@@ -56,6 +56,13 @@ Client setup (C# SDK, GUI clients, curl): [`docs/client-setup.md`](./docs/client
 Kubernetes sidecar: [`deploy/k8s/README.md`](./deploy/k8s/README.md).
 Azure (App Service + Container Apps) recipes: [`deploy/azure/README.md`](./deploy/azure/README.md).
 
+> **`processId` is optional everywhere.** When the sidecar only sees one .NET
+> process the server auto-resolves it and stamps a capability digest on every
+> response (`resolvedProcess.autoResolved = true`), so the
+> `list_dotnet_processes` → `get_diagnostic_capabilities` opener can be skipped
+> entirely. On ambiguity / nothing visible you get a structured error with the
+> candidate list inline. See [issue #42](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/42).
+
 ## Install (consumers)
 
 Three distributions of the MCP server, all wire-compatible. Pick whichever fits your environment best — see [`docs/consumer-install.md`](./docs/consumer-install.md) for the full walkthrough including supervisor templates (systemd, Windows Scheduled Task, launchd) and `mcp-config.json` snippets.

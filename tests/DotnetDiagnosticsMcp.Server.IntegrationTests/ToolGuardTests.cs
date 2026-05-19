@@ -1,6 +1,8 @@
 using DotnetDiagnosticsMcp.Core;
+using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Dump;
+using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Threads;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
@@ -25,7 +27,7 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, processId: 1234, cancellationToken: default);
+            inspector, handles, EchoResolver(), processId: 1234, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error.Should().NotBeNull();
@@ -42,7 +44,7 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, processId: 999, cancellationToken: default);
+            inspector, handles, EchoResolver(), processId: 999, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("EndpointUnavailable");
@@ -57,7 +59,7 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.CollectThreadSnapshot(
-            inspector, handles, processId: 42, cancellationToken: default);
+            inspector, handles, EchoResolver(), processId: 42, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -76,7 +78,7 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, processId: 7, cancellationToken: default);
+            inspector, handles, EchoResolver(), processId: 7, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -94,7 +96,7 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, processId: 9, cancellationToken: default);
+            inspector, handles, EchoResolver(), processId: 9, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -122,5 +124,29 @@ public sealed class ToolGuardTests
 
         public Task<ThreadSnapshotArtifact> InspectDumpAsync(string dumpFilePath, ThreadSnapshotOptions? options = null, CancellationToken cancellationToken = default)
             => throw _ex;
+    }
+
+    /// <summary>
+    /// Trivial resolver that echoes the explicit pid back as a CoreCLR ProcessContext, so the
+    /// guard tests can keep targeting an explicit pid without standing up the live discovery
+    /// + capability stack. Returns NoDotnetProcessFound if pid is null/0.
+    /// </summary>
+    internal static IProcessContextResolver EchoResolver()
+        => new EchoProcessContextResolver();
+
+    private sealed class EchoProcessContextResolver : IProcessContextResolver
+    {
+        public Task<ProcessContextResolution> ResolveAsync(int? requestedProcessId, CancellationToken cancellationToken = default)
+        {
+            if (requestedProcessId is not int pid || pid <= 0)
+            {
+                return Task.FromResult(new ProcessContextResolution(
+                    Context: null,
+                    Error: new DiagnosticError("NoDotnetProcessFound", "no live processes in stub resolver"),
+                    Candidates: null));
+            }
+            var ctx = new ProcessContext(pid, RuntimeFlavor.CoreClr, RuntimeVersion: null, CanSampleCpu: true, CanCollectGcDump: true, AutoResolved: false);
+            return Task.FromResult(new ProcessContextResolution(Context: ctx, Error: null, Candidates: null));
+        }
     }
 }
