@@ -31,6 +31,7 @@ builder.Logging.AddSimpleConsole(o =>
 
 builder.Services.AddSingleton<IProcessDiscovery, LocalProcessDiscovery>();
 builder.Services.AddSingleton<ICapabilityDetector, CapabilityDetector>();
+builder.Services.AddSingleton<IProcessContextResolver, ProcessContextResolver>();
 builder.Services.AddSingleton<ICounterCollector, EventPipeCounterCollector>();
 builder.Services.AddSingleton<EventPipeCpuSampler>();
 builder.Services.AddSingleton<PerfNativeAotCpuSampler>();

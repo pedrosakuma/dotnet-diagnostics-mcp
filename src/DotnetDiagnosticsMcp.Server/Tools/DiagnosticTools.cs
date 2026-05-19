@@ -67,25 +67,33 @@ public sealed class DiagnosticTools
         UseStructuredContent = true)]
     [Description(
         "Returns metadata for a single .NET process identified by its OS process id, " +
-        "or an error result if the process is not running or does not expose a diagnostic endpoint.")]
-    public static DiagnosticResult<DotnetProcess> GetProcessInfo(
+        "or an error result if the process is not running or does not expose a diagnostic endpoint. " +
+        "processId is optional: when exactly one .NET process is reachable on the host the server " +
+        "auto-resolves it and stamps a compact capability digest on the response envelope.")]
+    public static async Task<DiagnosticResult<DotnetProcess>> GetProcessInfo(
         IProcessDiscovery discovery,
-        [Description("Operating system process id of the target .NET process.")] int processId)
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        CancellationToken cancellationToken = default)
     {
-        var process = discovery.TryGetProcess(processId);
+        var resolved = await ResolveContextAsync<DotnetProcess>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+
+        var process = discovery.TryGetProcess(resolved.ProcessId);
         if (process is null)
         {
             return DiagnosticResult.Fail<DotnetProcess>(
-                $"No .NET process with id {processId} exposes a diagnostic endpoint.",
-                new DiagnosticError("ProcessNotFound", $"Process id {processId} is not visible to the diagnostic IPC."),
+                $"No .NET process with id {resolved.ProcessId} exposes a diagnostic endpoint.",
+                new DiagnosticError("ProcessNotFound", $"Process id {resolved.ProcessId} is not visible to the diagnostic IPC."),
                 new NextActionHint("list_dotnet_processes", "List attachable .NET processes and pick a valid pid."));
         }
 
-        return DiagnosticResult.Ok(
+        var result = DiagnosticResult.Ok(
             process,
             $"Process {process.ProcessId} — {process.ManagedEntrypointAssemblyName ?? "<unknown>"} on .NET {process.RuntimeVersion} ({process.OperatingSystem}/{process.ProcessArchitecture}).",
-            new NextActionHint("get_diagnostic_capabilities", "Detect which collectors apply (CoreCLR vs NativeAOT) before sampling.",
-                new Dictionary<string, object?> { ["processId"] = process.ProcessId }));
+            new NextActionHint("snapshot_counters", "Cheap first signal: CPU/memory/GC/thread-pool sweep before any sampling.",
+                new Dictionary<string, object?> { ["processId"] = process.ProcessId, ["durationSeconds"] = 5 }));
+        return WithContext(result, resolved.Context);
     }
 
     [McpServerTool(
@@ -98,30 +106,38 @@ public sealed class DiagnosticTools
     [Description(
         "Probes the target process to determine which diagnostic tools the server can use against it. " +
         "Detects CoreCLR vs NativeAOT (NativeAOT lacks CPU sampling and gcdump) and returns a capability matrix. " +
-        "Takes up to ~2 seconds while probing the SampleProfiler provider.")]
+        "Takes up to ~2 seconds while probing the SampleProfiler provider. " +
+        "processId is optional: when exactly one .NET process is reachable the server auto-resolves it. " +
+        "Most callers no longer need this tool first — every other tool already attaches a compact capability digest " +
+        "on its response envelope, so call this explicitly only when you need the full matrix.")]
     public static async Task<DiagnosticResult<DiagnosticCapabilities>> GetDiagnosticCapabilities(
         ICapabilityDetector detector,
-        [Description("Operating system process id of the target .NET process.")] int processId,
-        CancellationToken cancellationToken)
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        CancellationToken cancellationToken = default)
     {
+        var resolved = await ResolveContextAsync<DiagnosticCapabilities>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+
         try
         {
-            var caps = await detector.DetectAsync(processId, cancellationToken).ConfigureAwait(false);
+            var caps = await detector.DetectAsync(resolved.ProcessId, cancellationToken).ConfigureAwait(false);
             var hint = caps.CanSampleCpu
                 ? new NextActionHint("snapshot_counters", "Cheap first signal: CPU/memory/GC/thread-pool. Run before reaching for sampling.",
-                    new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 5 })
+                    new Dictionary<string, object?> { ["processId"] = resolved.ProcessId, ["durationSeconds"] = 5 })
                 : new NextActionHint("snapshot_counters", "NativeAOT: CPU sampling unavailable. Counters + EventSource + dumps still work.",
-                    new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 5 });
+                    new Dictionary<string, object?> { ["processId"] = resolved.ProcessId, ["durationSeconds"] = 5 });
 
-            return DiagnosticResult.Ok(
+            var ok = DiagnosticResult.Ok(
                 caps,
                 $"Runtime: {caps.Runtime} {caps.RuntimeVersion}. CPU sampling: {caps.CanSampleCpu}, gcdump: {caps.CanCollectGcDump}. {caps.Notes}".TrimEnd(),
                 hint);
+            return WithContext(ok, resolved.Context);
         }
         catch (ServerNotAvailableException ex)
         {
             return DiagnosticResult.Fail<DiagnosticCapabilities>(
-                $"Diagnostic socket for process {processId} is not reachable.",
+                $"Diagnostic socket for process {resolved.ProcessId} is not reachable.",
                 new DiagnosticError("EndpointUnavailable", ex.Message, ex.GetType().FullName),
                 new NextActionHint("list_dotnet_processes", "Re-list processes. Common cause: sidecar UID mismatch with target."));
         }
@@ -141,7 +157,8 @@ public sealed class DiagnosticTools
         "before sampling or dumps.")]
     public static async Task<DiagnosticResult<CounterSnapshot>> SnapshotCounters(
         ICounterCollector collector,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 5.")] int durationSeconds = 5,
         [Description("Optional list of EventCounter provider names to subscribe to. " +
                      "If null/empty, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel.")]
@@ -158,8 +175,12 @@ public sealed class DiagnosticTools
             return InvalidArg<CounterSnapshot>(nameof(intervalSeconds), "must be >= 1");
         }
 
+        var resolved = await ResolveContextAsync<CounterSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
         var snapshot = await collector.CollectAsync(
-            processId,
+            pid,
             TimeSpan.FromSeconds(durationSeconds),
             providers is { Length: > 0 } ? providers : null,
             intervalSeconds,
@@ -169,14 +190,15 @@ public sealed class DiagnosticTools
         var heap = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "gc-heap-size");
         var hint = (cpu?.Value ?? 0) >= 70
             ? new NextActionHint("collect_cpu_sample", $"cpu-usage={cpu!.Value:F1}% over {durationSeconds}s — investigate the hot path.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 10, ["topN"] = 25 })
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10, ["topN"] = 25 })
             : new NextActionHint("collect_gc_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 10 });
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
-        return DiagnosticResult.Ok(
+        var ok = DiagnosticResult.Ok(
             snapshot,
             $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.",
             hint);
+        return WithContext(ok, resolved.Context);
     }
 
     [McpServerTool(
@@ -196,7 +218,8 @@ public sealed class DiagnosticTools
         ICpuSampler sampler,
         IDiagnosticHandleStore handles,
         DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of hotspots to return. Must be >= 1. Defaults to 25.")] int topN = 25,
         [Description("If true, attempts to resolve top hotspots to file:line via PDB / SourceLink and stamps the resolved SourceLocation onto each MethodIdentity payload (issue #28 — makes dotnet-assembly-mcp.get_method_source optional when PDBs are reachable). Defaults to true; set to false to skip PDB I/O when symbols are known to be unreachable.")] bool resolveSourceLines = true,
@@ -210,6 +233,11 @@ public sealed class DiagnosticTools
         var effectiveMaxResolved = maxResolvedSources ?? topN;
         if (effectiveMaxResolved < 1) return InvalidArg<CpuSample>(nameof(maxResolvedSources), "must be >= 1");
 
+        var resolved = await ResolveContextAsync<CpuSample>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+        var ctx = resolved.Context;
+
         var srcOpts = resolveSourceLines
             ? new SourceResolutionOptions(Enabled: true, SymbolPath: symbolPath, MaxResolved: effectiveMaxResolved)
             : null;
@@ -220,28 +248,29 @@ public sealed class DiagnosticTools
             // request token trips. The runner's own cancel hook is what stops it.
             var jobTtl = TimeSpan.FromSeconds(durationSeconds) + CpuSampleHandleTtl;
             var jobHandle = jobs.Start(
-                processId,
+                pid,
                 "cpu-sample-job",
                 jobTtl,
                 async ct =>
                 {
-                    var jobResult = await sampler.SampleAsync(processId, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, ct).ConfigureAwait(false);
+                    var jobResult = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, ct).ConfigureAwait(false);
                     var jobSample = jobResult.Summary;
                     var jobTop = jobSample.TopHotspots.Count > 0 ? jobSample.TopHotspots[0] : null;
-                    var dataHandle = handles.Register(processId, "cpu-sample", jobResult.Artifact, CpuSampleHandleTtl);
+                    var dataHandle = handles.Register(pid, "cpu-sample", jobResult.Artifact, CpuSampleHandleTtl);
                     var summaryText = jobTop is not null
                         ? $"Captured {jobSample.TotalSamples} samples over {durationSeconds}s. Top method: {jobTop.Frame.Method} ({jobTop.InclusiveSamples} inclusive / {jobTop.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{dataHandle.Id}\")."
                         : $"Captured {jobSample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
-                    return DiagnosticResult.OkWithHandle(
+                    var jobOk = DiagnosticResult.OkWithHandle(
                         jobSample,
                         summaryText,
                         dataHandle.Id,
                         dataHandle.ExpiresAt,
                         new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
                             new Dictionary<string, object?> { ["handle"] = dataHandle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }));
+                    return WithContext(jobOk, ctx);
                 });
 
-            return DiagnosticResult.OkWithHandle<CpuSample>(
+            var jobAck = DiagnosticResult.OkWithHandle<CpuSample>(
                 data: null!,
                 $"CPU sampling job started (handle {jobHandle.Id}). Poll get_collection_status(handle=\"{jobHandle.Id}\") after ~{durationSeconds}s to retrieve the result.",
                 jobHandle.Id,
@@ -250,12 +279,13 @@ public sealed class DiagnosticTools
                     new Dictionary<string, object?> { ["handle"] = jobHandle.Id }),
                 new NextActionHint("cancel_collection", "Abort the background CPU sampling job if the symptom changed.",
                     new Dictionary<string, object?> { ["handle"] = jobHandle.Id }));
+            return WithContext(jobAck, ctx);
         }
 
         CpuSampleResult result;
         try
         {
-            result = await sampler.SampleAsync(processId, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, cancellationToken).ConfigureAwait(false);
+            result = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, cancellationToken).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("elevation", StringComparison.OrdinalIgnoreCase) ||
                                                     ex.Message.Contains("privilege", StringComparison.OrdinalIgnoreCase) ||
@@ -266,17 +296,17 @@ public sealed class DiagnosticTools
                 ex.Message,
                 new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
                 new NextActionHint("get_diagnostic_capabilities", "Check capability matrix to confirm what's available for this process.",
-                    new Dictionary<string, object?> { ["processId"] = processId }));
+                    new Dictionary<string, object?> { ["processId"] = pid }));
         }
 
         var sample = result.Summary;
         var top = sample.TopHotspots.Count > 0 ? sample.TopHotspots[0] : null;
-        var handle = handles.Register(processId, "cpu-sample", result.Artifact, CpuSampleHandleTtl);
+        var handle = handles.Register(pid, "cpu-sample", result.Artifact, CpuSampleHandleTtl);
         var summary = top is not null
             ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\")."
             : $"Captured {sample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
 
-        return DiagnosticResult.OkWithHandle(
+        var ok = DiagnosticResult.OkWithHandle(
             sample,
             summary,
             handle.Id,
@@ -284,7 +314,8 @@ public sealed class DiagnosticTools
             new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }),
             new NextActionHint("collect_exceptions", "Confirm hot path isn't driven by exception-heavy control flow.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 10 }));
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 }));
+        return WithContext(ok, ctx);
     }
 
     [McpServerTool(
@@ -427,7 +458,8 @@ public sealed class DiagnosticTools
         "IMPORTANT: start this BEFORE the workload you want to observe — exceptions before the session opens are missed.")]
     public static async Task<DiagnosticResult<ExceptionSnapshot>> CollectExceptions(
         IExceptionCollector collector,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of individual exception details to return. Must be >= 1. Defaults to 100.")] int maxRecent = 100,
         CancellationToken cancellationToken = default)
@@ -435,7 +467,11 @@ public sealed class DiagnosticTools
         if (durationSeconds < 1) return InvalidArg<ExceptionSnapshot>(nameof(durationSeconds), "must be >= 1");
         if (maxRecent < 1) return InvalidArg<ExceptionSnapshot>(nameof(maxRecent), "must be >= 1");
 
-        var snap = await collector.CollectAsync(processId, TimeSpan.FromSeconds(durationSeconds), maxRecent, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveContextAsync<ExceptionSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
+        var snap = await collector.CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), maxRecent, cancellationToken).ConfigureAwait(false);
         var topType = snap.ByType.OrderByDescending(c => c.Count).FirstOrDefault();
         var summary = snap.TotalExceptions == 0
             ? $"No managed exceptions thrown in {durationSeconds}s. If you expected some, ensure the collection started before the workload."
@@ -443,11 +479,11 @@ public sealed class DiagnosticTools
 
         var hint = snap.TotalExceptions > 0
             ? new NextActionHint("collect_event_source", "Subscribe to a domain-specific EventSource to correlate with the exception spikes.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 })
+                new Dictionary<string, object?> { ["processId"] = pid, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 })
             : new NextActionHint("collect_gc_events", "No exception pressure — sweep GC events next.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = 10 });
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
-        return DiagnosticResult.Ok(snap, summary, hint);
+        return WithContext(DiagnosticResult.Ok(snap, summary, hint), resolved.Context);
     }
 
     [McpServerTool(
@@ -463,7 +499,8 @@ public sealed class DiagnosticTools
         "generation, and a bounded list of individual GC events.")]
     public static async Task<DiagnosticResult<GcSummary>> CollectGcEvents(
         IGcCollector collector,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of GC events to return. Must be >= 1. Defaults to 200.")] int maxEvents = 200,
         CancellationToken cancellationToken = default)
@@ -471,7 +508,11 @@ public sealed class DiagnosticTools
         if (durationSeconds < 1) return InvalidArg<GcSummary>(nameof(durationSeconds), "must be >= 1");
         if (maxEvents < 1) return InvalidArg<GcSummary>(nameof(maxEvents), "must be >= 1");
 
-        var gc = await collector.CollectAsync(processId, TimeSpan.FromSeconds(durationSeconds), maxEvents, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveContextAsync<GcSummary>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
+        var gc = await collector.CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), maxEvents, cancellationToken).ConfigureAwait(false);
         var summary = gc.TotalCollections == 0
             ? $"No GC activity in {durationSeconds}s — heap is quiet or the workload is idle."
             : $"{gc.TotalCollections} collection(s), max pause {gc.MaxPauseTime.TotalMilliseconds:F1}ms, total pause {gc.TotalPauseTime.TotalMilliseconds:F1}ms.";
@@ -479,11 +520,11 @@ public sealed class DiagnosticTools
         var hint = gc.MaxPauseTime.TotalMilliseconds > 100
             ? new NextActionHint("collect_process_dump",
                 $"Max GC pause {gc.MaxPauseTime.TotalMilliseconds:F0}ms is high — capture a WithHeap dump for offline heap analysis.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["dumpType"] = "WithHeap" })
+                new Dictionary<string, object?> { ["processId"] = pid, ["dumpType"] = "WithHeap" })
             : new NextActionHint("collect_event_source", "GC looks healthy — pivot to a domain EventSource (e.g. System.Net.Http) for application-level signal.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 });
+                new Dictionary<string, object?> { ["processId"] = pid, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 });
 
-        return DiagnosticResult.Ok(gc, summary, hint);
+        return WithContext(DiagnosticResult.Ok(gc, summary, hint), resolved.Context);
     }
 
     [McpServerTool(
@@ -500,8 +541,9 @@ public sealed class DiagnosticTools
         "investigate HTTP activity, hosting events, or domain-specific instrumentation.")]
     public static async Task<DiagnosticResult<EventSourceCapture>> CollectEventSource(
         IEventSourceCollector collector,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
         [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'.")] string providerName,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the capture window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("EventSource keyword mask. -1 (default) means all keywords.")] long keywords = -1,
         [Description("Event verbosity level (0=LogAlways, 1=Critical, 2=Error, 3=Warning, 4=Informational, 5=Verbose). Defaults to 5.")] int eventLevel = 5,
@@ -512,16 +554,21 @@ public sealed class DiagnosticTools
         if (durationSeconds < 1) return InvalidArg<EventSourceCapture>(nameof(durationSeconds), "must be >= 1");
         if (maxEvents < 1) return InvalidArg<EventSourceCapture>(nameof(maxEvents), "must be >= 1");
 
+        var resolved = await ResolveContextAsync<EventSourceCapture>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
         var capture = await collector.CaptureAsync(
-            processId, providerName, TimeSpan.FromSeconds(durationSeconds), keywords, eventLevel, maxEvents, cancellationToken).ConfigureAwait(false);
+            pid, providerName, TimeSpan.FromSeconds(durationSeconds), keywords, eventLevel, maxEvents, cancellationToken).ConfigureAwait(false);
 
         var summary = capture.Events.Count == 0
             ? $"No events from '{providerName}' in {durationSeconds}s. Verify the provider name and that it's actually instrumented in the target."
             : $"Captured {capture.Events.Count} event(s) from '{providerName}' over {durationSeconds}s.";
 
-        return DiagnosticResult.Ok(capture, summary,
+        return WithContext(DiagnosticResult.Ok(capture, summary,
             new NextActionHint("snapshot_counters", "Cross-check captured events against runtime counters for the same window.",
-                new Dictionary<string, object?> { ["processId"] = processId, ["durationSeconds"] = durationSeconds }));
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds })),
+            resolved.Context);
     }
 
     [McpServerTool(
@@ -538,14 +585,20 @@ public sealed class DiagnosticTools
         "Heavyweight — use only when live collectors are insufficient.")]
     public static async Task<DiagnosticResult<DumpResult>> CollectProcessDump(
         IProcessDumper dumper,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Dump type: 'Mini', 'Triage', 'WithHeap' or 'Full'. Defaults to Mini.")] ProcessDumpType dumpType = ProcessDumpType.Mini,
         [Description("Optional output directory. If null, defaults to <temp>/dotnet-diagnostics-mcp.")] string? outputDirectory = null,
         CancellationToken cancellationToken = default)
     {
-        return await GuardAttachAsync("collect_process_dump", processId, async () =>
+        var resolved = await ResolveContextAsync<DumpResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+        var ctx = resolved.Context;
+
+        return await GuardAttachAsync("collect_process_dump", pid, async () =>
         {
-            var dump = await dumper.WriteDumpAsync(processId, dumpType, outputDirectory, cancellationToken).ConfigureAwait(false);
+            var dump = await dumper.WriteDumpAsync(pid, dumpType, outputDirectory, cancellationToken).ConfigureAwait(false);
             var hint = dumpType == ProcessDumpType.Mini
                 ? new NextActionHint("inspect_dump",
                     "Mini dump captured — heap walk unavailable. Re-capture with dumpType='WithHeap' for full inspection.",
@@ -553,10 +606,10 @@ public sealed class DiagnosticTools
                 : new NextActionHint("inspect_dump",
                     "Inspect the dump's managed heap for top-retained types + handoff payload to dotnet-assembly-mcp.",
                     new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath, ["topTypes"] = 20 });
-            return DiagnosticResult.Ok(
+            return WithContext(DiagnosticResult.Ok(
                 dump,
                 $"Wrote {dumpType} dump for pid {dump.ProcessId} to {dump.FilePath} ({dump.FileSizeBytes:N0} bytes).",
-                hint);
+                hint), ctx);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -667,7 +720,8 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<LiveHeapInspection>> InspectLiveHeap(
         IDumpInspector inspector,
         IDiagnosticHandleStore handles,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower and lengthens the suspend window.")] bool includeRetentionPaths = false,
         [Description("Cap on retention-chain depth when retention paths are enabled. Defaults to 8.")] int retentionPathLimit = 8,
@@ -676,10 +730,15 @@ public sealed class DiagnosticTools
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         CancellationToken cancellationToken = default)
     {
-        return await GuardAttachAsync("inspect_live_heap", processId, async () =>
+        var resolved = await ResolveContextAsync<LiveHeapInspection>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+        var ctx = resolved.Context;
+
+        return await GuardAttachAsync("inspect_live_heap", pid, async () =>
         {
             var snapshot = await inspector.InspectLiveAsync(
-                processId,
+                pid,
                 new DumpInspectionOptions(
                     TopTypes: topTypes,
                     IncludeRetentionPaths: includeRetentionPaths,
@@ -689,18 +748,19 @@ public sealed class DiagnosticTools
                     IncludeDuplicateStrings: includeDuplicateStrings),
                 cancellationToken).ConfigureAwait(false);
 
-            var handle = handles.Register(processId, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl);
+            var handle = handles.Register(pid, HeapSnapshotKind, snapshot, HeapSnapshotHandleTtl);
             var inspection = snapshot.ToLiveHeapInspection(topTypes, handle.Id);
 
             var topByBytes = inspection.TopTypesByBytes;
             var summary = topByBytes.Count == 0
-                ? $"Attached to pid {processId} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — runtime {inspection.Runtime.Name} {inspection.Runtime.Version}, heap walk produced no objects. Snapshot handle: `{handle.Id}`."
-                : $"Attached to pid {processId} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — heap {inspection.Heap.TotalBytes:N0} bytes; top retained type: `{topByBytes[0].TypeFullName}` ({topByBytes[0].TotalBytesPercent}% / {topByBytes[0].InstanceCount:N0} instances). Snapshot handle: `{handle.Id}`.";
+                ? $"Attached to pid {pid} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — runtime {inspection.Runtime.Name} {inspection.Runtime.Version}, heap walk produced no objects. Snapshot handle: `{handle.Id}`."
+                : $"Attached to pid {pid} for {inspection.SuspendDuration.TotalMilliseconds:N0} ms — heap {inspection.Heap.TotalBytes:N0} bytes; top retained type: `{topByBytes[0].TypeFullName}` ({topByBytes[0].TotalBytesPercent}% / {topByBytes[0].InstanceCount:N0} instances). Snapshot handle: `{handle.Id}`.";
 
             var hint = BuildHeapDrilldownHint(handle.Id, topByBytes);
-            return hint is null
+            var result = hint is null
                 ? DiagnosticResult.Ok(inspection, summary)
                 : DiagnosticResult.Ok(inspection, summary, hint);
+            return WithContext(result, ctx);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -961,38 +1021,48 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<ThreadSnapshotQueryResult>> CollectThreadSnapshot(
         IThreadSnapshotInspector inspector,
         IDiagnosticHandleStore handles,
-        [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath.")] int? processId = null,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath. Optional — when both processId and dumpFilePath are null/empty the server auto-selects a live .NET process.")] int? processId = null,
         [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
         [Description("Maximum stack frames captured per thread. Defaults to 64.")] int maxFramesPerThread = 64,
         [Description("Include runtime frames (PInvoke trampolines, etc.) without an associated managed method. Off by default.")] bool includeRuntimeFrames = false,
         [Description("Include pure native frames where ClrMD cannot resolve a method. Off by default.")] bool includeNativeFrames = false,
         CancellationToken cancellationToken = default)
     {
-        var hasPid = processId.HasValue && processId.Value > 0;
+        var hasExplicitPid = processId.HasValue && processId.Value > 0;
         var hasDump = !string.IsNullOrWhiteSpace(dumpFilePath);
-        if (hasPid == hasDump)
+        if (hasExplicitPid && hasDump)
         {
-            return InvalidArg<ThreadSnapshotQueryResult>(
-                hasPid ? nameof(dumpFilePath) : nameof(processId),
-                "exactly one of processId or dumpFilePath must be supplied");
+            return InvalidArg<ThreadSnapshotQueryResult>(nameof(dumpFilePath), "processId and dumpFilePath are mutually exclusive");
         }
         if (maxFramesPerThread < 1) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), "must be >= 1");
         if (maxFramesPerThread > ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), $"must be <= {ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap} (bounds the live-attach suspend window)");
 
-        return await GuardAttachAsync("collect_thread_snapshot", processId, async () =>
+        int livePid = 0;
+        ProcessContext? liveCtx = null;
+        if (!hasDump)
+        {
+            // Live path — auto-resolve when caller omitted processId.
+            var resolved = await ResolveContextAsync<ThreadSnapshotQueryResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
+            if (resolved.Failure is not null) return resolved.Failure;
+            livePid = resolved.ProcessId;
+            liveCtx = resolved.Context;
+        }
+
+        return await GuardAttachAsync("collect_thread_snapshot", hasDump ? (int?)null : livePid, async () =>
         {
             var opts = new ThreadSnapshotOptions(maxFramesPerThread, includeRuntimeFrames, includeNativeFrames);
             ThreadSnapshotArtifact snapshot;
             bool evictOnExit;
-            if (hasPid)
-            {
-                snapshot = await inspector.InspectLiveAsync(processId!.Value, opts, cancellationToken).ConfigureAwait(false);
-                evictOnExit = true;
-            }
-            else
+            if (hasDump)
             {
                 snapshot = await inspector.InspectDumpAsync(dumpFilePath!, opts, cancellationToken).ConfigureAwait(false);
                 evictOnExit = false;
+            }
+            else
+            {
+                snapshot = await inspector.InspectLiveAsync(livePid, opts, cancellationToken).ConfigureAwait(false);
+                evictOnExit = true;
             }
 
             var handle = handles.Register(snapshot.ProcessId, ThreadSnapshotKind, snapshot, ThreadSnapshotHandleTtl, evictWhenProcessExits: evictOnExit);
@@ -1012,9 +1082,10 @@ public sealed class DiagnosticTools
                     new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "top-blocked" })
                 : null;
 
-            return hint is null
+            var result = hint is null
                 ? DiagnosticResult.Ok(summaryView, summary)
                 : DiagnosticResult.Ok(summaryView, summary, hint);
+            return WithContext(result, liveCtx);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1145,20 +1216,25 @@ public sealed class DiagnosticTools
         "'warm' (skips covered steps, emits MetricComparisons against baseline); otherwise 'cold' " +
         "(USE-style: snapshot_counters first, branch on evidence). Call this BEFORE any other " +
         "collector when the symptom is non-trivial — it pays for itself by preventing loops.")]
-    public static DiagnosticResult<InvestigationPlan> StartInvestigation(
+    public static async Task<DiagnosticResult<InvestigationPlan>> StartInvestigation(
         IInvestigationPlanner planner,
-        [Description("Operating system process id of the target .NET process.")] int processId,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Plain-language symptom, e.g. 'high latency on /checkout since v2025.10'. Required for cold mode; optional for warm/hypothesis.")] string? symptom = null,
         [Description("Specific hypothesis to test, e.g. 'lock contention on Cart.Checkout'. Triggers hypothesis mode.")] string? hypothesis = null,
         [Description("Baseline snapshot from a prior investigation (JSON of BaselineHandle). Triggers warm mode.")] BaselineHandle? baseline = null,
         [Description("Optional hard limit on tool calls before forcing summarization. Defaults to 8.")] int maxToolCalls = 8,
-        [Description("If true, collect_process_dump steps are marked approval-gated. Defaults to true.")] bool dumpRequiresApproval = true)
+        [Description("If true, collect_process_dump steps are marked approval-gated. Defaults to true.")] bool dumpRequiresApproval = true,
+        CancellationToken cancellationToken = default)
     {
-        if (processId <= 0) return InvalidArg<InvestigationPlan>(nameof(processId), "must be a positive OS pid");
         if (maxToolCalls < 1) return InvalidArg<InvestigationPlan>(nameof(maxToolCalls), "must be >= 1");
 
+        var resolved = await ResolveContextAsync<InvestigationPlan>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
         var request = new InvestigationRequest(
-            ProcessId: processId,
+            ProcessId: pid,
             Symptom: symptom,
             Hypothesis: hypothesis,
             Baseline: baseline,
@@ -1172,10 +1248,11 @@ public sealed class DiagnosticTools
                       $"Honor MaxToolCalls={plan.Constraints.MaxToolCalls}.";
 
         var hintParams = new Dictionary<string, object?>(plan.NextStep.ToolParams);
-        return DiagnosticResult.Ok(
+        return WithContext(DiagnosticResult.Ok(
             plan,
             summary,
-            new NextActionHint(plan.NextStep.ToolName, plan.NextStep.Rationale, hintParams));
+            new NextActionHint(plan.NextStep.ToolName, plan.NextStep.Rationale, hintParams)),
+            resolved.Context);
     }
 
     [McpServerTool(
@@ -1509,6 +1586,74 @@ public sealed class DiagnosticTools
         }
         return false;
     }
+
+    // ---- bootstrap implícito helpers (issue #42) ------------------------------------
+    //
+    // Every tool that targets a live .NET process accepts processId as optional. When the
+    // caller omits it the resolver auto-selects the lone candidate; on ambiguity / nothing
+    // visible we translate the resolver outcome into a structured DiagnosticResult so the
+    // LLM never has to interpret a thrown exception. Successful responses carry the
+    // resolved capability digest on DiagnosticResult.ResolvedProcess so the obligatory
+    // list_dotnet_processes + get_diagnostic_capabilities opener can be skipped entirely.
+
+    private readonly record struct ResolvedContext<T>(
+        int ProcessId,
+        ProcessContext? Context,
+        DiagnosticResult<T>? Failure);
+
+    private static async Task<ResolvedContext<T>> ResolveContextAsync<T>(
+        IProcessContextResolver resolver,
+        int? processId,
+        CancellationToken cancellationToken)
+    {
+        var resolution = await resolver.ResolveAsync(processId, cancellationToken).ConfigureAwait(false);
+        if (resolution.Error is null)
+        {
+            var ctx = resolution.Context!;
+            return new ResolvedContext<T>(ctx.ProcessId, ctx, Failure: null);
+        }
+
+        var failure = BuildResolutionFailure<T>(resolution);
+        return new ResolvedContext<T>(ProcessId: 0, Context: null, Failure: failure);
+    }
+
+    private static DiagnosticResult<T> BuildResolutionFailure<T>(ProcessContextResolution resolution)
+    {
+        var error = resolution.Error!;
+        return error.Kind switch
+        {
+            "NoDotnetProcessFound" => DiagnosticResult.Fail<T>(
+                "No .NET process is visible to the diagnostic IPC on this host.",
+                error,
+                new NextActionHint(
+                    "list_dotnet_processes",
+                    "Confirm the target is running and shares your PID namespace + UID (containers/K8s).")),
+
+            "AmbiguousDotnetProcess" => DiagnosticResult.Fail<T>(
+                $"{resolution.Candidates?.Count ?? 0} .NET processes visible — pass processId explicitly.",
+                error,
+                new NextActionHint(
+                    "list_dotnet_processes",
+                    "Inspect the candidate list inline below and re-issue the call with the chosen processId.",
+                    resolution.Candidates is { Count: > 0 }
+                        ? new Dictionary<string, object?> { ["candidates"] = resolution.Candidates.Take(5).Select(c => new { c.ProcessId, c.ManagedEntrypointAssemblyName }).ToArray() }
+                        : null)),
+
+            "EndpointUnavailable" => DiagnosticResult.Fail<T>(
+                error.Message,
+                error,
+                new NextActionHint(
+                    "list_dotnet_processes",
+                    "Re-list processes — the target may have exited or the sidecar UID may not match.")),
+
+            _ => DiagnosticResult.Fail<T>(error.Message, error),
+        };
+    }
+
+    private static DiagnosticResult<T> WithContext<T>(
+        DiagnosticResult<T> result,
+        ProcessContext? context)
+        => context is null ? result : result with { ResolvedProcess = context };
 }
 
 /// <summary>Tool-facing projection of a <see cref="DotnetDiagnosticsMcp.Core.Jobs.CollectionJobSnapshot"/>.</summary>

@@ -9,6 +9,40 @@ delivered over Streamable HTTP at `POST /mcp` and require an
 > [`src/DotnetDiagnosticsMcp.Core`](../src/DotnetDiagnosticsMcp.Core), which are the source of
 > truth for field names and types.
 
+### Bootstrap implícito (`processId` is optional)
+
+Since issue #42 every tool that targets a live .NET process accepts `processId`
+as optional. When the caller omits it the server lists the visible .NET
+processes via the diagnostic IPC and:
+
+- **0 candidates** → structured error `NoDotnetProcessFound`.
+- **1 candidate** → auto-selects it, marks the response's
+  `resolvedProcess.autoResolved = true`.
+- **N candidates** → structured error `AmbiguousDotnetProcess` with the
+  candidate list inline; re-issue the call with `processId` set explicitly.
+
+Every successful response now carries a `resolvedProcess` digest on the
+envelope alongside `data` / `summary` / `hints`:
+
+```json
+{
+  "resolvedProcess": {
+    "processId": 1234,
+    "runtime": "CoreClr",
+    "runtimeVersion": "10.0.0",
+    "canSampleCpu": true,
+    "canCollectGcDump": true,
+    "autoResolved": true
+  }
+}
+```
+
+This means the previously-obligatory opener of
+`list_dotnet_processes` → `get_diagnostic_capabilities` → `<tool>` collapses to
+a single `<tool>` call when there is only one .NET process visible to the
+sidecar. The capability digest is cached per pid for 60 seconds so back-to-back
+tool calls within an investigation pay the probe cost once.
+
 ## Quick index
 
 | Tool | Cost | Requires CoreCLR? | Side effects |

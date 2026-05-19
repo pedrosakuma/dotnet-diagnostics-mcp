@@ -32,6 +32,15 @@ public sealed record DiagnosticResult<T>(
 
     /// <summary>UTC moment at which <see cref="Handle"/> expires. Use to inform retry/refresh logic.</summary>
     public DateTimeOffset? HandleExpiresAt { get; init; }
+
+    /// <summary>
+    /// Per-process digest produced by <see cref="DotnetDiagnosticsMcp.Core.ProcessDiscovery.IProcessContextResolver"/>.
+    /// Carried for free on every tool that targets a live process so the LLM never has to
+    /// re-run <c>list_dotnet_processes</c>/<c>get_diagnostic_capabilities</c> just to know
+    /// which runtime it is talking to. <see cref="DotnetDiagnosticsMcp.Core.ProcessDiscovery.ProcessContext.AutoResolved"/>
+    /// signals whether the pid was supplied by the caller or chosen by the server.
+    /// </summary>
+    public DotnetDiagnosticsMcp.Core.ProcessDiscovery.ProcessContext? ResolvedProcess { get; init; }
 }
 
 /// <summary>
