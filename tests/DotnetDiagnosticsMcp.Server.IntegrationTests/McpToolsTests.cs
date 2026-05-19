@@ -42,7 +42,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "collect_event_source",
             "collect_process_dump",
             "get_call_tree",
-            "start_investigation");
+            "start_investigation",
+            "export_investigation_summary",
+            "compare_to_baseline");
 
         // Tools may only require `processId` (and `providerName` for collect_event_source,
         // `handle` for get_call_tree). Anything else must have a default so clients without
@@ -60,6 +62,8 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["collect_process_dump"] = new[] { "processId" },
             ["get_call_tree"] = new[] { "handle" },
             ["start_investigation"] = new[] { "processId" },
+            ["export_investigation_summary"] = new[] { "handle" },
+            ["compare_to_baseline"] = new[] { "baselineSummaryJson", "currentSummaryJson" },
         };
 
         // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
@@ -75,7 +79,8 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "durationSeconds", "topN", "maxRecent", "maxEvents", "eventLevel",
             "dumpType", "outputDirectory", "rootMethodFilter", "maxDepth", "maxNodes",
             "intervalSeconds", "symptom", "hypothesis", "baseline", "maxToolCalls",
-            "dumpRequiresApproval",
+            "dumpRequiresApproval", "format", "topHotspots", "buildAssemblyName",
+            "previousInvestigationId", "fixCommitSha", "fixPullRequestUrl", "fixDescription", "notes",
         };
 
         foreach (var tool in tools)
@@ -472,6 +477,60 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         plan!.Mode.Should().Be(DotnetDiagnosticsMcp.Core.Investigation.InvestigationMode.Hypothesis);
         plan.NextStep.ToolName.Should().Be("collect_event_source");
         plan.EarlyStopConditions.Select(e => e.ConditionId).Should().Contain("hypothesis-confirmed");
+    }
+
+    [Fact]
+    public async Task ExportInvestigationSummary_ReturnsHandleExpiredErrorForUnknownHandle()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "export_investigation_summary",
+            new Dictionary<string, object?> { ["handle"] = "DEADBEEFDEADBEEFDEAD" },
+            cancellationToken: CancellationToken.None);
+
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error!.Kind.Should().Be("HandleExpired");
+    }
+
+    [Fact]
+    public async Task CompareToBaseline_RejectsMalformedJson()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "compare_to_baseline",
+            new Dictionary<string, object?>
+            {
+                ["baselineSummaryJson"] = "{not json",
+                ["currentSummaryJson"] = "{not json either",
+            },
+            cancellationToken: CancellationToken.None);
+
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error!.Kind.Should().Be("InvalidSummaryJson");
+    }
+
+    [Fact]
+    public async Task CompareToBaseline_RejectsSchemaValidButIncompleteJson()
+    {
+        await using var client = await ConnectAsync();
+
+        const string incomplete = "{\"Schema\":\"dotnet-diagnostics-mcp/investigation-summary/v1\"}";
+        var result = await client.CallToolAsync(
+            "compare_to_baseline",
+            new Dictionary<string, object?>
+            {
+                ["baselineSummaryJson"] = incomplete,
+                ["currentSummaryJson"] = incomplete,
+            },
+            cancellationToken: CancellationToken.None);
+
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error!.Kind.Should().Be("InvalidSummaryJson");
     }
 
     [Fact]

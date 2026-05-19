@@ -9,6 +9,7 @@ using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Investigation;
+using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol.Server;
@@ -524,6 +525,138 @@ public sealed class DiagnosticTools
             plan,
             summary,
             new NextActionHint(plan.NextStep.ToolName, plan.NextStep.Rationale, hintParams));
+    }
+
+    [McpServerTool(
+        Name = "export_investigation_summary",
+        Title = "Export portable investigation summary",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reads a prior collect_cpu_sample drill-down handle and produces a portable, versioned " +
+        "InvestigationSummary (~5-20 KB JSON) ready to paste into a PR, ADR, or ticket. " +
+        "Includes build + container provenance harvested from the sidecar environment, stable " +
+        "module+methodFullName symbol refs (survive rebuilds where line numbers shift), and " +
+        "optional lineage to a previous investigation. Set `format=markdown` for a human-readable " +
+        "version. The server is stateless: the LLM owns persistence — paste the JSON into a doc " +
+        "and feed it back via `compare_to_baseline` on the next deploy.")]
+    public static DiagnosticResult<ExportedInvestigationSummary> ExportInvestigationSummary(
+        IInvestigationSummaryExporter exporter,
+        IDiagnosticHandleStore handles,
+        [Description("Handle returned by a prior collect_cpu_sample call.")] string handle,
+        [Description("Output format: 'json' (default — portable, machine-readable) or 'markdown' (human-readable for PRs).")] SummaryFormat format = SummaryFormat.Json,
+        [Description("Max hotspots to include in the summary. Defaults to 10.")] int topHotspots = 10,
+        [Description("Optional managed assembly name for the target (from list_dotnet_processes).")] string? buildAssemblyName = null,
+        [Description("Optional investigation id from the previous summary, to link lineage.")] string? previousInvestigationId = null,
+        [Description("Optional commit SHA being proposed as the fix.")] string? fixCommitSha = null,
+        [Description("Optional PR URL being proposed as the fix.")] string? fixPullRequestUrl = null,
+        [Description("Optional short description of the proposed fix.")] string? fixDescription = null,
+        [Description("Optional free-form notes appended to the summary.")] string? notes = null)
+    {
+        if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<ExportedInvestigationSummary>(nameof(handle), "is required");
+        if (topHotspots < 1) return InvalidArg<ExportedInvestigationSummary>(nameof(topHotspots), "must be >= 1");
+
+        var artifact = handles.TryGet<CpuSampleTraceArtifact>(handle);
+        if (artifact is null)
+        {
+            return DiagnosticResult.Fail<ExportedInvestigationSummary>(
+                $"Handle '{handle}' is unknown or expired.",
+                new DiagnosticError("HandleExpired", "Drill-down handles live ~10min and are invalidated when the target process exits.", handle),
+                new NextActionHint("collect_cpu_sample", "Re-run the sampler on the same pid to issue a fresh handle.",
+                    new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
+        }
+
+        var fix = (fixCommitSha is null && fixPullRequestUrl is null && fixDescription is null)
+            ? null
+            : new InvestigationFixTarget(fixCommitSha, fixPullRequestUrl, fixDescription);
+
+        var exported = exporter.Export(new ExportRequest(
+            Handle: handle,
+            Artifact: artifact,
+            TopHotspots: topHotspots,
+            BuildAssemblyName: buildAssemblyName,
+            PreviousInvestigationId: previousInvestigationId,
+            TargetsFix: fix,
+            Notes: notes,
+            Format: format));
+
+        var bytes = exported.Rendered.Length;
+        return DiagnosticResult.Ok(
+            exported,
+            $"Exported investigation {exported.Summary.InvestigationId} ({exported.Summary.Findings.TopHotspots.Count} hotspots, {bytes} chars {format}). Paste `rendered` into your PR/ADR; re-supply this JSON via compare_to_baseline on the next investigation.",
+            new NextActionHint("compare_to_baseline", "When you investigate the next deploy, pass this summary as the baseline.",
+                new Dictionary<string, object?> { ["baselineSummaryJson"] = "<paste rendered JSON here>" }));
+    }
+
+    [McpServerTool(
+        Name = "compare_to_baseline",
+        Title = "Compare investigation summary to baseline",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Diffs two InvestigationSummary JSON documents (produced by export_investigation_summary) " +
+        "and returns a SummaryDiff: provenance delta (image jump, git sha change), new hotspots " +
+        "(strongest regression signal — symbol not present in baseline), removed hotspots " +
+        "(improvements), and changed hotspots above a ±2 percentage-point threshold. The verdict " +
+        "field collapses the diff into one of: no_regression, no_regression_after_deploy, " +
+        "regression_new_hotspot, regression_increased_hotspot, improvement.")]
+    public static DiagnosticResult<SummaryDiff> CompareToBaseline(
+        ISummaryComparer comparer,
+        [Description("Baseline summary JSON (from a prior export_investigation_summary).")] string baselineSummaryJson,
+        [Description("Current summary JSON (from export_investigation_summary on the new investigation).")] string currentSummaryJson)
+    {
+        if (string.IsNullOrWhiteSpace(baselineSummaryJson)) return InvalidArg<SummaryDiff>(nameof(baselineSummaryJson), "is required");
+        if (string.IsNullOrWhiteSpace(currentSummaryJson)) return InvalidArg<SummaryDiff>(nameof(currentSummaryJson), "is required");
+
+        InvestigationSummary baseline, current;
+        try
+        {
+            baseline = System.Text.Json.JsonSerializer.Deserialize<InvestigationSummary>(baselineSummaryJson)
+                ?? throw new InvalidOperationException("baseline summary deserialized to null");
+            current = System.Text.Json.JsonSerializer.Deserialize<InvestigationSummary>(currentSummaryJson)
+                ?? throw new InvalidOperationException("current summary deserialized to null");
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException)
+        {
+            return DiagnosticResult.Fail<SummaryDiff>(
+                "Could not parse one of the supplied summary JSON documents.",
+                new DiagnosticError("InvalidSummaryJson", ex.Message),
+                new NextActionHint("export_investigation_summary", "Re-export the baseline and current summaries and try again."));
+        }
+
+        if (!string.Equals(baseline.Schema, InvestigationSummary.SchemaV1, StringComparison.Ordinal) ||
+            !string.Equals(current.Schema, InvestigationSummary.SchemaV1, StringComparison.Ordinal))
+        {
+            return DiagnosticResult.Fail<SummaryDiff>(
+                $"Unsupported schema. Expected '{InvestigationSummary.SchemaV1}'.",
+                new DiagnosticError("UnsupportedSchema", $"baseline='{baseline.Schema}' current='{current.Schema}'"),
+                new NextActionHint("export_investigation_summary", "Re-export both summaries with the current server version."));
+        }
+
+        if (baseline.Provenance is null || baseline.Findings is null || baseline.Findings.TopHotspots is null ||
+            current.Provenance is null || current.Findings is null || current.Findings.TopHotspots is null)
+        {
+            return DiagnosticResult.Fail<SummaryDiff>(
+                "Summary JSON is missing required fields (Provenance / Findings / Findings.TopHotspots).",
+                new DiagnosticError("InvalidSummaryJson", "Required fields are null after deserialization."),
+                new NextActionHint("export_investigation_summary", "Re-export the summaries from a fresh investigation."));
+        }
+
+        var diff = comparer.Compare(baseline, current);
+        var summaryLine = $"Verdict: {diff.Verdict}. {diff.NewHotspots.Count} new, " +
+                          $"{diff.RemovedHotspots.Count} removed, {diff.ChangedHotspots.Count} changed hotspots. " +
+                          $"Provenance: {diff.Provenance.Summary}.";
+
+        return DiagnosticResult.Ok(diff, summaryLine,
+            new NextActionHint("collect_cpu_sample",
+                diff.Verdict.StartsWith("regression", StringComparison.Ordinal)
+                    ? "Re-sample the regressing process and drill into the new top frame."
+                    : "Optional: capture a fresh sample to confirm the improvement is stable.",
+                new Dictionary<string, object?> { ["durationSeconds"] = 20 }));
     }
 
     private static DiagnosticResult<T> InvalidArg<T>(string parameterName, string requirement)
