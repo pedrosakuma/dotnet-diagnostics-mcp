@@ -276,8 +276,15 @@ public sealed class ClrMdDumpInspector : IDumpInspector
         // size to (snapshot top-N * 32) entries — far above the top-N we'll surface but bounded.
         var delegateCap = opts.IncludeDelegateTargets ? Math.Max(opts.SnapshotDelegateTargetTopN * 32, 4096) : 0;
         var stringCap = opts.IncludeDuplicateStrings ? Math.Max(opts.SnapshotDuplicateStringTopN * 32, 4096) : 0;
+        // Independent hard cap on the number of string OBJECTS scanned (vs unique entries). Without
+        // this, a heap holding millions of identical strings collapses to a single dictionary entry
+        // but still pays AsString(maxLength) per object — under the live suspend window that's
+        // unbounded. 1M objects is enough to surface duplicates while keeping the worst case bounded.
+        var stringObjectScanCap = opts.IncludeDuplicateStrings ? Math.Max(stringCap * 64L, 1_000_000L) : 0L;
+        long stringObjectsScanned = 0;
         var delegateCapHit = false;
         var stringCapHit = false;
+        var stringObjectCapHit = false;
 
         foreach (var segment in runtime.Heap.Segments)
         {
@@ -316,10 +323,12 @@ public sealed class ClrMdDumpInspector : IDumpInspector
                     if (delegates.Count > delegateCap) delegateCapHit = true;
                 }
 
-                if (strings is not null && obj.Type.IsString && !stringCapHit)
+                if (strings is not null && obj.Type.IsString && !stringCapHit && !stringObjectCapHit)
                 {
                     AggregateString(obj, size, strings);
+                    stringObjectsScanned++;
                     if (strings.Count > stringCap) stringCapHit = true;
+                    if (stringObjectsScanned > stringObjectScanCap) stringObjectCapHit = true;
                 }
             }
 
@@ -348,6 +357,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
 
         if (delegateCapHit) warnings.Add($"Delegate-target aggregation hit cap of {delegateCap} unique entries — results are truncated to the busiest entries seen so far.");
         if (stringCapHit) warnings.Add($"Duplicate-string aggregation hit cap of {stringCap} unique entries — results are truncated.");
+        if (stringObjectCapHit) warnings.Add($"Duplicate-string aggregation hit object-scan cap of {stringObjectScanCap:N0} string instances — results reflect only the strings encountered before the cap.");
 
         return (stats, total, segmentStats, delegates, strings);
     }
@@ -405,7 +415,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
         ClrRuntime runtime, int topN, List<string> warnings, CancellationToken ct)
     {
         var results = new List<StaticFieldStat>(capacity: Math.Min(topN * 4, 1024));
-        var visitedTypes = new HashSet<ulong>();
+        var visitedTypes = new HashSet<(int AppDomainId, ulong MethodTable)>();
         try
         {
             foreach (var domain in runtime.AppDomains)
@@ -417,7 +427,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
                     foreach (var (mt, _) in module.EnumerateTypeDefToMethodTableMap())
                     {
                         ct.ThrowIfCancellationRequested();
-                        if (!visitedTypes.Add(mt)) continue;
+                        if (!visitedTypes.Add((domain.Id, mt))) continue;
                         ClrType? type;
                         try { type = runtime.GetTypeByMethodTable(mt); }
                         catch { continue; }
