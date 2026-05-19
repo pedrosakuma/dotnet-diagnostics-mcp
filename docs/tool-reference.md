@@ -94,6 +94,12 @@ Visões disponíveis por `kind`:
 | `gc-events` | `collect_gc_events` | `summary` (default), `events`, `pauseHistogram` |
 | `event-source` | `collect_event_source` | `summary` (default), `byEventName`, `events` |
 
+> **Nota — truncação em `event-source`:** o coletor para de armazenar eventos
+> ao atingir `maxEvents`, mas continua contando o total. As views
+> `summary`/`byEventName` agora trazem `capturedCount` e `truncated`; quando
+> `truncated=true` os grupos refletem só o prefixo capturado — re-rode
+> `collect_event_source` com `maxEvents` maior pra agregados exatos.
+
 Handles invalidam quando: o TTL expira, o processo alvo morre (evicção
 automática), ou um restart do server zera o store. Acesso a handle
 desconhecido devolve `DiagnosticError { Kind: "HandleExpired" }` com um

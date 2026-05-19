@@ -77,9 +77,20 @@ public sealed record GcPauseBucket(string Label, int UpperBoundMs, int Count);
 // --- EventSource views ------------------------------------------------------------------------
 
 /// <summary>Counts grouped by EventName.</summary>
+/// <param name="Provider">EventSource provider name (echoed from the capture).</param>
+/// <param name="TotalEvents">Total events observed during the collection window — may exceed
+/// <paramref name="CapturedCount"/> because the original collector caps stored events at
+/// <c>maxEvents</c>; only captured events contribute to the per-name counts below.</param>
+/// <param name="CapturedCount">Events that were actually stored and thus grouped here.</param>
+/// <param name="Truncated">True when the collector dropped tail events (<c>TotalEvents &gt; CapturedCount</c>).
+/// When true, <paramref name="ByEventName"/> reflects only the captured prefix — re-run
+/// <c>collect_event_source</c> with a larger <c>maxEvents</c> to get exact totals.</param>
+/// <param name="ByEventName">Per-event-name aggregates over the captured subset only.</param>
 public sealed record EventSourceByEventNameView(
     string Provider,
     int TotalEvents,
+    int CapturedCount,
+    bool Truncated,
     IReadOnlyList<EventSourceEventNameGroup> ByEventName);
 
 /// <summary>One group in <see cref="EventSourceByEventNameView"/>.</summary>

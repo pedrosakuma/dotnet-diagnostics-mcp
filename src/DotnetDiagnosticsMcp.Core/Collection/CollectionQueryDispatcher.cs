@@ -162,11 +162,16 @@ public static class CollectionQueryDispatcher
 
     private static CollectionQueryResult Render(EventSourceCapture es, string view, int topN)
     {
+        var capturedCount = es.Events.Count;
+        var truncated = es.TotalEvents > capturedCount;
+
         object payload = view.ToLowerInvariant() switch
         {
             "byeventname" => new EventSourceByEventNameView(
                 es.Provider,
                 es.TotalEvents,
+                capturedCount,
+                truncated,
                 es.Events.GroupBy(e => e.EventName)
                     .Select(g => new EventSourceEventNameGroup(g.Key, g.Count()))
                     .OrderByDescending(g => g.Count)
@@ -179,6 +184,8 @@ public static class CollectionQueryDispatcher
             _ /* summary */ => new EventSourceByEventNameView(
                 es.Provider,
                 es.TotalEvents,
+                capturedCount,
+                truncated,
                 es.Events.GroupBy(e => e.EventName)
                     .Select(g => new EventSourceEventNameGroup(g.Key, g.Count()))
                     .OrderByDescending(g => g.Count)

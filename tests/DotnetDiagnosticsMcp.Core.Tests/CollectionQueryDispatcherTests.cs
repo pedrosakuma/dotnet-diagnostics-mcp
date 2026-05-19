@@ -115,6 +115,28 @@ public class CollectionQueryDispatcherTests
         var payload = outcome.Result!.Payload.Should().BeOfType<EventSourceByEventNameView>().Subject;
         payload.ByEventName[0].EventName.Should().Be("Stop");
         payload.ByEventName[0].Count.Should().Be(3);
+        payload.CapturedCount.Should().Be(4);
+        payload.Truncated.Should().BeFalse();
+    }
+
+    [Fact]
+    public void EventSource_ByEventNameView_FlagsTruncationWhenTotalExceedsCaptured()
+    {
+        // Simulate a collector that observed 1000 events but only stored the first 200
+        // because maxEvents=200. ByEventName must surface that mismatch so the LLM doesn't
+        // present partial aggregates as if they represented the whole window.
+        var captured = Enumerable.Range(0, 200)
+            .Select(i => new CapturedEvent(At, "P", i < 50 ? "Start" : "Heartbeat", "Info",
+                new Dictionary<string, string>()))
+            .ToList();
+        var cap = new EventSourceCapture(42, "P", At, TimeSpan.FromSeconds(5), TotalEvents: 1000, captured);
+
+        var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.EventSource, "byEventName", cap, 10);
+
+        var payload = outcome.Result!.Payload.Should().BeOfType<EventSourceByEventNameView>().Subject;
+        payload.TotalEvents.Should().Be(1000);
+        payload.CapturedCount.Should().Be(200);
+        payload.Truncated.Should().BeTrue("collector dropped tail events; the LLM must see that");
     }
 
     [Fact]
