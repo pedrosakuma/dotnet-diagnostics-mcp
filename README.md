@@ -88,6 +88,24 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
 # Or grab a self-contained single-file binary for your OS/arch from the Releases page.
 ```
 
+### Joint with `dotnet-assembly-mcp` (recommended for handoff resolution)
+
+For the full handoff story — `MethodIdentity` / `TypeIdentity` resolving to
+decompiled bodies, call graphs, attributes, type hierarchy — run both servers
+together with the joint compose file:
+
+```bash
+export ASSEMBLIES_DIR=/abs/path/to/your/published/binaries
+docker compose -f deploy/docker-compose.yml up -d
+# diagnostics: http://localhost:8787/mcp
+# assembly:    http://localhost:8788/mcp
+```
+
+The same `docker-compose.yml` ships in
+[`pedrosakuma/dotnet-assembly-mcp:deploy/docker-compose.yml`](https://github.com/pedrosakuma/dotnet-assembly-mcp/blob/main/deploy/docker-compose.yml)
+— bring it up from either checkout. Set `MCP_BEARER_TOKEN` on the host to gate
+both servers with one shared token.
+
 Health probe used by every supervisor (and the container's `HEALTHCHECK`):
 
 ```bash

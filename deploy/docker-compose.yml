@@ -1,0 +1,84 @@
+# Joint docker-compose for the dotnet MCP server pair.
+#
+# Brings up both servers together so an MCP-aware client (Copilot CLI, Cursor,
+# Claude Desktop, VS Code...) can talk to:
+#
+#   * dotnet-diagnostics-mcp  -> http://127.0.0.1:8787/mcp   (live process attach)
+#   * dotnet-assembly-mcp     -> http://127.0.0.1:8788/mcp   (static metadata)
+#
+# The diagnostics server emits MethodIdentity / TypeIdentity handles that only
+# resolve to actionable static analysis when the assembly server is reachable on
+# the same client — see docs/handoff-contract.md. Running them together is the
+# default supported topology.
+#
+# Quick start
+#   # from this repo:
+#   export ASSEMBLIES_DIR=/abs/path/to/your/published/binaries
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# With a shared bearer token (recommended for any non-127.0.0.1 deploy):
+#   MCP_BEARER_TOKEN=$(openssl rand -hex 32) docker compose -f deploy/docker-compose.yml up -d
+#
+# The same file lives in pedrosakuma/dotnet-diagnostics-mcp:deploy/docker-compose.yml.
+# Keep the two copies byte-identical when editing — drift is the single biggest
+# cost of the joint topology.
+#
+# Notes
+#   * The diagnostics sidecar needs PID visibility on whatever .NET process you
+#     want to attach to. The compose file alone doesn't give it that — see
+#     deploy/k8s/sample-sidecar.yaml in the diagnostics repo for the canonical
+#     attach recipe (shareProcessNamespace + shared emptyDir over /tmp).
+#     Locally, `pid: host` is the docker-compose equivalent; it's commented out
+#     by default because it elevates the container's blast radius.
+#   * Both servers honour ASSEMBLY_MCP_BEARER_TOKEN / MCP_BEARER_TOKEN — when
+#     MCP_BEARER_TOKEN is set on the host, both pick it up via the shared env
+#     var below.
+
+name: dotnet-mcp
+
+services:
+  diagnostics:
+    image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
+    container_name: dotnet-diagnostics-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8080"
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:-}
+      DOTNET_NOLOGO: "1"
+    # Uncomment to enable host-PID attach for local .NET targets running on the
+    # host. Elevates blast radius — only do this on a developer machine.
+    # pid: host
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  assembly:
+    image: ghcr.io/pedrosakuma/dotnet-assembly-mcp:latest
+    container_name: dotnet-assembly-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8080"
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      ASSEMBLY_MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:-}
+      DOTNET_NOLOGO: "1"
+    volumes:
+      # Mount the directory holding the assemblies you want navigated, read-only.
+      # Override via the ASSEMBLIES_DIR env var on the host. Defaults to a
+      # docker-managed volume so `up` works on a clean checkout (you just won't
+      # have anything to inspect until you mount something real).
+      - ${ASSEMBLIES_DIR:-assembly-cache}:/assemblies:ro
+    healthcheck:
+      test: ["CMD-SHELL", "dotnet DotnetAssemblyMcp.Server.dll --health-check --url=http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  assembly-cache:
