@@ -86,7 +86,7 @@ Three distributions of the MCP server, all wire-compatible. Pick whichever fits 
 
 ```bash
 # .NET global tool (requires .NET 10 SDK)
-dotnet tool install -g DotnetDiagnosticsMcp.Server
+dotnet tool install -g dotnet-diagnostics-mcp
 dotnet-diagnostics-mcp --urls http://127.0.0.1:8787
 
 # Container (no SDK needed; predictable filesystem)

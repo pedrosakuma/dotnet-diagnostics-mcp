@@ -21,11 +21,13 @@ All three publish the same MCP surface (Streamable HTTP, bearer-token authentica
 ### 1a. .NET global tool
 
 ```bash
-dotnet tool install -g DotnetDiagnosticsMcp.Server
+dotnet tool install -g dotnet-diagnostics-mcp
 dotnet-diagnostics-mcp --urls http://127.0.0.1:8787
 ```
 
-Upgrade: `dotnet tool update -g DotnetDiagnosticsMcp.Server`. Uninstall: `dotnet tool uninstall -g DotnetDiagnosticsMcp.Server`.
+Upgrade: `dotnet tool update -g dotnet-diagnostics-mcp`. Uninstall: `dotnet tool uninstall -g dotnet-diagnostics-mcp`.
+
+> **Renamed in v0.2.2.** The NuGet package id was `DotnetDiagnosticsMcp.Server` for 0.1.0–0.2.1 and is now `dotnet-diagnostics-mcp` (matches the tool command and the sibling `dotnet-assembly-mcp`). If you have the old id installed, run `dotnet tool uninstall -g DotnetDiagnosticsMcp.Server` first, then install the new one. The legacy id has been unlisted on NuGet.org.
 
 ### 1b. Container
 
@@ -114,7 +116,7 @@ Status: `systemctl --user status dotnet-diagnostics-mcp`. Logs: `journalctl --us
 ### Windows — Scheduled Task
 
 ```powershell
-dotnet tool install -g DotnetDiagnosticsMcp.Server
+dotnet tool install -g dotnet-diagnostics-mcp
 # Then run the supervisor script (downloaded from the release page or repo):
 .\deploy\supervisors\windows\Install-Service.ps1 -Port 8787
 ```
