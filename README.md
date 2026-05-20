@@ -2,17 +2,19 @@
 
 [![CI](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/actions/workflows/ci.yml)
 
-> **Status:** MCP server functional with 9 diagnostic tools. End-to-end tests
-> pass. See [`docs/`](./docs) for the tool reference and investigation
-> playbooks.
+> **Status:** MCP server functional with 20 diagnostic tools, two transports
+> (HTTP + stdio), and 6 curated investigation prompts. End-to-end tests pass
+> on Linux + Windows. See [`docs/`](./docs) for the tool reference and
+> investigation playbooks.
 
 An **MCP server** that lets an LLM perform on-demand performance diagnostics on running
 **.NET 10** applications — locally or in Kubernetes — **without any modification to the
 target app**.
 
 It builds on the existing .NET diagnostics pipeline (`Microsoft.Diagnostics.NETCore.Client`
-+ EventPipe) and exposes it as MCP tools over Streamable HTTP so any MCP-aware client
-(Claude Desktop, Copilot CLI, custom agents, ...) can drive an investigation.
++ EventPipe + ClrMD) and exposes it as MCP tools over either **Streamable HTTP** (sidecar /
+shared dev instance) or **stdio** (MCP client spawns the server as a subprocess), so any
+MCP-aware client (Claude Desktop, Copilot CLI, custom agents, ...) can drive an investigation.
 
 ## Goals
 
@@ -43,12 +45,19 @@ tests/
 |---|---|
 | `list_dotnet_processes` / `get_process_info` | Discover .NET processes via diagnostic IPC |
 | `get_diagnostic_capabilities` | Detect CoreCLR vs NativeAOT and what's usable |
+| `get_container_signals` | Linux cgroup v2: CPU throttling, memory pressure, OOM kills, PSI |
 | `snapshot_counters` | EventCounters over a window (cpu, memory, requests, ...) |
-| `collect_cpu_sample` | Top-N CPU hotspots (inclusive/exclusive) — **CoreCLR only** |
+| `collect_cpu_sample` / `get_call_tree` | Top-N CPU hotspots (inclusive/exclusive) + on-demand caller→callee tree |
+| `collect_off_cpu_sample` / `query_off_cpu_snapshot` | Where threads block (futex / IO / sleep) — Linux `perf` backend |
 | `collect_exceptions` | Managed exceptions thrown in a window, aggregated by type |
 | `collect_gc_events` | GC pauses + per-generation counts |
-| `collect_event_source` | Generic EventSource passthrough (HTTP, Kestrel, custom) |
+| `collect_event_source` / `query_collection` | Generic EventSource passthrough (HTTP, Kestrel, custom) + re-project artifacts |
+| `collect_thread_snapshot` / `query_thread_snapshot` | Managed thread states + SyncBlock lock graph drilldown |
+| `inspect_live_heap` / `inspect_dump` / `query_heap_snapshot` | Top retained types + retention paths + roots, live or from a dump |
 | `collect_process_dump` | Write a Mini / Triage / WithHeap / Full dump to disk |
+| `start_investigation` | Structured plan (cold / warm / hypothesis) before any collector runs |
+| `export_investigation_summary` / `compare_to_baseline` | Portable JSON memory; LLM persists, diffs across deploys |
+| `get_collection_status` / `cancel_collection` | Background-job lifecycle for long collections |
 
 Full schemas and return shapes: [`docs/tool-reference.md`](./docs/tool-reference.md).
 Common investigation recipes: [`docs/investigation-playbooks.md`](./docs/investigation-playbooks.md).
@@ -93,6 +102,19 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
 # Or grab a self-contained single-file binary for your OS/arch from the Releases page.
 ```
 
+### Transports — pick by deployment shape
+
+- **stdio (recommended for local dev with Copilot CLI / Claude Desktop / Cursor):** the
+  MCP client spawns `dotnet-diagnostics-mcp --stdio` as a subprocess and talks JSON-RPC
+  over stdio. The client owns the process lifecycle, so `dotnet tool update -g …` is
+  picked up automatically on the next client reload — no stale daemons.
+- **HTTP (sidecar in K8s, shared dev host, multi-client):** long-lived daemon on
+  `127.0.0.1:8787` (or a sidecar container). Use `MCP_BEARER_TOKEN` + optionally
+  `DOTNET_DIAGNOSTICS_MCP_AUTO_RESTART=true` so the built-in `StaleBinaryWatcher` asks
+  the supervisor (systemd / `docker --restart=always` / K8s) to recycle the process
+  when the on-disk image MVID drifts. See [`docs/client-setup.md`](./docs/client-setup.md)
+  for the full `mcp-config.json` snippets per client.
+
 > 🐧 **Linux:** on Debian/Ubuntu/WSL/Codespaces the `kernel.yama.ptrace_scope=1` default blocks the four ClrMD-backed tools (`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live PID, `collect_process_dump`). See [Consumer install → § 1.5 Linux: enabling ClrMD-backed tools (ptrace)](./docs/consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace) for the one-line fix per distribution. EventPipe-only tools (counters, CPU sample, exceptions, GC, EventSources) work out of the box.
 
 ### Joint with `dotnet-assembly-mcp` (recommended for handoff resolution)
@@ -132,7 +154,7 @@ Requires the .NET 10 SDK (pinned in `global.json`).
 
 ## Authentication
 
-The MCP server requires a Bearer token on every request to `/mcp/*` (the `/health` endpoint is open).
+The HTTP transport requires a Bearer token on every request to `/mcp/*` (the `/health` endpoint is open). The stdio transport does **not** use a token — the spawning client is already trusted at the OS level.
 
 - Set `MCP_BEARER_TOKEN` to use a fixed token (recommended).
 - If unset, an ephemeral token is generated at startup and printed in the logs.
