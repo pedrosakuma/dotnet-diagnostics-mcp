@@ -1,4 +1,5 @@
 using System.Diagnostics.Tracing;
+using DotnetDiagnosticsMcp.Core.Memory;
 using Microsoft.Diagnostics.NETCore.Client;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Etlx;
@@ -140,7 +141,8 @@ public sealed class EventPipeAllocationSampler
             // Merged allocation call tree (all types combined, weighted by byte amount).
             var rootBuilder = new CallTreeBuilder();
             var modules = new Dictionary<string, string>(StringComparer.Ordinal);
-            var codeAddressByKey = new Dictionary<string, Microsoft.Diagnostics.Tracing.Etlx.TraceCodeAddress>(StringComparer.Ordinal);
+            // Maps composite frame key (module!methodDisplay) → TraceCodeAddress for MethodIdentity extraction.
+            var traceCodeAddressByFrameKey = new Dictionary<string, TraceCodeAddress>(StringComparer.Ordinal);
 
             long totalEvents = 0;
             long totalBytes = 0;
@@ -203,7 +205,7 @@ public sealed class EventPipeAllocationSampler
                         modules.TryAdd(key, module);
                         if (frame.CodeAddress is not null)
                         {
-                            codeAddressByKey.TryAdd(key, frame.CodeAddress);
+                            traceCodeAddressByFrameKey.TryAdd(key, frame.CodeAddress);
                         }
                         frame = frame.Caller;
                     }
@@ -232,11 +234,11 @@ public sealed class EventPipeAllocationSampler
             // Build MethodIdentity for the top-N frames in the call tree (CoreCLR only;
             // NativeAOT frames won't have IL tokens but the frame names are still surfaced).
             var ranked = modules.Keys
-                .Where(k => codeAddressByKey.ContainsKey(k))
+                .Where(k => traceCodeAddressByFrameKey.ContainsKey(k))
                 .Select(k => new KeyValuePair<string, long>(k, 0))
                 .ToArray();
 
-            var identities = BuildMethodIdentities(ranked, modules, codeAddressByKey);
+            var identities = BuildMethodIdentities(ranked, modules, traceCodeAddressByFrameKey);
 
             var summary = new AllocationSample(pid, startedAt, duration, totalEvents, totalBytes, topByBytes, topByCount);
             var artifact = new CpuSampleTraceArtifact(
@@ -252,15 +254,15 @@ public sealed class EventPipeAllocationSampler
         }
     }
 
-    private Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> BuildMethodIdentities(
+    private Dictionary<SymbolRef, MethodIdentity> BuildMethodIdentities(
         KeyValuePair<string, long>[] ranked,
         Dictionary<string, string> modules,
-        Dictionary<string, Microsoft.Diagnostics.Tracing.Etlx.TraceCodeAddress> codeAddressByKey)
+        Dictionary<string, TraceCodeAddress> traceCodeAddressByFrameKey)
     {
-        var result = new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>();
+        var result = new Dictionary<SymbolRef, MethodIdentity>();
         foreach (var (key, _) in ranked)
         {
-            if (!codeAddressByKey.TryGetValue(key, out var addr)) continue;
+            if (!traceCodeAddressByFrameKey.TryGetValue(key, out var addr)) continue;
             var method = addr.Method;
             if (method is null) continue;
 
@@ -278,12 +280,13 @@ public sealed class EventPipeAllocationSampler
             var display = !string.IsNullOrEmpty(moduleName) && key.StartsWith(moduleName + "!", StringComparison.Ordinal)
                 ? key[(moduleName.Length + 1)..]
                 : key;
-            var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(moduleName, display);
+            var symbol = new SymbolRef(moduleName, display);
 
             if (result.ContainsKey(symbol)) continue;
 
-            var methodName = method.FullMethodName.Split('(')[0].Split('.').LastOrDefault() ?? string.Empty;
-            result[symbol] = new DotnetDiagnosticsMcp.Core.Memory.MethodIdentity(
+            // Extract method name from FullMethodName ('Namespace.Type.Method(params)' → 'Method').
+            var methodName = ExtractMethodName(method.FullMethodName);
+            result[symbol] = new MethodIdentity(
                 MethodName: methodName,
                 GenericArity: 0,
                 ModuleName: moduleName,
@@ -293,6 +296,17 @@ public sealed class EventPipeAllocationSampler
                 TypeFullName: null);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Extracts the simple method name from a TraceEvent <c>FullMethodName</c>.
+    /// The format is typically <c>Namespace.Type.Method(params)</c>; this returns <c>Method</c>.
+    /// </summary>
+    private static string ExtractMethodName(string fullMethodName)
+    {
+        // Strip trailing parameter signature first, then take the last dot-delimited segment.
+        var withoutParams = fullMethodName.Split('(')[0];
+        return withoutParams.Split('.').LastOrDefault() ?? string.Empty;
     }
 
     private static string FormatFrame(TraceCallStack frame)
@@ -315,8 +329,11 @@ public sealed class EventPipeAllocationSampler
         => new(pid, startedAt, duration, 0, 0, Array.Empty<AllocatedType>(), Array.Empty<AllocatedType>());
 
     private static CpuSampleTraceArtifact EmptyArtifact(int pid, DateTimeOffset startedAt, TimeSpan duration)
-        => new(pid, startedAt, duration, 0,
-            new CallTreeNode(new SampledFrame(string.Empty, "<root>"), 0, 0, Array.Empty<CallTreeNode>()));
+        => new(pid, startedAt, duration, 0, CreateEmptyRootNode());
+
+    /// <summary>Returns an empty call tree root node used when no events were collected.</summary>
+    private static CallTreeNode CreateEmptyRootNode()
+        => new(new SampledFrame(string.Empty, "<root>"), 0, 0, Array.Empty<CallTreeNode>());
 
     private static void TryDelete(string path)
     {
