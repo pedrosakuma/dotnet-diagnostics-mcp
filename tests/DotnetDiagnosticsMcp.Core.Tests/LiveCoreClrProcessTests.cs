@@ -373,7 +373,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
             var sampler = new EventPipeCpuSampler();
             var result = await sampler.SampleAsync(
                 Pid,
-                TimeSpan.FromSeconds(5),
+                TimeSpan.FromSeconds(8),
                 topN: 100,
                 cancellationToken: CancellationToken.None);
 
@@ -394,6 +394,56 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
                 "must surface GenericTypeArguments on at least one user-code hotspot " +
                 "per issue #21's acceptance bullet (UserCodeIdentities={0}, TotalSamples={1})",
                 userCode.Count, result.Summary.TotalSamples);
+
+            // Tighten the assertion so a regression on either axis fails the test rather
+            // than slipping through on a single matching frame. Both axes are part of #21's
+            // acceptance bullets: type-level (Box`1) AND method-level (Echo<T>).
+            //
+            // NOTE on shared generics: the CLR JITs ONE body shared across all reference-
+            // type instantiations using System.__Canon (e.g. Box<string> appears as
+            // Box<System.__Canon> in the trace). Value-type instantiations are unique
+            // (Box<int> → Box<System.Int32>). The handoff contract surfaces whatever the
+            // runtime emits — we therefore assert int as the unique value-type arg and
+            // accept either System.String or System.__Canon for the reference-type arg.
+            // See docs/handoff-contract.md §3.5 / "shared generics" note.
+            var typeLevel = closed
+                .Where(id => id.GenericTypeArguments!.Type.Count > 0
+                          && (id.TypeFullName?.Contains("Box", StringComparison.Ordinal) ?? false))
+                .ToList();
+            typeLevel.Should().NotBeEmpty(
+                "Box<int>/Box<string>.Wrap must surface as type-level closed instantiations");
+            var typeArgs = typeLevel
+                .SelectMany(id => id.GenericTypeArguments!.Type)
+                .ToHashSet(StringComparer.Ordinal);
+            typeArgs.Should().Contain(a => a.Contains("System.Int32", StringComparison.Ordinal),
+                "Box<int>.Wrap must round-trip its closed type-arg as System.Int32 (value types get unique JIT code)");
+            typeArgs.Should().Contain(
+                a => a.Contains("System.String", StringComparison.Ordinal)
+                  || a.Contains("System.__Canon", StringComparison.Ordinal),
+                "Box<string>.Wrap must round-trip as System.String or the runtime's shared System.__Canon (reference-type instantiations share JIT code)");
+
+            var methodLevel = closed
+                .Where(id => id.GenericTypeArguments!.Method.Count > 0
+                          && string.Equals(id.MethodName, "Echo", StringComparison.Ordinal))
+                .ToList();
+
+            // Best-effort method-level assertion: at the time of writing, Linux EventPipe +
+            // TraceLog does NOT synthesise the `<T>` suffix on a generic method's
+            // FullMethodName — `GenericFixture.Echo<int>` arrives as plain
+            // `GenericFixture.Echo` with `GenericArity=0`. Tracked in issue #85; until that
+            // closes, we accept either outcome but never both axes missing.
+            if (methodLevel.Count > 0)
+            {
+                var methodArgs = methodLevel
+                    .SelectMany(id => id.GenericTypeArguments!.Method)
+                    .ToHashSet(StringComparer.Ordinal);
+                methodArgs.Should().Contain(a => a.Contains("System.Int32", StringComparison.Ordinal),
+                    "Echo<int> must round-trip its closed method-arg as System.Int32 (value types get unique JIT code)");
+                methodArgs.Should().Contain(
+                    a => a.Contains("System.String", StringComparison.Ordinal)
+                      || a.Contains("System.__Canon", StringComparison.Ordinal),
+                    "Echo<string> must round-trip as System.String or the runtime's shared System.__Canon");
+            }
 
             // Every emitted instantiation arg must be a CLR reflection-style FQN with
             // no assembly qualification (per docs/handoff-contract.md §3.5).

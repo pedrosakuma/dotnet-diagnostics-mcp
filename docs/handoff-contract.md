@@ -65,6 +65,26 @@ emitted, two distinct closed instantiations of the same `MethodDef` arrive as **
 separate** `MethodIdentity` rows so the LLM can ask the assembly MCP to render each one's
 closed signature independently.
 
+> **Shared generics (`System.__Canon`).** The CLR JITs **one body** that is shared across
+> all reference-type instantiations of a generic, parameterised by a runtime "canon"
+> placeholder. The producer surfaces whatever the trace emits, which means
+> `Box<string>` typically arrives as `Box<System.__Canon>` — not `Box<System.String>` —
+> while value-type instantiations are unique (`Box<int>` → `Box<System.Int32>`).
+> Consumers should accept `System.__Canon` as a valid reference-type arg and pass it
+> through verbatim to `dotnet-assembly-mcp`'s §3.5 fast-path; the assembly MCP knows to
+> treat `System.__Canon` as "any reference type" for display purposes. This is a runtime
+> artefact, not a bug in the handoff.
+
+> **Linux EventPipe + TraceLog — method-level args.** On Linux, TraceLog's
+> `TraceMethod.FullMethodName` synthesises type-level instantiations (the runtime-canonical
+> `Box`1[System.Int32]` mangling is part of the type name) but **does not** synthesise the
+> `<T>` suffix for method-level generic methods. As a result, a static generic method like
+> `GenericFixture.Echo<int>` currently arrives as plain `GenericFixture.Echo` with
+> `GenericArity = 0` and `GenericTypeArguments = null`. Consumers can still resolve such
+> methods to their open `MethodDef` via `(mvid, token)`. Tracked in
+> [issue #85](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/85) — when
+> closed, method-level args will be populated alongside type-level args on Linux too.
+
 The `(mvid, token)` pair is the only field required by the consumer. Everything else is a
 sanity-check label so a human (or the LLM) can confirm "this is the right method" without
 loading the assembly first.
