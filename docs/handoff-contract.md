@@ -75,15 +75,20 @@ closed signature independently.
 > treat `System.__Canon` as "any reference type" for display purposes. This is a runtime
 > artefact, not a bug in the handoff.
 
-> **Linux EventPipe + TraceLog — method-level args.** On Linux, TraceLog's
-> `TraceMethod.FullMethodName` synthesises type-level instantiations (the runtime-canonical
-> `Box`1[System.Int32]` mangling is part of the type name) but **does not** synthesise the
-> `<T>` suffix for method-level generic methods. As a result, a static generic method like
-> `GenericFixture.Echo<int>` currently arrives as plain `GenericFixture.Echo` with
-> `GenericArity = 0` and `GenericTypeArguments = null`. Consumers can still resolve such
-> methods to their open `MethodDef` via `(mvid, token)`. Tracked in
-> [issue #85](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/85) — when
-> closed, method-level args will be populated alongside type-level args on Linux too.
+> **Linux EventPipe — method-level closed args are not recoverable.** Confirmed runtime
+> limitation: the `MethodLoadVerbose_V2` payload on Linux EventPipe carries the **open** IL
+> signature only (e.g. `generic !!0 (!!0)` for `Echo<T>(T)` — `!!N` is method-type-param N).
+> The closed type arguments (`int`, `string`, `__Canon`, …) are not in any EventPipe event
+> payload — multiple JIT'd bodies of the same generic method show up as distinct
+> `MethodStartAddress` entries with identical `(MethodToken, Namespace, Name, Signature)`
+> tuples. As a result, a static generic method like `GenericFixture.Echo<int>` arrives as
+> plain `GenericFixture.Echo` with `GenericArity = 0` and `GenericTypeArguments = null` on
+> Linux. Consumers should still resolve such methods to their open `MethodDef` via
+> `(mvid, token)`. Tracked as won't-fix in
+> [issue #85](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/85); an opt-in
+> ClrMD-backed enrichment path is being explored separately (see #85 closing comment).
+> Type-level instantiations (e.g. `Box<int>`) are unaffected — the runtime-canonical
+> `` `1[System.Int32] `` mangling is baked into the type name itself.
 
 The `(mvid, token)` pair is the only field required by the consumer. Everything else is a
 sanity-check label so a human (or the LLM) can confirm "this is the right method" without
