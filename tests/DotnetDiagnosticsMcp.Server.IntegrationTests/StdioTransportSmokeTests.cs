@@ -59,15 +59,18 @@ public class StdioTransportSmokeTests
         await proc.StandardInput.WriteLineAsync("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""");
         await proc.StandardInput.FlushAsync();
 
-        // Wait briefly for both responses to drain, then close stdin to trigger graceful exit.
-        await Task.Delay(TimeSpan.FromSeconds(2));
+        // Wait for both responses to drain, then close stdin to trigger graceful exit.
+        // Cold-start of `dotnet ServerDll --stdio` on a CI runner with a fresh NuGet cache
+        // can take 3-4 s before the first JSON-RPC byte is written; 5 s gives headroom
+        // without making the happy path slow.
+        await Task.Delay(TimeSpan.FromSeconds(5));
         proc.StandardInput.Close();
 
-        var exited = proc.WaitForExit(TimeSpan.FromSeconds(15));
+        var exited = proc.WaitForExit(TimeSpan.FromSeconds(30));
         if (!exited)
         {
             proc.Kill(entireProcessTree: true);
-            throw new Xunit.Sdk.XunitException("--stdio process did not exit within 15s after stdin close");
+            throw new Xunit.Sdk.XunitException("--stdio process did not exit within 30s after stdin close");
         }
         proc.WaitForExit(); // flush async output collectors
 

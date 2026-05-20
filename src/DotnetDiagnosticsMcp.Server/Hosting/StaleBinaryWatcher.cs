@@ -37,6 +37,15 @@ internal sealed class StaleBinaryWatcher : BackgroundService
 
     // Test seam: callers can supply a different assembly + interval to exercise the watcher
     // against a controlled on-disk file without spinning a real 60s poll.
+    // The two Assembly.Location reads below are wrapped in a method-level suppression
+    // because we already guard against the single-file case at runtime: when Location
+    // is empty (PublishSingleFile=true) we pass null forward and ExecuteAsync exits
+    // early ("watcher disabled: Assembly.Location is empty"). IL3000 still fires because
+    // the analyzer is purely syntactic, hence the suppression.
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "SingleFile",
+        "IL3000:Avoid accessing Assembly file path when publishing as a single file",
+        Justification = "Empty Location is handled at runtime: the watcher disables itself when no on-disk path is available.")]
     internal StaleBinaryWatcher(
         ILogger<StaleBinaryWatcher> logger,
         IHostApplicationLifetime lifetime,

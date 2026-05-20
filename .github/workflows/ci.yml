@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# Cancel in-progress runs for the same PR when a new commit is pushed.
+# main is excluded so a fast-follow merge after a green PR still gets recorded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-test:
     name: Build & Test (${{ matrix.os }})
@@ -25,14 +31,29 @@ jobs:
         with:
           global-json-file: global.json
 
+      # NuGet package cache. Without a packages.lock.json we key on the central
+      # version manifest + every project file — any package add / version bump
+      # invalidates correctly. Saves ~10-25s per job.
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
       - name: Restore
         run: dotnet restore
 
       - name: Build
         run: dotnet build --no-restore --configuration Release
 
+      # `--blame-hang-timeout 5m` aborts any single test that hangs longer than
+      # five minutes (live sample-process tests usually take ~10s; the longest
+      # observed legitimate test is well under a minute). Prevents the whole CI
+      # job from burning a full 6h budget on a stuck collector.
       - name: Test
-        run: dotnet test --no-build --configuration Release --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
+        run: dotnet test --no-build --configuration Release --blame-hang-timeout 5m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
 
       - name: Upload test results
         if: always()

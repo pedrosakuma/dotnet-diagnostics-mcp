@@ -10,8 +10,17 @@ name: Publish container image
 #   - push to tag vX.Y.Z       → :vX.Y.Z, :X.Y, :X, :latest
 #   - manual workflow_dispatch → :<input-tag>
 #
-# Multi-arch: linux/amd64 + linux/arm64 via QEMU + buildx. GHA cache keeps
-# subsequent builds under 2 minutes.
+# Multi-arch strategy:
+#   - Four parallel `build` jobs (one per {variant} × {linux/amd64, linux/arm64})
+#     each run on the architecture's native GitHub-hosted runner (ubuntu-latest
+#     for amd64, ubuntu-24.04-arm for arm64). Native runners avoid QEMU and cut
+#     the arm64 leg from ~6-10 min to ~1-2 min.
+#   - Each build job emits a single-platform image digest (no tags) and uploads
+#     it as an artifact.
+#   - Two `merge` jobs (one per variant) collect the digests for their variant,
+#     compute the final tag list with docker/metadata-action, and call
+#     `docker buildx imagetools create` to assemble a multi-arch manifest and
+#     push it to GHCR.
 
 on:
   push:
@@ -33,24 +42,87 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  publish:
-    name: Build & push (${{ matrix.variant }})
+  build:
+    name: Build digest (${{ matrix.variant }}, ${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: lean, install_perf: 'false', platform: linux/amd64, runner: ubuntu-latest }
+          - { variant: lean, install_perf: 'false', platform: linux/arm64, runner: ubuntu-24.04-arm }
+          - { variant: perf, install_perf: 'true',  platform: linux/amd64, runner: ubuntu-latest }
+          - { variant: perf, install_perf: 'true',  platform: linux/arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive platform suffix
+        id: pp
+        shell: bash
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "pair=${platform//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          # push-by-digest=true publishes the single-platform manifest under its
+          # content-addressable digest only — no tag is created at this stage.
+          # The merge job below stitches the digests into the final multi-arch tags.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            INSTALL_PERF=${{ matrix.install_perf }}
+          cache-from: type=gha,scope=container-${{ matrix.variant }}-${{ steps.pp.outputs.pair }}
+          cache-to: type=gha,scope=container-${{ matrix.variant }}-${{ steps.pp.outputs.pair }},mode=max
+          provenance: true
+          sbom: true
+
+      - name: Export digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.variant }}-${{ steps.pp.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge manifest (${{ matrix.variant }})
+    needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: lean
-            install_perf: 'false'
-            suffix: ''
-          - variant: perf
-            install_perf: 'true'
-            suffix: '-perf'
+          - { variant: lean, suffix: '' }
+          - { variant: perf, suffix: '-perf' }
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -84,18 +156,13 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Build & push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            INSTALL_PERF=${{ matrix.install_perf }}
-          cache-from: type=gha,scope=container-${{ matrix.variant }}
-          cache-to: type=gha,scope=container-${{ matrix.variant }},mode=max
-          provenance: true
-          sbom: true
+      - name: Create & push multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("--tag " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s " *)
+
+      - name: Inspect pushed manifest
+        run: |
+          docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
