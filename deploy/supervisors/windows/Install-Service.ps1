@@ -5,7 +5,7 @@
     Registers a Scheduled Task that starts at user logon, auto-restarts on failure,
     and runs the dotnet global tool shim from %USERPROFILE%\.dotnet\tools.
     Requires the tool to be installed first:
-        dotnet tool install -g DotnetDiagnosticsMcp.Server
+        dotnet tool install -g dotnet-diagnostics-mcp
 .PARAMETER Port
     TCP port to bind. Defaults to 8787.
 .PARAMETER Token
@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 
 $exe = Join-Path $env:USERPROFILE '.dotnet\tools\dotnet-diagnostics-mcp.exe'
 if (-not (Test-Path $exe)) {
-    Write-Error "dotnet-diagnostics-mcp.exe not found at $exe. Install first: dotnet tool install -g DotnetDiagnosticsMcp.Server"
+    Write-Error "dotnet-diagnostics-mcp.exe not found at $exe. Install first: dotnet tool install -g dotnet-diagnostics-mcp"
     exit 1
 }
 
