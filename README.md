@@ -93,6 +93,8 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
 # Or grab a self-contained single-file binary for your OS/arch from the Releases page.
 ```
 
+> 🐧 **Linux:** on Debian/Ubuntu/WSL/Codespaces the `kernel.yama.ptrace_scope=1` default blocks the four ClrMD-backed tools (`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live PID, `collect_process_dump`). See [Consumer install → § 1.5 Linux: enabling ClrMD-backed tools (ptrace)](./docs/consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace) for the one-line fix per distribution. EventPipe-only tools (counters, CPU sample, exceptions, GC, EventSources) work out of the box.
+
 ### Joint with `dotnet-assembly-mcp` (recommended for handoff resolution)
 
 For the full handoff story — `MethodIdentity` / `TypeIdentity` resolving to

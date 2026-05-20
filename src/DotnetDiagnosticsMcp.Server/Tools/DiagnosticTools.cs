@@ -1922,9 +1922,20 @@ public sealed class DiagnosticTools
                               || HasEpermInChain(ex);
         if (isPtraceFailure)
         {
+            // Probe the live host now so the error envelope carries the exact mitigation
+            // (e.g. "ptrace_scope=1 and sidecar lacks CAP_SYS_PTRACE") rather than the
+            // generic "check ptrace_scope/CAP_SYS_PTRACE/UID" boilerplate. The probe is
+            // cheap (two /proc reads on Linux) and pure on hot failure paths.
+            var ptrace = DotnetDiagnosticsMcp.Core.Capabilities.PtraceProbe.Detect();
+            var headline = ptrace.CanAttach
+                ? $"{tool} could not attach{pidHint}: ptrace was denied even though the sidecar's static capability probe expected attach to succeed ({ptrace.Reason}). Likely cause: target process exited, or it runs under a different UID."
+                : $"{tool} could not attach{pidHint}: ptrace was denied — {ptrace.Reason}";
+
             return DiagnosticResult.Fail<T>(
-                $"{tool} could not attach{pidHint}: ptrace was denied. On Linux check kernel.yama.ptrace_scope, CAP_SYS_PTRACE on the sidecar, and that the MCP server runs as the target's UID.",
+                headline,
                 new DiagnosticError("PermissionDenied", message, typeName),
+                new NextActionHint("get_diagnostic_capabilities", "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
+                    processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null),
                 new NextActionHint("inspect_dump", "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
                     processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null));
         }

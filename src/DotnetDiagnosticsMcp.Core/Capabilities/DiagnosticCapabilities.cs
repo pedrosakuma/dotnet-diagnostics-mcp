@@ -51,4 +51,23 @@ public sealed record DiagnosticCapabilities(
     /// of the target runtime.
     /// </summary>
     public bool CanSampleOffCpu { get; init; }
+
+    /// <summary>
+    /// True when the four ClrMD-backed tools (<c>collect_thread_snapshot</c>,
+    /// <c>inspect_live_heap</c>, <c>inspect_dump</c> against a live PID,
+    /// <c>collect_process_dump</c>) are expected to succeed on this sidecar host
+    /// without surfacing a <c>PermissionDenied</c> error. On Linux this requires
+    /// either <c>CAP_SYS_PTRACE</c> on the sidecar or <c>kernel.yama.ptrace_scope=0</c>
+    /// on the host; on Windows ClrMD attaches via <c>DebugActiveProcess</c> and is
+    /// generally allowed; on macOS live attach is not supported.
+    /// Like <see cref="CanSampleOffCpu"/> this is a property of the sidecar host,
+    /// not of the target runtime.
+    /// </summary>
+    public bool CanAttachClrMD { get; init; }
+
+    /// <summary>Short human-readable reason matching <see cref="CanAttachClrMD"/> —
+    /// surfaced into <see cref="Notes"/> and into the structured error envelope
+    /// when a ClrMD attach actually fails. Null only on legacy code paths that
+    /// haven't been updated to populate the probe.</summary>
+    public string? AttachClrMdReason { get; init; }
 }

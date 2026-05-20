@@ -52,6 +52,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var perfAvailable = _perfSampler is not null && _perfSampler.IsAvailable();
         var etwAvailable = _etwSampler is not null && _etwSampler.IsAvailable();
         var canSampleOffCpu = _offCpuSampler is not null && _offCpuSampler.IsAvailable();
+        var ptrace = PtraceProbe.Detect();
         // CoreCLR always supports SampleProfiler; whether the 2-second probe happened to
         // catch a Thread/Sample event is a function of workload, not capability. As long
         // as we classified the runtime as CoreCLR (preferably from module inspection,
@@ -66,7 +67,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var canCollectCustomEs = probe.SessionStarted;
         var canCollectDump = true;
 
-        var notes = BuildNotes(runtime, probe, perfAvailable, etwAvailable, canSampleOffCpu);
+        var notes = BuildNotes(runtime, probe, perfAvailable, etwAvailable, canSampleOffCpu, ptrace);
 
         var (inContainer, cgroupV2, canSeeThrottle) = await DetectContainerFlagsAsync(processId, cancellationToken).ConfigureAwait(false);
 
@@ -87,6 +88,8 @@ public sealed class CapabilityDetector : ICapabilityDetector
             CgroupV2 = cgroupV2,
             CanSeeThrottle = canSeeThrottle,
             CanSampleOffCpu = canSampleOffCpu,
+            CanAttachClrMD = ptrace.CanAttach,
+            AttachClrMdReason = ptrace.Reason,
         };
     }
 
@@ -249,7 +252,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return RuntimeFlavor.NativeAot;
     }
 
-    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable, bool etwAvailable, bool canSampleOffCpu)
+    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable, bool etwAvailable, bool canSampleOffCpu, PtraceProbeResult ptrace)
     {
         if (!probe.SessionStarted)
         {
@@ -297,6 +300,15 @@ public sealed class CapabilityDetector : ICapabilityDetector
         else
         {
             primary += " collect_off_cpu_sample is not supported on this OS in this release.";
+        }
+
+        // ClrMD live attach (collect_thread_snapshot, inspect_live_heap, inspect_dump on live
+        // PID, collect_process_dump) is also a host-side capability. Tell the LLM up front
+        // when the four tools will hard-fail with PermissionDenied so it can either route
+        // around them (dump-based workflow) or relay a concrete mitigation to the user.
+        if (!ptrace.CanAttach)
+        {
+            primary += $" ClrMD live attach tools (collect_thread_snapshot, inspect_live_heap, inspect_dump on live PID, collect_process_dump) are NOT available: {ptrace.Reason}";
         }
 
         return primary;
