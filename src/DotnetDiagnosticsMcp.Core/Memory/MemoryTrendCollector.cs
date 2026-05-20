@@ -47,7 +47,9 @@ public sealed partial class MemoryTrendCollector : IMemoryTrendCollector
         var windowStart = _clock.GetUtcNow();
 
         // Number of samples: take one immediately, then one per interval until the window elapses.
-        // E.g. duration=10, every=2 → samples at t=0, 2, 4, 6, 8, 10 = 6 samples.
+        // E.g. duration=10, every=2 → at least samples at t≈0, t≈2, t≈4, t≈6, t≈8.
+        // Timing jitter means the actual count may vary slightly; callers should not rely on
+        // an exact count — only on at least 2 samples when the window >= 2×interval.
         var intervalSpan = TimeSpan.FromSeconds(sampleEverySeconds);
         var deadline = windowStart.AddSeconds(durationSeconds);
 
@@ -181,6 +183,7 @@ public sealed partial class MemoryTrendCollector : IMemoryTrendCollector
             var afterComm = content.AsSpan(lastParen + 1);
             // Fields after ')' are space-separated; first is 'state' (offset 0).
             // minflt is at offset 7, majflt at offset 9 (0-based relative to state).
+            // We need indices 0–9, so allocate 10 ranges + 2 safety slots = 12 total.
             Span<Range> ranges = stackalloc Range[12];
             var count = afterComm.Split(ranges, ' ', StringSplitOptions.RemoveEmptyEntries);
 

@@ -279,12 +279,13 @@ public sealed class DiagnosticTools
 
         var trend = await collector.CollectAsync(pid, durationSeconds, sampleEverySeconds, cancellationToken).ConfigureAwait(false);
 
-        var rssMiB = trend.Deltas.RssBytesPerSec / 1_048_576.0;
+        const double bytesPerMiB = 1_048_576.0;
+        var rssMiB = trend.Deltas.RssBytesPerSec / bytesPerMiB;
         var summary = trend.Samples.Count < 2
             ? $"Process {pid}: could not collect enough samples — check Notes for details."
             : $"Process {pid} memory over {durationSeconds}s ({trend.Samples.Count} samples): " +
               $"verdict={trend.Verdict}, " +
-              $"rss={trend.Samples[^1].RssBytes / 1_048_576.0:F1} MiB, " +
+              $"rss={trend.Samples[^1].RssBytes / bytesPerMiB:F1} MiB, " +
               $"Δrss={rssMiB:+0.00;-0.00;0.00} MiB/s.";
 
         var hints = trend.Verdict == "growing"

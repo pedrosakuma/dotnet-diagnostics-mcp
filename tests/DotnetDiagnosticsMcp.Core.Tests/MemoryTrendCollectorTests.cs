@@ -15,7 +15,7 @@ public sealed class MemoryTrendCollectorTests : IDisposable
 
     public MemoryTrendCollectorTests()
     {
-        _procRoot = Path.Combine(Path.GetTempPath(), "memtrend-test-" + Guid.NewGuid().ToString("N"), "proc");
+        _procRoot = Path.Combine(Path.GetTempPath(), $"memtrend-test-{Guid.NewGuid():N}", "proc");
         Directory.CreateDirectory(_procRoot);
     }
 
@@ -85,7 +85,10 @@ public sealed class MemoryTrendCollectorTests : IDisposable
         var trend = await collector.CollectAsync(1111, durationSeconds: 2, sampleEverySeconds: 1);
 
         trend.Verdict.Should().Be("stable");
-        trend.Deltas.RssBytesPerSec.Should().BeApproximately(0, 1_048_576.0 - 0.001, "delta within ±1 MiB/s is stable");
+        // RSS delta within ±1 MiB/s is classified as stable by the collector's threshold.
+        // Reading the same synthetic file twice produces delta ≈ 0; allow up to 1 MiB/s for timing skew.
+        Math.Abs(trend.Deltas.RssBytesPerSec).Should().BeLessThan(1_048_576.0,
+            "RSS delta from identical samples must be below the 1 MiB/s growing threshold");
     }
 
     [Fact]
@@ -145,9 +148,9 @@ public sealed class MemoryTrendCollectorTests : IDisposable
         trend.Samples.Count.Should().BeGreaterThanOrEqualTo(2,
             "duration=3 with interval=1 must produce at least 2 samples");
         trend.Deltas.Should().NotBeNull();
-        // Stable RSS → small delta (may not be exactly 0 due to timing)
+        // Identical-RSS samples must not trigger the "growing" verdict (threshold = 1 MiB/s).
         Math.Abs(trend.Deltas.RssBytesPerSec).Should().BeLessThan(
-            1_048_576.0 + 1,
-            "identical-RSS samples should not exceed the 1 MiB/s growing threshold");
+            1_048_576.0,
+            "identical-RSS samples should not reach the 1 MiB/s growing threshold");
     }
 }
