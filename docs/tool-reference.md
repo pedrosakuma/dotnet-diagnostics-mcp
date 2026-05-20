@@ -165,6 +165,8 @@ rodando.
   censored (`IsCensored=true`) com duração lower-bound, igual ao Linux.
   Requer **elevação administrativa** (ou `SeSystemProfilePrivilege`); sem isso
   devolve `InvalidOperation` com hint pra rodar o sidecar como Administrator.
+  Pra produção, ver [`windows-sidecar-service.md`](./windows-sidecar-service.md)
+  (Windows Service com `LocalSystem` ou conta dedicada + privilégio único).
   `SymbolSource: "etw-cswitch-pdb"` (resolve PDBs locais + `_NT_SYMBOL_PATH`).
 - **Managed↔kernel stack merge:** ainda não — frames são puramente nativos /
   kernel em ambas as plataformas. Sub-slice 2c.
