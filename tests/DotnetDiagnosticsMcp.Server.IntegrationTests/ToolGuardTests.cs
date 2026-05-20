@@ -102,11 +102,57 @@ public sealed class ToolGuardTests
         result.Error!.Kind.Should().Be("PermissionDenied");
     }
 
+    [Fact]
+    public void ToolErrorSurfaceFilter_BuildErrorText_IncludesTopExceptionTypeMessageAndChain()
+    {
+        var inner = new System.ComponentModel.Win32Exception(1, "Operation not permitted");
+        var outer = new InvalidOperationException("PTRACE_ATTACH failed", inner);
+
+        var text = ToolErrorSurfaceFilter.BuildErrorText("inspect_live_heap", outer);
+
+        text.Should().Contain("inspect_live_heap failed:");
+        text.Should().Contain("InvalidOperationException");
+        text.Should().Contain("PTRACE_ATTACH failed");
+        text.Should().Contain("Exception chain:");
+        text.Should().Contain("System.ComponentModel.Win32Exception");
+        text.Should().Contain("Operation not permitted");
+    }
+
+    [Fact]
+    public void ToolErrorSurfaceFilter_BuildErrorText_HandlesNullAndEmptyMessages()
+    {
+        var ex = new InvalidOperationException(string.Empty);
+        var text = ToolErrorSurfaceFilter.BuildErrorText("snapshot_counters", ex);
+
+        text.Should().Contain("snapshot_counters failed:");
+        text.Should().Contain("(no message)", "the formatter must not render empty messages as blanks");
+    }
+
+    [Fact]
+    public void ToolErrorSurfaceFilter_IsRethrowable_RethrowsCanceledOperationAndProtocolExceptions()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var canceled = new OperationCanceledException("user cancel", cts.Token);
+        ToolErrorSurfaceFilter.IsRethrowable(canceled, cts.Token).Should().BeTrue();
+
+        var notCanceled = new OperationCanceledException("stale");
+        ToolErrorSurfaceFilter.IsRethrowable(notCanceled, CancellationToken.None).Should().BeFalse(
+            "cancellation rethrow only applies when the request-bound CT was cancelled");
+
+        var protoEx = new ModelContextProtocol.McpProtocolException("bad frame");
+        ToolErrorSurfaceFilter.IsRethrowable(protoEx, CancellationToken.None).Should().BeTrue();
+
+        var arbitrary = new InvalidOperationException("anything else");
+        ToolErrorSurfaceFilter.IsRethrowable(arbitrary, CancellationToken.None).Should().BeFalse(
+            "every non-protocol/non-cancel exception must be surfaced as a structured error");
+    }
+
+
     private sealed class ThrowingDumpInspector : IDumpInspector
     {
         private readonly Exception _ex;
         public ThrowingDumpInspector(Exception ex) { _ex = ex; }
-
         public Task<HeapSnapshotArtifact> InspectAsync(string dumpFilePath, DumpInspectionOptions? options = null, CancellationToken cancellationToken = default)
             => throw _ex;
 

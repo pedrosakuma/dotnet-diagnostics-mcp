@@ -57,9 +57,22 @@ builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHan
 builder.Services.AddSingleton<DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner, DotnetDiagnosticsMcp.Core.Jobs.CollectionJobRunner>();
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.HandleEvictionBackgroundService>();
 
+// Hold the resolved ILoggerFactory once the app is built so the CallTool filter (configured
+// before Build()) can obtain a logger lazily without sharing state with WebApplication.
+ILoggerFactory? loggerFactoryHolder = null;
+
 builder.Services
     .AddMcpServer(options =>
     {
+        // Surface every tool exception as a structured CallToolResult so the LLM sees the
+        // real failure (PTRACE denied, FileNotFound, ClrMD version mismatch, ...) instead
+        // of the SDK's generic "An error occurred invoking 'X'.". See issues #62, #63 and
+        // DotnetDiagnosticsMcp.Server.Tools.ToolErrorSurfaceFilter for the rationale.
+        options.Filters.Request.CallToolFilters.Add(
+            DotnetDiagnosticsMcp.Server.Tools.ToolErrorSurfaceFilter.Create(
+                () => loggerFactoryHolder?.CreateLogger("DotnetDiagnosticsMcp.Server.Tools.ToolErrorSurfaceFilter")));
+
+
         // Advertise the latest spec version we have validated against.
         // SDK 1.3.0 supports negotiation back to 2024-11-05 if the client is older.
         options.ProtocolVersion = "2025-11-25";
@@ -129,6 +142,7 @@ builder.Services
     .WithResources<DotnetDiagnosticsMcp.Server.Resources.ThreadSnapshotResources>();
 
 var app = builder.Build();
+loggerFactoryHolder = app.Services.GetRequiredService<ILoggerFactory>();
 
 var token = BearerTokenOptions.LoadOrGenerate(app.Logger);
 app.UseMiddleware<BearerTokenMiddleware>(token);

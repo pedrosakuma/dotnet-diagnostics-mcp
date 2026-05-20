@@ -11,6 +11,7 @@ using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
+using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using ModelContextProtocol.Client;
@@ -605,6 +606,115 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         envelope.Hints.Should().NotBeEmpty();
         envelope.Hints[0].NextTool.Should().Be("collect_cpu_sample");
     }
+
+    [Fact]
+    public async Task CollectCpuSample_RunAsJob_HandleSurvivesAndPollableUntilCompleted()
+    {
+        // Regression test for dogfood issue #62 "handle dies within seconds".
+        // Reality check: the runAsJob handle MUST be poll-able from the moment
+        // collect_cpu_sample returns the ack, through job execution, until well
+        // past completion. If get_collection_status ever returns HandleNotFound
+        // while the job is alive, the LLM polling loop is irrecoverable.
+        await using var client = await ConnectAsync();
+
+        var startResult = await client.CallToolAsync(
+            "collect_cpu_sample",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 2,
+                ["topN"] = 5,
+                ["resolveSourceLines"] = false,
+                ["runAsJob"] = true,
+            },
+            cancellationToken: CancellationToken.None);
+
+        startResult.IsError.Should().NotBe(true, "starting the job must succeed");
+        var startEnvelope = DeserializeEnvelope(startResult);
+        startEnvelope.Should().NotBeNull();
+        startEnvelope!.Error.Should().BeNull();
+        var handle = startEnvelope.Handle;
+        handle.Should().NotBeNullOrWhiteSpace("runAsJob ack must carry a handle");
+
+        // Poll immediately — the handle must already be registered.
+        var firstStatus = await PollCollectionStatusAsync(client, handle!);
+        firstStatus.Error.Should().BeNull(
+            "the handle must be poll-able immediately after the runAsJob ack — never HandleNotFound");
+        firstStatus.Status.Should().BeOneOf("running", "completed",
+            "expected an in-flight or already-finished job, not an evicted handle");
+
+        // Poll to terminal. Job is 2s, give it ample headroom.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        CollectionStatusReport? terminal = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            var report = await PollCollectionStatusAsync(client, handle!);
+            report.Error.Should().BeNull(
+                "the handle must remain poll-able for the full job lifetime — dogfood #62");
+            if (report.Status is "completed" or "failed" or "canceled")
+            {
+                terminal = report;
+                break;
+            }
+
+            await Task.Delay(500);
+        }
+
+        terminal.Should().NotBeNull("the job must reach a terminal state within the timeout");
+        terminal!.Status.Should().Be("completed",
+            "a CPU sample against a healthy live process should complete cleanly");
+
+        // And the handle must still be poll-able AFTER completion (10min handle TTL).
+        var postTerminal = await PollCollectionStatusAsync(client, handle!);
+        postTerminal.Error.Should().BeNull(
+            "completed job handles must survive past the job to let the LLM retrieve results");
+        postTerminal.Status.Should().Be("completed");
+    }
+
+    private async Task<CollectionStatusReport> PollCollectionStatusAsync(McpClient client, string handle)
+    {
+        var pollResult = await client.CallToolAsync(
+            "get_collection_status",
+            new Dictionary<string, object?> { ["handle"] = handle },
+            cancellationToken: CancellationToken.None);
+
+        // The schema-validation guard from #61 also lives here implicitly: if we ever
+        // re-introduce the nullable-required bug, McpClient throws before we get here.
+        pollResult.IsError.Should().NotBe(true,
+            "get_collection_status must not surface tool-level errors for an alive handle");
+
+        var envelope = DeserializeEnvelope(pollResult);
+        envelope.Should().NotBeNull();
+        if (envelope!.Error is not null)
+        {
+            // Surface the error envelope to the caller so the test can assert on it.
+            return new CollectionStatusReport(
+                Handle: handle,
+                Kind: string.Empty,
+                ProcessId: 0,
+                Status: "error",
+                StartedAt: default,
+                CompletedAt: null,
+                ElapsedSeconds: 0,
+                Result: null,
+                Error: envelope.Error);
+        }
+
+        var data = envelope.Data;
+        return new CollectionStatusReport(
+            Handle: data.GetProperty("handle").GetString()!,
+            Kind: data.GetProperty("kind").GetString()!,
+            ProcessId: data.GetProperty("processId").GetInt32(),
+            Status: data.GetProperty("status").GetString()!,
+            StartedAt: data.GetProperty("startedAt").GetDateTimeOffset(),
+            CompletedAt: data.TryGetProperty("completedAt", out var ca) && ca.ValueKind != JsonValueKind.Null
+                ? ca.GetDateTimeOffset()
+                : null,
+            ElapsedSeconds: data.GetProperty("elapsedSeconds").GetDouble(),
+            Result: data.TryGetProperty("result", out var r) && r.ValueKind != JsonValueKind.Null ? (object)r : null,
+            Error: null);
+    }
+
 
     [Fact]
     public async Task StartInvestigation_ReturnsColdPlan_WhenOnlySymptomProvided()

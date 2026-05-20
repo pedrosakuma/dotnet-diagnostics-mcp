@@ -38,6 +38,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="DotnetDiagnosticsMcp.Server.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\DotnetDiagnosticsMcp.Core\DotnetDiagnosticsMcp.Core.csproj" />
   </ItemGroup>
 
