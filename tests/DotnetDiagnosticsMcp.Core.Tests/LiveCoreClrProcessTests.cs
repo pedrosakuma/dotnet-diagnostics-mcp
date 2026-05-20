@@ -474,7 +474,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
 
         // Drive the /render endpoint in a tight loop: each request does O(n²) string concat,
-        // producing a heavy stream of System.String allocations visible to AllocationSampled.
+        // producing a heavy stream of System.String allocations visible to GCAllocationTick.
         var driver = Task.Run(async () =>
         {
             while (!cts.IsCancellationRequested)

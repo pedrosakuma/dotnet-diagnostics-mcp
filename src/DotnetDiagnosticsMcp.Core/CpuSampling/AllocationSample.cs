@@ -35,4 +35,3 @@ public sealed record AllocationSample(
     long TotalBytes,
     IReadOnlyList<AllocatedType> TopByBytes,
     IReadOnlyList<AllocatedType> TopByCount);
-
