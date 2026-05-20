@@ -35,6 +35,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<IProcessContextResolver, ProcessContextResolver>();
         services.AddSingleton<ICounterCollector, EventPipeCounterCollector>();
         services.AddSingleton<EventPipeCpuSampler>();
+        services.AddSingleton<EventPipeAllocationSampler>();
         services.AddSingleton<PerfNativeAotCpuSampler>();
         services.AddSingleton<EtwNativeAotCpuSampler>();
         services.AddSingleton<ICpuSampler, RoutingCpuSampler>();

@@ -427,6 +427,67 @@ public sealed class DiagnosticTools
     }
 
     [McpServerTool(
+        Name = "collect_allocation_sample",
+        Title = "Collect allocation sample",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Captures allocation samples from the target process and returns the top-N types by total allocated bytes " +
+        "and by event count. Uses GCAllocationTick events from Microsoft-Windows-DotNETRuntime (GCKeyword=0x1, Verbose), " +
+        "which fire roughly every 100 KB of total managed allocations and carry the TypeName of the sampled object. " +
+        "Works on both CoreCLR and NativeAOT — answers 'who is allocating?' on AOT where ClrMD heap inspection is unavailable. " +
+        "Returns two ranked lists: TopByBytes (allocation pressure) and TopByCount (sampling frequency). " +
+        "Run after snapshot_counters shows elevated GC pressure or growing gen0/gen1 heap sizes.")]
+    public static async Task<DiagnosticResult<AllocationSample>> CollectAllocationSample(
+        EventPipeAllocationSampler sampler,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Maximum number of types to return in each top-N list (TopByBytes and TopByCount). Must be >= 1. Defaults to 25.")] int topN = 25,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1) return InvalidArg<AllocationSample>(nameof(durationSeconds), "must be >= 1");
+        if (topN < 1) return InvalidArg<AllocationSample>(nameof(topN), "must be >= 1");
+
+        var resolved = await ResolveContextAsync<AllocationSample>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+        var ctx = resolved.Context;
+
+        AllocationSample sample;
+        try
+        {
+            sample = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return DiagnosticResult.Fail<AllocationSample>(
+                ex.Message,
+                new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
+                new NextActionHint("get_diagnostic_capabilities", "Check capability matrix to confirm what's available for this process.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+        }
+
+        var topType = sample.TopByBytes.Count > 0 ? sample.TopByBytes[0] : null;
+        var summaryText = topType is not null
+            ? $"Captured {sample.TotalEvents} allocation events ({sample.TotalBytes:N0} bytes total) over {durationSeconds}s. " +
+              $"Top type by bytes: {topType.TypeName} ({topType.TotalBytes:N0} bytes, {topType.EventCount} events)."
+            : $"Captured {sample.TotalEvents} allocation events but no type aggregation surfaced — " +
+              $"increase durationSeconds or drive a workload that allocates during the window.";
+
+        var ok = DiagnosticResult.Ok(
+            sample,
+            summaryText,
+            new NextActionHint("collect_cpu_sample", "Cross-reference: identify hot CPU paths that correlate with the top allocating types.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }),
+            new NextActionHint("collect_gc_events", "Observe GC pause frequency and generation distribution caused by this allocation load.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }));
+        return WithContext(ok, ctx);
+    }
+
+    [McpServerTool(
         Name = "get_call_tree",
         Title = "Drill into CPU sample call tree",
         Destructive = false,

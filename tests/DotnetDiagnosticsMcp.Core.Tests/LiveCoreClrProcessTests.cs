@@ -464,6 +464,56 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task AllocationSampler_ProducesTopTypes_WhenWorkloadAllocates()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+
+        // Drive the /render endpoint in a tight loop: each request does O(n²) string concat,
+        // producing a heavy stream of System.String allocations visible to AllocationSampled.
+        var driver = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                try { _ = await http.GetAsync("/render?count=1000", cts.Token); }
+                catch (OperationCanceledException) { break; }
+                catch { /* tolerate transient races */ }
+            }
+        }, cts.Token);
+
+        try
+        {
+            var sampler = new EventPipeAllocationSampler();
+            var result = await sampler.SampleAsync(
+                Pid,
+                TimeSpan.FromSeconds(8),
+                topN: 25,
+                cancellationToken: CancellationToken.None);
+
+            result.TotalEvents.Should().BeGreaterThan(0,
+                "the /render workload performs heavy string allocations that must surface GCAllocationTick events");
+            result.TopByBytes.Should().NotBeEmpty(
+                "at least one type must be aggregated from GCAllocationTick events");
+            result.TopByCount.Should().NotBeEmpty();
+
+            // System.String dominates the /render endpoint's O(n²) concat workload.
+            result.TopByBytes.Should().Contain(t =>
+                t.TypeName.Contains("String", StringComparison.OrdinalIgnoreCase) ||
+                t.TypeName.Contains("Char", StringComparison.OrdinalIgnoreCase) ||
+                t.TypeName.Contains("Object", StringComparison.OrdinalIgnoreCase),
+                "the render workload allocates strings heavily — at least one string-related type must appear");
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await driver; } catch { /* expected on cancel */ }
+        }
+    }
+
     private async Task<string> EnsureListeningUrlAsync(TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource(timeout);

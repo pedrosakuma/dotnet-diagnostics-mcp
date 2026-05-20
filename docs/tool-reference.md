@@ -189,6 +189,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | `query_off_cpu_snapshot` | cheap | no | drilldown on handle from `collect_off_cpu_sample` |
 | [`snapshot_counters`](#snapshot_counters) | window-bound | no | opens an EventPipe session |
 | [`collect_cpu_sample`](#collect_cpu_sample) | window-bound | **yes** | EventPipe + temp `.nettrace` on disk |
+| [`collect_allocation_sample`](#collect_allocation_sample) | window-bound | no | EventPipe session |
 | [`collect_exceptions`](#collect_exceptions) | window-bound | no | EventPipe session |
 | [`collect_gc_events`](#collect_gc_events) | window-bound | no | EventPipe session |
 | [`collect_event_source`](#collect_event_source) | window-bound | no | EventPipe session |
@@ -412,6 +413,60 @@ sudo apt install linux-tools-$(uname -r) linux-tools-generic
 
 **Sampling rate** is the runtime default (~1 kHz). A 10-second window typically
 yields a few thousand samples; bump `durationSeconds` for sparse workloads.
+
+---
+
+## `collect_allocation_sample`
+
+Captures allocation samples from the target process via `GCAllocationTick`
+events from `Microsoft-Windows-DotNETRuntime` (keyword `GCKeyword=0x1`, level
+Verbose). The GC fires this event roughly every **100 KB of total managed
+allocations** and includes the TypeName of the most recently allocated object.
+
+Unlike `inspect_live_heap` (which requires ClrMD and is unavailable on
+NativeAOT), this tool works on **both CoreCLR and NativeAOT** — making it the
+primary answer to "who is allocating?" on AOT deployments. See
+[`aot-coverage.md`](./aot-coverage.md) for the full NativeAOT diagnostic matrix.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target process id (optional — auto-selects when only one .NET process is visible) |
+| `durationSeconds` | `int` | `10` | Sampling window. Must be ≥ 1. |
+| `topN` | `int` | `25` | Maximum types per ranked list. Must be ≥ 1. |
+
+**Returns:** `AllocationSample`:
+
+```json
+{
+  "processId": 12345,
+  "startedAt": "2026-05-18T20:00:00Z",
+  "duration": "00:00:10",
+  "totalEvents": 14250,
+  "totalBytes": 1469161472,
+  "topByBytes": [
+    { "typeName": "System.String", "totalBytes": 1400000000, "eventCount": 14000, "dominantKind": "Small" },
+    { "typeName": "System.Byte[]", "totalBytes": 60000000, "eventCount": 200, "dominantKind": "Large" }
+  ],
+  "topByCount": [
+    { "typeName": "System.String", "totalBytes": 1400000000, "eventCount": 14000, "dominantKind": "Small" }
+  ]
+}
+```
+
+`TopByBytes` ranks by total allocated bytes — the dominant signal for allocation
+pressure. `TopByCount` ranks by sampling event count — useful when many small
+types compete with one large-object type.
+
+**Notes on sampling semantics:** `GCAllocationTick` is a sampled event, not
+an instrumented one. It samples the *most recently allocated* type when the
+total allocation counter crosses each 100 KB threshold. High-frequency types
+are sampled proportionally more often, making the top-N ranking statistically
+accurate for steady workloads.
+
+**Run after** `snapshot_counters` shows elevated `gen-0-gc-count`,
+`gen-1-gc-count`, or growing `gc-heap-size`.
 
 ---
 
