@@ -322,10 +322,19 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         // Method-level generic args: trailing <...>. Has to be parsed against the full
         // raw string before any other slicing, because the < / > nest with type-level
         // args in pathological cases (a method-level arg that is itself a generic type).
+        // Caveat (#69): C# compiler-generated names also use angle brackets — the async
+        // entrypoint is `Program.<Main>$`, async state machines are `Outer.<Method>d__N`,
+        // lambda display classes are `Outer.<>c__DisplayClass`. These are NOT generic
+        // instantiations and the angle brackets are part of the identifier itself. We
+        // disambiguate by inspecting the character immediately before the opening `<`:
+        // a real method-level instantiation looks like `Type.Method<T>` (the char before
+        // `<` is part of the method identifier), while a compiler-generated name has `.`
+        // before `<` (or starts the string). Only treat `<...>` as generic args when an
+        // identifier character precedes the opening bracket.
         if (name.Length > 0 && name[^1] == '>')
         {
             var open = FindMatchingAngleBracket(name, name.Length - 1);
-            if (open > 0)
+            if (open > 0 && IsIdentifierContinuation(name[open - 1]))
             {
                 var args = name.Substring(open + 1, name.Length - open - 2);
                 methodArgs = SplitTopLevelCommas(args);
@@ -412,6 +421,15 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         }
         return -1;
     }
+
+    /// <summary>True when <paramref name="c"/> can legally appear inside a CLR method
+    /// identifier just before an opening <c>&lt;</c> that introduces method-level generic
+    /// arguments. Used to disambiguate real generic methods (<c>Foo.Bar&lt;T&gt;</c>)
+    /// from compiler-generated names whose identifier itself contains angle brackets
+    /// (<c>Program.&lt;Main&gt;$</c>, <c>Outer.&lt;Method&gt;d__N</c>,
+    /// <c>Outer.&lt;&gt;c__DisplayClass</c>). See #69.</summary>
+    private static bool IsIdentifierContinuation(char c)
+        => char.IsLetterOrDigit(c) || c == '_' || c == '`';
 
     /// <summary>Finds the last <c>.</c> that is NOT inside <c>[ ]</c> or <c>&lt; &gt;</c>.</summary>
     private static int FindLastTopLevelDot(string s)

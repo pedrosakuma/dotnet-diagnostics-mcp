@@ -244,6 +244,40 @@ public class MethodIdentityHandoffTests
         p.GenericTypeArguments.Should().BeNull();
     }
 
+    [Theory]
+    // Regression for #69 — compiler-generated identifiers that end in `>` (no suffix
+    // after the closing bracket) must NOT be parsed as method-level generic arg lists.
+    // Pattern: the `<` is preceded by `.` (or start of string), not by an identifier
+    // character, so the trailing `<...>` belongs to the identifier itself.
+    [InlineData("Program.<Main>", "Program", "<Main>")]
+    [InlineData("Outer.<Method>d__0", "Outer", "<Method>d__0")]
+    [InlineData("Outer.<>c__DisplayClass5_0", "Outer", "<>c__DisplayClass5_0")]
+    [InlineData("Outer.<>c__DisplayClass5_0.<Lambda>b__0", "Outer.<>c__DisplayClass5_0", "<Lambda>b__0")]
+    [InlineData("Outer.<MyLocalFunc>g__Local|0_0", "Outer", "<MyLocalFunc>g__Local|0_0")]
+    public void Parser_CompilerGeneratedAngleBrackets_NotTreatedAsGenericArgs(
+        string fullName, string expectedType, string expectedMethod)
+    {
+        var p = EventPipeCpuSampler.ParseFullMethodName(fullName);
+        p.TypeFullName.Should().Be(expectedType);
+        p.MethodName.Should().Be(expectedMethod);
+        p.GenericArity.Should().Be(0);
+        p.GenericTypeArguments.Should().BeNull();
+    }
+
+    [Fact]
+    public void Parser_RealMethodGenericInstantiation_StillRecognized()
+    {
+        // Guards the #69 fix from over-shooting: the `<` here IS preceded by an
+        // identifier character (`o` from `Echo`), so the bracketed text is a genuine
+        // method-level generic-arg list and must be parsed as such.
+        var p = EventPipeCpuSampler.ParseFullMethodName("MyApp.Helper.Echo<System.Int32>");
+        p.TypeFullName.Should().Be("MyApp.Helper");
+        p.MethodName.Should().Be("Echo");
+        p.GenericArity.Should().Be(1);
+        p.GenericTypeArguments.Should().NotBeNull();
+        p.GenericTypeArguments!.Method.Should().Equal("System.Int32");
+    }
+
     [Fact]
     public void GenericInstantiation_RoundTripsThroughJsonContext()
     {

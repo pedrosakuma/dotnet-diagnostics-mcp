@@ -76,16 +76,16 @@ public sealed record InvestigationPlan(
     DateTimeOffset CreatedAt,
     InvestigationMode Mode,
     int ProcessId,
-    string? Symptom,
-    string? Hypothesis,
-    BaselineHandle? Baseline,
     InvestigationStep NextStep,
     IReadOnlyList<InvestigationStep> AllSteps,
-IReadOnlyList<InvestigationTerminal> Terminals,
-IReadOnlyList<EarlyStopCondition> EarlyStopConditions,
-IReadOnlyList<AlternateBranch> AlternateBranches,
-InvestigationConstraints Constraints,
-IReadOnlyList<MetricComparison>? BaselineComparisons = null);
+    IReadOnlyList<InvestigationTerminal> Terminals,
+    IReadOnlyList<EarlyStopCondition> EarlyStopConditions,
+    IReadOnlyList<AlternateBranch> AlternateBranches,
+    InvestigationConstraints Constraints,
+    string? Symptom = null,
+    string? Hypothesis = null,
+    BaselineHandle? Baseline = null,
+    IReadOnlyList<MetricComparison>? BaselineComparisons = null);
 
 /// <summary>
 /// Named end-state for the decision tree (e.g. "report-cpu", "dump-heap"). Branches whose
