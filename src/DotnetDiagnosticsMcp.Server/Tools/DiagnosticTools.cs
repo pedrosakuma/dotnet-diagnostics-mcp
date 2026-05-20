@@ -265,6 +265,12 @@ public sealed class DiagnosticTools
                      "If null/empty, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel.")]
         string[]? providers = null,
         [Description("Refresh interval (in seconds) requested from each provider. Defaults to 1.")] int intervalSeconds = 1,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' returns ~12 headline counters " +
+                     "(CPU, working set, GC heap, gen-2 collections, threadpool, exceptions, lock contention, " +
+                     "ASP.NET Core requests/sec). 'detail' returns the full counter list (pre-#41 default). " +
+                     "'raw' is equivalent to detail for this tool. The complete snapshot is always retained " +
+                     "behind the issued handle — drill in with query_collection(handle, view=byProvider).")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1)
@@ -295,10 +301,26 @@ public sealed class DiagnosticTools
             : new NextActionHint("collect_gc_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
+        // The handle always carries the FULL snapshot (query_collection drilldown stays cheap),
+        // but the inline payload is depth-gated to keep first-look responses small.
         var handle = handles.Register(pid, CollectionHandleKinds.Counters, snapshot, CollectionHandleTtl);
+
+        var inlinePayload = snapshot;
+        var dropped = 0;
+        if (depth == SamplingDepth.Summary)
+        {
+            var filtered = HeadlineCounters.Filter(snapshot.Counters);
+            dropped = snapshot.Counters.Count - filtered.Count;
+            inlinePayload = snapshot with { Counters = filtered };
+        }
+
+        var summaryText = depth == SamplingDepth.Summary
+            ? $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — showing {inlinePayload.Counters.Count} headline (dropped {dropped}; handle has all). cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}."
+            : $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.";
+
         var ok = DiagnosticResult.OkWithHandle(
-            snapshot,
-            $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.",
+            inlinePayload,
+            summaryText,
             handle.Id,
             handle.ExpiresAt,
             hint,
