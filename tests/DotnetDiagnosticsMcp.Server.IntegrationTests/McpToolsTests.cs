@@ -740,6 +740,29 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
     }
 
     [Fact]
+    public async Task StartInvestigation_OutputSchema_DoesNotMarkNullablesAsRequired()
+    {
+        // Regression for #70 (same family as #61). `InvestigationPlan` exposes nullable
+        // primary-ctor params (Symptom, Hypothesis, Baseline, BaselineComparisons). The
+        // SDK serializes structured tool output with JsonIgnoreCondition.WhenWritingNull,
+        // so when those values are null the wire payload omits them — but the JSON Schema
+        // generator only treats a param as optional if it has an explicit default value.
+        // The user-visible failure was: `start_investigation(processId, symptom="dogfood")`
+        //   → McpError -32602: data/data must have required property 'hypothesis',
+        //     data/data must have required property 'baseline'.
+        // Fix: reorder the InvestigationPlan record so nullable params come after required
+        // ones and carry `= null` defaults.
+        await using var client = await ConnectAsync();
+
+        var tools = await client.ListToolsAsync(cancellationToken: CancellationToken.None);
+        var start = tools.Single(t => t.Name == "start_investigation");
+        var dataSchema = start.ReturnJsonSchema!.Value.GetProperty("properties").GetProperty("data");
+        var dataRequired = dataSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        dataRequired.Should().NotContain(new[] { "symptom", "hypothesis", "baseline", "baselineComparisons" },
+            "nullable properties must NOT be in `required` — the SDK omits null values on the wire (#70)");
+    }
+
+    [Fact]
     public async Task StartInvestigation_RoutesHypothesisDirectlyToContentionEvents()
     {
         await using var client = await ConnectAsync();
