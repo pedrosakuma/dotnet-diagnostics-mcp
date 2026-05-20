@@ -44,6 +44,17 @@ as root and creates `/tmp/dotnet-diagnostic-1` owned by root. In Kubernetes,
 the recommended setup is to run **both** containers as the same non-root UID
 (the sample manifest pins UID/GID `10001` and sets `fsGroup: 10001`).
 
+### Sidecar ops: auto-recycle on image swap
+
+When the sidecar image is rolled forward (`docker pull … && docker run …` with
+the same name, or a Kubernetes deployment update of just the sidecar
+container), the still-running process keeps serving the **previous** build
+until something else recycles it. Set `DOTNET_DIAGNOSTICS_MCP_AUTO_RESTART=true`
+on the sidecar container — the built-in `StaleBinaryWatcher` polls the
+on-disk MVID once a minute and, on drift, asks the host to stop gracefully so
+the supervisor (`--restart=always`, systemd, K8s) brings up the fresh build.
+Without the env var the watcher only logs a warning. See issue #75.
+
 ### Heads up: ClrMD tools need `CAP_SYS_PTRACE` on Linux
 
 `collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` (for live PIDs)
