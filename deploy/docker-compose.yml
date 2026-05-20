@@ -47,6 +47,12 @@ services:
       ASPNETCORE_URLS: http://0.0.0.0:8080
       MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:-}
       DOTNET_NOLOGO: "1"
+    # Required for ClrMD-backed tools (collect_thread_snapshot, inspect_live_heap,
+    # inspect_dump on a live PID, collect_process_dump) on Linux hosts where
+    # kernel.yama.ptrace_scope=1 (Debian/Ubuntu/WSL/Codespaces default).
+    # EventPipe-only tools don't need this. See docs/consumer-install.md §1.5.
+    cap_add:
+      - SYS_PTRACE
     # Uncomment to enable host-PID attach for local .NET targets running on the
     # host. Elevates blast radius — only do this on a developer machine.
     # pid: host
