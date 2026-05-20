@@ -117,6 +117,13 @@ spec:
                 secretKeyRef:
                   name: diagnosticsmcp-bearer
                   key: token
+            # Optional: when the sidecar image is replaced (rolling update of just
+            # the sidecar container), the watcher detects the on-disk MVID drift
+            # and asks Kubernetes to restart the pod so the new build is loaded.
+            # Without this the sidecar process keeps serving the previous build
+            # until something else recycles it. See issue #75.
+            - name: DOTNET_DIAGNOSTICS_MCP_AUTO_RESTART
+              value: "true"
           volumeMounts:
             # Sees the same /tmp as the app, including the diagnostic socket.
             - name: diag-tmp

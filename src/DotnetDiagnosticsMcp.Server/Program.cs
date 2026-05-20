@@ -33,6 +33,7 @@ builder.Logging.AddSimpleConsole(o =>
 });
 
 builder.Services.AddDiagnosticCoreServices();
+builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.StaleBinaryWatcher>();
 
 // Hold the resolved ILoggerFactory once the app is built so the CallTool filter (configured
 // before Build()) can obtain a logger lazily without sharing state with WebApplication.
