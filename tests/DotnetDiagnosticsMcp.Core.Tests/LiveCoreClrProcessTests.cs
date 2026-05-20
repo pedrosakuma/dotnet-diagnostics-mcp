@@ -19,6 +19,7 @@ namespace DotnetDiagnosticsMcp.Core.Tests;
 public class LiveCoreClrProcessTests : IAsyncLifetime
 {
     private Process? _sampleProcess;
+    private readonly TaskCompletionSource<string> _listeningUrlTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private int Pid => _sampleProcess?.Id ?? throw new InvalidOperationException("Sample not started.");
 
@@ -53,6 +54,37 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         {
             return;
         }
+
+        // Consume stdout so the OS pipe buffer never fills (would deadlock the sample),
+        // and harvest the "Now listening on: http://127.0.0.1:NNNN" line that Kestrel
+        // emits when binding to port 0 picks an ephemeral port.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var reader = _sampleProcess.StandardOutput;
+                string? line;
+                while ((line = await reader.ReadLineAsync()) is not null)
+                {
+                    var idx = line.IndexOf("Now listening on:", StringComparison.Ordinal);
+                    if (idx >= 0 && !_listeningUrlTcs.Task.IsCompleted)
+                    {
+                        var url = line[(idx + "Now listening on:".Length)..].Trim();
+                        _listeningUrlTcs.TrySetResult(url);
+                    }
+                }
+            }
+            catch
+            {
+                // best-effort; if the read fails the URL TCS is never set and HTTP-driven
+                // tests will just skip via EnsureListeningUrlAsync's timeout.
+            }
+        });
+        _ = Task.Run(async () =>
+        {
+            try { using var err = _sampleProcess.StandardError; while (await err.ReadLineAsync() is not null) { } }
+            catch { /* best-effort */ }
+        });
 
         await WaitForDiagnosticEndpointAsync(_sampleProcess.Id, TimeSpan.FromSeconds(30));
     }
@@ -307,6 +339,91 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         finally
         {
             try { Directory.Delete(outDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CpuSampler_EmitsClosedGenericInstantiations_FromCoreClrSampleFixture()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        var sampleDll = LocateSampleDll()
+            ?? throw new InvalidOperationException("CoreClrSample.dll not found.");
+        var expectedMvid = new MvidReader().TryRead(sampleDll);
+        expectedMvid.Should().NotBeNull();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+
+        // Drive the /generics endpoint in a tight loop on a background task so the CPU
+        // sampler's window overlaps with hot Box<T>.Wrap / GenericFixture.Echo<T> frames.
+        var driver = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                try { _ = await http.GetAsync("/generics?iterations=200000", cts.Token); }
+                catch (OperationCanceledException) { break; }
+                catch { /* tolerate transient races */ }
+            }
+        }, cts.Token);
+
+        try
+        {
+            var sampler = new EventPipeCpuSampler();
+            var result = await sampler.SampleAsync(
+                Pid,
+                TimeSpan.FromSeconds(5),
+                topN: 100,
+                cancellationToken: CancellationToken.None);
+
+            // Look for at least one hotspot identity that (a) belongs to CoreClrSample
+            // and (b) carries a closed instantiation block — either type-level (Box`1)
+            // or method-level (Echo<T>).
+            var userCode = result.Artifact.MethodIdentities.Values
+                .Where(id => id.ModuleVersionId == expectedMvid)
+                .ToList();
+            var closed = userCode
+                .Where(id => id.GenericTypeArguments is { } gi
+                          && (gi.Type.Count > 0 || gi.Method.Count > 0))
+                .ToList();
+
+            closed.Should().NotBeEmpty(
+                "the /generics fixture exercises Box<int>/Box<string> (type-level) and " +
+                "Echo<int>/Echo<string> (method-level) closed generics — the sampler " +
+                "must surface GenericTypeArguments on at least one user-code hotspot " +
+                "per issue #21's acceptance bullet (UserCodeIdentities={0}, TotalSamples={1})",
+                userCode.Count, result.Summary.TotalSamples);
+
+            // Every emitted instantiation arg must be a CLR reflection-style FQN with
+            // no assembly qualification (per docs/handoff-contract.md §3.5).
+            foreach (var gi in closed.Select(c => c.GenericTypeArguments!))
+            {
+                foreach (var arg in gi.Type.Concat(gi.Method))
+                {
+                    arg.Should().NotBeNullOrWhiteSpace();
+                    arg.Should().NotContain(",", "type args must NOT be assembly-qualified " +
+                        $"per the handoff contract; got '{arg}'");
+                }
+            }
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await driver; } catch { /* expected on cancel */ }
+        }
+    }
+
+    private async Task<string> EnsureListeningUrlAsync(TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            return await _listeningUrlTcs.Task.WaitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw SkipException.ForReason("CoreClrSample did not advertise an HTTP listening URL within the timeout.");
         }
     }
 

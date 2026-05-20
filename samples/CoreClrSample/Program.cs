@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -113,6 +115,7 @@ app.Run();
 sealed class Box<T>
 {
     public T? Value { get; set; }
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public int Wrap()
     {
         // Trivial work that dominates samples when called in a tight loop.
@@ -125,6 +128,7 @@ sealed class Box<T>
 
 static class GenericFixture
 {
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public static T Echo<T>(T value)
     {
         // Force the JIT to specialize so each instantiation shows up as a distinct MethodID.
