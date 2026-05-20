@@ -16,10 +16,20 @@ Off-CPU sampling on Windows uses the NT Kernel Logger's `ContextSwitch` provider
 Windows off-CPU profiler (PerfView, xperf, WPR, `dotnet-trace` with kernel events) hits the
 same wall.
 
-The Kernel Logger needs **one** of:
+The Kernel Logger itself needs **one** of:
 
 - Membership in the local **Administrators** group, **or**
 - The **`SeSystemProfilePrivilege`** ("Profile system performance") privilege.
+
+> ⚠️ **Today's runtime gate.** `EtwOffCpuSampler.IsAvailable()` currently checks
+> `TraceEventSession.IsElevated()`, which only returns `true` for an **elevated** token
+> (i.e. Administrators membership or `LocalSystem`). A dedicated service account that
+> holds only `SeSystemProfilePrivilege` will be rejected at the gate before any ETW
+> session is attempted. The working-today recommendations below therefore put the service
+> account in local **Administrators**. Tracked in [#89][i89] — once shipped, you will be
+> able to drop the Administrators membership and rely on `SeSystemProfilePrivilege` alone.
+>
+> [i89]: https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/89
 
 The Scheduled-Task installer (`deploy/supervisors/windows/Install-Service.ps1`) runs the
 server as the interactive user. That user is typically a **standard** user — no
@@ -51,13 +61,17 @@ kernel logger session. **Switch to the Service only when you need off-CPU.**
 
 ## 2. Two account options
 
-| Account                         | Privilege grant                   | Tradeoff                                                                 |
-|---------------------------------|-----------------------------------|--------------------------------------------------------------------------|
-| `LocalSystem`                   | implicit (it has every privilege) | Simplest. **Overbroad** — `LocalSystem` can do everything on the box.    |
-| Dedicated service account       | `SeSystemProfilePrivilege` only   | **Least privilege**. Recommended for hardened environments.              |
+| Account                                       | Today's privilege grant                              | Tradeoff                                                                                                                          |
+|-----------------------------------------------|------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| Dedicated service account in **Administrators** | `Add-LocalGroupMember -Group Administrators`         | **Service-scoped** but still coarser than ideal — admin rights on the host. Easiest path that satisfies today's `IsElevated()` gate. |
+| `LocalSystem`                                 | implicit (it has every privilege)                    | Simplest. **Host-wide** privilege. Reasonable for isolated jump-boxes; not recommended for shared production hosts.               |
+| Dedicated service account with **`SeSystemProfilePrivilege` only** | grant via `secpol.msc` → "Profile system performance" | **Least privilege**. Blocked today by [#89][i89] — `IsAvailable()` rejects this account before ETW. Use after #89 ships.     |
 
-The recommendation is the dedicated account. The `LocalSystem` path is documented for
-quick experimentation and air-gapped lab boxes.
+[i89]: https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/89
+
+Recommendation today: **dedicated account in Administrators** for shared/production hosts,
+**`LocalSystem`** for quick experimentation. The pure least-privilege account is documented
+for completeness but does not work yet.
 
 ---
 
@@ -72,45 +86,33 @@ New-LocalUser -Name 'diagmcp$' -Password $pwd `
               -Description 'dotnet-diagnostics-mcp service account' `
               -PasswordNeverExpires `
               -UserMayNotChangePassword
-
-# Grant "Log on as a service" (SeServiceLogonRight) — required for any non-system
-# service identity.
-$account = "$env:COMPUTERNAME\diagmcp$"
-$tmp = New-TemporaryFile
-secedit /export /cfg $tmp /areas USER_RIGHTS | Out-Null
-(Get-Content $tmp) -replace 'SeServiceLogonRight = ', "SeServiceLogonRight = $account," |
-    Set-Content $tmp
-secedit /configure /db secedit.sdb /cfg $tmp /areas USER_RIGHTS | Out-Null
-Remove-Item $tmp
 ```
 
 > The trailing `$` on the account name is conventional for service-only accounts — it
-> excludes it from `Get-LocalUser` shown to interactive users by default.
+> excludes it from `Get-LocalUser` shown to interactive users by default. It is **not** a
+> managed service account (`MSA`); plain `New-LocalUser` is fine for a single host.
 
-### 3.2 Grant `SeSystemProfilePrivilege`
-
-Two equivalent paths.
-
-**Scripted (recommended):**
+### 3.2 Grant the required rights
 
 ```powershell
 $account = "$env:COMPUTERNAME\diagmcp$"
-$tmp = New-TemporaryFile
-secedit /export /cfg $tmp /areas USER_RIGHTS | Out-Null
-(Get-Content $tmp) -replace 'SeSystemProfilePrivilege = ', "SeSystemProfilePrivilege = $account," |
-    Set-Content $tmp
-secedit /configure /db secedit.sdb /cfg $tmp /areas USER_RIGHTS | Out-Null
-Remove-Item $tmp
 
-# Verify:
-whoami /priv  # run AFTER the service starts under diagmcp$ — should list SeSystemProfilePrivilege
+# (a) Add to local Administrators. This satisfies today's IsAvailable() gate
+#     (issue #89) AND implicitly grants SeServiceLogonRight + SeSystemProfilePrivilege.
+#     Idempotent — re-running is a no-op.
+Add-LocalGroupMember -Group 'Administrators' -Member 'diagmcp$' -ErrorAction SilentlyContinue
 ```
 
-**Interactive (`secpol.msc`):**
-
-1. `secpol.msc` → `Local Policies` → `User Rights Assignment` → `Profile system performance`.
-2. Add the `diagmcp$` account.
-3. OK. The grant takes effect after the next service start.
+> 🔒 **Future least-privilege path (after [#89][i89]).** When that issue ships you can
+> remove the account from Administrators and instead grant only `SeServiceLogonRight`
+> + `SeSystemProfilePrivilege` via `secpol.msc`:
+>
+> - `secpol.msc` → `Local Policies` → `User Rights Assignment` → `Log on as a service` →
+>   Add `diagmcp$`.
+> - Same node → `Profile system performance` → Add `diagmcp$`.
+>
+> Both take effect on the next service start. Until #89 ships, the runtime gate will
+> reject this configuration even though the kernel would accept it.
 
 ### 3.3 Install the service
 
@@ -138,28 +140,48 @@ sc.exe failure     "dotnet-diagnostics-mcp" reset= 86400 actions= restart/30000/
 ### 3.4 Configure the bearer token
 
 The bearer token is read from the **`MCP_BEARER_TOKEN`** environment variable. Service
-processes do not inherit user environment, so set it as a machine-scope variable that the
-service account also sees:
+processes do not inherit the interactive user's environment, so it must be visible to the
+service account at start time.
+
+> ⚠️ **Security: avoid the Machine env scope for production.** A `Machine`-scope
+> environment variable is readable by **every** local process on the host, so any local
+> user could exfiltrate the token and call the privileged sidecar bound to
+> `127.0.0.1:8787`. Likewise, a DPAPI blob protected under `LocalMachine` scope can be
+> decrypted by any local account on the same box — it is **host-wide**, not
+> service-account-isolated.
+
+Recommended pattern for production: set the env var **under the `diagmcp$` profile only**,
+or wrap the binary in a small launcher that reads from an ACL-restricted config file and
+exports the variable before calling `dotnet-diagnostics-mcp.exe`.
 
 ```powershell
+# Set MCP_BEARER_TOKEN under the diagmcp$ user profile (User scope) — visible only
+# to processes running as diagmcp$.
+$cred  = Get-Credential -UserName "$env:COMPUTERNAME\diagmcp$" -Message "diagmcp$ password"
 $token = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
-[Environment]::SetEnvironmentVariable('MCP_BEARER_TOKEN', $token, 'Machine')
+Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',
+    "[Environment]::SetEnvironmentVariable('MCP_BEARER_TOKEN', '$token', 'User')" -Wait
 
-# Save the token somewhere the MCP client can read it — it is NOT recoverable from the
-# registry once you forget it. Common pattern: write to a DPAPI-protected file under
-# %ProgramData%\dotnet-diagnostics-mcp\.
+# Persist the same token in an ACL-restricted file for the MCP client to read.
 $tokenDir  = Join-Path $env:ProgramData 'dotnet-diagnostics-mcp'
 New-Item -ItemType Directory -Force -Path $tokenDir | Out-Null
-$bytes   = [Text.Encoding]::UTF8.GetBytes($token)
-$crypted = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, 'LocalMachine')
-[IO.File]::WriteAllBytes((Join-Path $tokenDir 'bearer.dpapi'), $crypted)
+$tokenFile = Join-Path $tokenDir 'bearer.token'
+Set-Content -Path $tokenFile -Value $token -Encoding ASCII
+
+# ACL: only SYSTEM, Administrators, and the diagmcp$ account can read.
+$acl = New-Object System.Security.AccessControl.FileSecurity
+$acl.SetAccessRuleProtection($true, $false)   # disable inheritance
+foreach ($principal in 'NT AUTHORITY\SYSTEM','BUILTIN\Administrators',"$env:COMPUTERNAME\diagmcp$") {
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $principal, 'Read,Write', 'Allow')
+    $acl.AddAccessRule($rule)
+}
+Set-Acl -Path $tokenFile -AclObject $acl
 ```
 
-> 🛈 If you prefer to keep the value out of the machine environment, use
-> `SetEnvironmentVariable('MCP_BEARER_TOKEN', $token, 'User')` **under the
-> `diagmcp$` profile**, or wrap the binary in a thin script that reads from a config file
-> and re-exports the env var before invoking `dotnet-diagnostics-mcp.exe`. The server
-> itself only looks at the process-environment variable.
+> 🛈 Quick-and-dirty alternative (lab boxes only): `[Environment]::SetEnvironmentVariable(
+> 'MCP_BEARER_TOKEN', $token, 'Machine')`. Acceptable for single-user hosts; **do not
+> use** on shared production hosts — see the warning above.
 
 ### 3.5 Start + verify
 
@@ -167,13 +189,13 @@ $crypted = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, 'LocalM
 Start-Service dotnet-diagnostics-mcp
 Get-Service   dotnet-diagnostics-mcp   # Status should be Running
 
-# Confirm the privilege actually landed on the service token. Run from any
-# elevated PowerShell:
-$pid = (Get-Service dotnet-diagnostics-mcp).ServicesDependedOn  # cosmetic; PID via Get-CimInstance:
+# Confirm the service process is alive and grab its PID via WMI.
 $svcPid = (Get-CimInstance Win32_Service -Filter "Name='dotnet-diagnostics-mcp'").ProcessId
-(Get-Process -Id $svcPid).Threads | Out-Null     # touch the process to make sure it's alive
-# Use Sysinternals `accesschk -p <pid>` or PowerShell's `whoami /priv` from a process
-# launched under diagmcp$ to confirm SeSystemProfilePrivilege is listed.
+Get-Process -Id $svcPid | Format-Table Id, ProcessName, StartTime
+
+# Confirm the privileges actually landed on the service token. Use Sysinternals
+# `accesschk.exe -p $svcPid` or open an interactive shell as diagmcp$ and run
+# `whoami /priv` — SeSystemProfilePrivilege should be listed.
 
 # Health-check:
 Invoke-WebRequest http://127.0.0.1:8787/health | Select-Object StatusCode
@@ -201,7 +223,10 @@ sc.exe create "dotnet-diagnostics-mcp" `
 
 sc.exe failure "dotnet-diagnostics-mcp" reset= 86400 actions= restart/30000/restart/60000/restart/120000
 
-# Bearer token (same approach as 3.4):
+# Bearer token. Machine scope is acceptable here because LocalSystem already has
+# unrestricted access to the host — every local user could read the token, but they
+# could also DoS / inspect the service directly. For a shared host, prefer Option A
+# with an ACL-restricted token file (see § 3.4) over LocalSystem.
 $token = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
 [Environment]::SetEnvironmentVariable('MCP_BEARER_TOKEN', $token, 'Machine')
 
@@ -219,16 +244,17 @@ Stop-Service     dotnet-diagnostics-mcp -ErrorAction SilentlyContinue
 sc.exe delete    dotnet-diagnostics-mcp
 
 # Optional: drop the privilege grant + account.
-$account = "$env:COMPUTERNAME\diagmcp$"
-$tmp = New-TemporaryFile
-secedit /export /cfg $tmp /areas USER_RIGHTS | Out-Null
-(Get-Content $tmp) -replace ",$([Regex]::Escape($account))", '' |
-    Set-Content $tmp
-secedit /configure /db secedit.sdb /cfg $tmp /areas USER_RIGHTS | Out-Null
-Remove-Item $tmp
+# Remove-LocalGroupMember is idempotent and matches the install in § 3.2.
+Remove-LocalGroupMember -Group 'Administrators' -Member 'diagmcp$' -ErrorAction SilentlyContinue
+
+# If you ALSO granted SeSystemProfilePrivilege / SeServiceLogonRight via secpol.msc
+# (future least-privilege path), remove them from the same UI:
+#   secpol.msc -> Local Policies -> User Rights Assignment ->
+#       "Log on as a service" / "Profile system performance" -> Remove diagmcp$.
 
 Remove-LocalUser -Name 'diagmcp$'
 [Environment]::SetEnvironmentVariable('MCP_BEARER_TOKEN', $null, 'Machine')
+Remove-Item -Recurse -Force "$env:ProgramData\dotnet-diagnostics-mcp" -ErrorAction SilentlyContinue
 ```
 
 ---
@@ -237,10 +263,10 @@ Remove-LocalUser -Name 'diagmcp$'
 
 | Symptom                                                                                          | Likely cause                                                                  |
 |--------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| Service fails to start with **`Error 1069: logon failure`**                                       | `SeServiceLogonRight` not granted to the service account (see § 3.1).         |
-| `collect_off_cpu_sample` returns `PermissionDenied` despite running as a service                  | `SeSystemProfilePrivilege` not granted, **or** the service was started before the grant — restart the service after `secedit`. |
+| Service fails to start with **`Error 1069: logon failure`**                                       | The service account cannot log on as a service. If you followed § 3.2, Administrators membership grants `SeServiceLogonRight` implicitly — confirm `Add-LocalGroupMember` actually ran (check `Get-LocalGroupMember Administrators`). |
+| `collect_off_cpu_sample` returns `PermissionDenied` despite running as a service                  | Service started **before** the privilege grant. Restart the service after `Add-LocalGroupMember` (token privileges are evaluated at start). If you tried the least-privilege path (`SeSystemProfilePrivilege` only, no Administrators) — this is blocked today by [#89][i89]. |
 | `collect_off_cpu_sample` returns `Conflict: NT Kernel Logger session already exists`              | Another profiler (PerfView, WPR, `xperf`) is currently running. Stop it.       |
-| `Authorization` header rejected with 401                                                          | The MCP client is reading a stale `MCP_BEARER_TOKEN` from User scope instead of Machine. Refresh the client env. |
+| `Authorization` header rejected with 401                                                          | The MCP client is reading a stale `MCP_BEARER_TOKEN` from User scope instead of the service account / token file. Refresh the client. |
 | `whoami /priv` does **not** list `SeSystemProfilePrivilege` for the service process               | The privilege is on the **account**, but the service was started with a **filtered token** (rare; legacy 32-bit hosts). Verify the service is 64-bit; restart the host once. |
 
 For Linux / containers, see [`consumer-install.md § 1.5`](./consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace).
