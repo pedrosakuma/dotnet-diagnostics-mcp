@@ -164,7 +164,7 @@ Add this to your `mcp-config.json` (Claude Desktop, Claude Code, Copilot CLI, Cu
 
 ## 4. Optional — pair with `dotnet-assembly-mcp`
 
-After [#28](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/28) shipped, the diagnostics server resolves PDBs locally and stamps `SourceLocation` directly onto every `MethodIdentity`. That means **in a dev environment** where the source tree is open in your editor, `dotnet-diagnostics-mcp` alone is enough to follow a hotspot to its source line.
+The diagnostics server resolves PDBs locally and stamps `SourceLocation` directly onto every `MethodIdentity` it emits for CPU samples (see [#28](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/28)). That means **in a dev environment** where the source tree is open in your editor, `dotnet-diagnostics-mcp` alone is enough to follow a hotspot to its source line.
 
 The partner [`pedrosakuma/dotnet-assembly-mcp`](https://github.com/pedrosakuma/dotnet-assembly-mcp) remains the right call for:
 
@@ -175,7 +175,7 @@ The partner [`pedrosakuma/dotnet-assembly-mcp`](https://github.com/pedrosakuma/d
 When you want it, install side-by-side on a distinct port:
 
 ```bash
-dotnet tool install -g DotnetAssemblyMcp.Server
+dotnet tool install -g dotnet-assembly-mcp
 dotnet-assembly-mcp --urls http://127.0.0.1:8788
 ```
 
