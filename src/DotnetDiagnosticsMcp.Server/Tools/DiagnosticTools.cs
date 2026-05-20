@@ -11,6 +11,7 @@ using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Investigation;
+using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.OffCpu;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
@@ -1466,6 +1467,152 @@ public sealed class DiagnosticTools
                 : DiagnosticResult.Ok(summaryView, summary, hint);
             return WithContext(result, liveCtx);
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    [McpServerTool(
+        Name = "capture_method_bytes",
+        Title = "Capture JIT-emitted native code for a managed method",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Reads JIT-emitted machine code for a single managed method out of the runtime's " +
+        "code-heap and writes it to disk as a header-less raw blob, then emits a handoff " +
+        "hint to dotnet-native-mcp.disassemble(rawBlob=true). Closes the only gap left in " +
+        "disasm coverage (NativeAOT and R2R are already covered on-disk by dotnet-native-mcp; " +
+        "JIT-emitted code only lives in the live process / dump). Useful for diffing tier " +
+        "promotion (Tier0 → Tier1+PGO) of a hot method observed via " +
+        "collect_event_source(\"Microsoft-Windows-DotNETRuntime\", keywords=Jit|JitTracing). " +
+        "Supply at most ONE of processId or dumpFilePath: processId attaches via ClrMD with " +
+        "suspend (sub-second for a single method); dumpFilePath analyses a WithHeap/Full dump " +
+        "offline. When both are omitted the server auto-selects a live .NET process. The " +
+        "method is identified by its (moduleVersionId, metadataToken) handoff key — the same " +
+        "key dotnet-assembly-mcp uses. Optional codeAddress (e.g. from a MethodLoad_V2 event) " +
+        "is a fast-path; tier is an informational label echoed back (ClrMD does not expose " +
+        "the JIT OptimizationTier directly). NativeAOT and pure ReadyToRun targets are not " +
+        "supported — disassemble the on-disk binary with dotnet-native-mcp.disassemble instead.")]
+    public static async Task<DiagnosticResult<CapturedMethodBytes>> CaptureMethodBytes(
+        IJitMethodCapturer capturer,
+        IProcessContextResolver resolver,
+        [Description("PE module MVID (D format, e.g. '6f5c9bf0-1e0b-4f3b-9a8e-…') of the assembly that declares the method. Required.")] string moduleVersionId,
+        [Description("IL method-def metadata token (table 0x06). Accepts decimal or hex (0x06000142). Required.")] string metadataToken,
+        [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath. Optional — when both processId and dumpFilePath are null/empty the server auto-selects a live .NET process.")] int? processId = null,
+        [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
+        [Description("Optional fast-path: a code address already observed for this method (e.g. MethodCodeStart from MethodLoad_V2). Hex (with or without 0x prefix) or decimal. Mismatches with (moduleVersionId, metadataToken) surface as a warning, not a hard error.")] string? codeAddress = null,
+        [Description("Optional tier label echoed back on the result (e.g. 'Tier0', 'Tier1', 'Tier1OSR'). ClrMD does not expose the JIT OptimizationTier directly; this field is informational. The authoritative MethodCompilationType (None/Jit/Ngen) is always returned.")] string? tier = null,
+        [Description("Output directory for the .bin file(s). Defaults to {temp}/dotnet-diagnostics-mcp/method-bytes/{pid}/.")] string? outputDirectory = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(moduleVersionId)) return InvalidArg<CapturedMethodBytes>(nameof(moduleVersionId), "is required");
+        if (!Guid.TryParse(moduleVersionId, out var mvid)) return InvalidArg<CapturedMethodBytes>(nameof(moduleVersionId), "must be a GUID in 'D' format");
+        if (string.IsNullOrWhiteSpace(metadataToken)) return InvalidArg<CapturedMethodBytes>(nameof(metadataToken), "is required");
+        if (!TryParseHexOrInt(metadataToken, out var tokenValue) || tokenValue <= 0)
+        {
+            return InvalidArg<CapturedMethodBytes>(nameof(metadataToken), "must be a positive integer (decimal or 0x-prefixed hex)");
+        }
+
+        ulong? codeAddressValue = null;
+        if (!string.IsNullOrWhiteSpace(codeAddress))
+        {
+            if (!TryParseUnsignedHexOrInt(codeAddress, out var addr) || addr == 0)
+            {
+                return InvalidArg<CapturedMethodBytes>(nameof(codeAddress), "must be a non-zero address (decimal or 0x-prefixed hex)");
+            }
+            codeAddressValue = addr;
+        }
+
+        var hasExplicitPid = processId.HasValue && processId.Value != 0;
+        var hasDump = !string.IsNullOrWhiteSpace(dumpFilePath);
+        if (hasExplicitPid && hasDump)
+        {
+            return InvalidArg<CapturedMethodBytes>(nameof(dumpFilePath), "processId and dumpFilePath are mutually exclusive");
+        }
+
+        int livePid = 0;
+        ProcessContext? liveCtx = null;
+        if (!hasDump)
+        {
+            var resolved = await ResolveContextAsync<CapturedMethodBytes>(resolver, processId, cancellationToken).ConfigureAwait(false);
+            if (resolved.Failure is not null) return resolved.Failure;
+            livePid = resolved.ProcessId;
+            liveCtx = resolved.Context;
+        }
+
+        var request = new MethodCaptureRequest(
+            ModuleVersionId: mvid,
+            MetadataToken: tokenValue,
+            CodeAddress: codeAddressValue,
+            Tier: tier,
+            OutputDirectory: outputDirectory);
+
+        return await GuardAttachAsync("capture_method_bytes", hasDump ? (int?)null : livePid, async () =>
+        {
+            var captured = hasDump
+                ? await capturer.CaptureFromDumpAsync(dumpFilePath!, request, cancellationToken).ConfigureAwait(false)
+                : await capturer.CaptureLiveAsync(livePid, request, cancellationToken).ConfigureAwait(false);
+
+            var summary = BuildCaptureSummary(captured);
+            var hint = BuildDisassembleHint(captured);
+            var result = hint is null
+                ? DiagnosticResult.Ok(captured, summary)
+                : DiagnosticResult.Ok(captured, summary, hint);
+            return WithContext(result, liveCtx);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string BuildCaptureSummary(CapturedMethodBytes captured)
+    {
+        var typeFqn = captured.Method.TypeFullName ?? "<unknown type>";
+        var methodName = captured.Method.MethodName;
+        var origin = captured.Origin.ToString().ToLowerInvariant();
+        if (captured.Regions.Count == 0)
+        {
+            return $"{origin} capture of {typeFqn}.{methodName} on pid {captured.ProcessId}: no JIT-emitted code present (method not yet JITted, abstract/extern, or ReadyToRun-only). " +
+                   "Check warnings on the payload for details.";
+        }
+        var sizes = string.Join(", ", captured.Regions.Select(r => $"{r.Region}={r.Size:N0} B"));
+        var first = captured.Regions[0];
+        return $"{origin} capture of {typeFqn}.{methodName} on pid {captured.ProcessId} ({captured.Architecture}, {first.CompilationType ?? "?"}): " +
+               $"{sizes}. Wrote {captured.Regions.Count} file(s) under {captured.OutputDirectory}.";
+    }
+
+    private static NextActionHint? BuildDisassembleHint(CapturedMethodBytes captured)
+    {
+        if (captured.Regions.Count == 0) return null;
+        var hot = captured.Regions.FirstOrDefault(r => r.Region == "Hot") ?? captured.Regions[0];
+        return new NextActionHint(
+            "dotnet-native-mcp.disassemble",
+            $"Disassemble the captured {hot.Region} region. The file is a raw blob with no PE/ELF/Mach-O header — pass rawBlob=true so the disassembler skips header validation.",
+            new Dictionary<string, object?>
+            {
+                ["imagePath"] = hot.FilePath,
+                ["rawBlob"] = true,
+                ["rva"] = 0,
+                ["size"] = hot.Size,
+                ["architecture"] = hot.Architecture,
+                ["baseAddress"] = hot.BaseAddress,
+            });
+    }
+
+    private static bool TryParseHexOrInt(string value, out int result)
+    {
+        var s = value.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) || s.StartsWith("0X", StringComparison.Ordinal))
+        {
+            return int.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out result);
+        }
+        return int.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out result);
+    }
+
+    private static bool TryParseUnsignedHexOrInt(string value, out ulong result)
+    {
+        var s = value.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) || s.StartsWith("0X", StringComparison.Ordinal))
+        {
+            return ulong.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out result);
+        }
+        return ulong.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out result);
     }
 
     [McpServerTool(

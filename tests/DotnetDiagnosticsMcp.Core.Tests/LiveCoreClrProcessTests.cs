@@ -3,6 +3,7 @@ using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Dump;
+using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Threads;
 using FluentAssertions;
@@ -259,6 +260,54 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         snapshot.Threads.Where(t => t.Frames.Count > 0).Should().NotBeEmpty(
             "at least one thread should have a captured managed stack");
         snapshot.Locks.Should().NotBeNull();
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task JitCapture_DumpsHotspotBytesToDisk()
+    {
+        EnsureSampleRunning();
+
+        var sampler = new EventPipeCpuSampler();
+        var sample = await sampler.SampleAsync(
+            Pid,
+            TimeSpan.FromSeconds(3),
+            topN: 50,
+            cancellationToken: CancellationToken.None);
+
+        var identity = sample.Artifact.MethodIdentities.Values
+            .FirstOrDefault(id => id.ModuleVersionId is { } && id.MetadataToken is > 0);
+        identity.Should().NotBeNull("the sampler must surface at least one JITted method for the capture handoff");
+
+        var mvid = identity!.ModuleVersionId!.Value;
+        var token = identity.MetadataToken!.Value;
+
+        var outDir = Path.Combine(Path.GetTempPath(), $"diagnosticsmcp-jitcap-{Guid.NewGuid():N}");
+        try
+        {
+            var capturer = new ClrMdJitMethodCapturer();
+            var artifact = await capturer.CaptureLiveAsync(
+                Pid,
+                new MethodCaptureRequest(mvid, token, OutputDirectory: outDir),
+                CancellationToken.None);
+
+            artifact.Origin.Should().Be(CapturedMethodBytesOrigin.Live);
+            artifact.ProcessId.Should().Be(Pid);
+            artifact.Architecture.Should().NotBeNullOrEmpty();
+            artifact.Method.ModuleVersionId.Should().Be(mvid);
+            artifact.Method.MetadataToken.Should().Be(token);
+            artifact.Regions.Should().NotBeEmpty("a JITted method must expose at least its Hot region");
+
+            var hot = artifact.Regions.FirstOrDefault(r => r.Region == "Hot");
+            hot.Should().NotBeNull("JIT-emitted code always has a Hot region");
+            hot!.Size.Should().BeGreaterThan(0);
+            File.Exists(hot.FilePath).Should().BeTrue("the capturer must materialise the bytes file on disk");
+            new FileInfo(hot.FilePath).Length.Should().Be(hot.Size,
+                "the file size must match the reported region size for the native-mcp handoff");
+        }
+        finally
+        {
+            try { Directory.Delete(outDir, recursive: true); } catch { /* best-effort */ }
+        }
     }
 
     private void EnsureSampleRunning()

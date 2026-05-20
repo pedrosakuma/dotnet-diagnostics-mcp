@@ -592,3 +592,60 @@ Writes a process dump to disk via the diagnostic IPC channel.
 **Side effects:** **writes to disk** on the server. In a sidecar topology the
 file lives on the sidecar container's filesystem — mount a PVC if you expect
 to capture more than transient dumps.
+
+## `capture_method_bytes`
+
+Reads the JIT-emitted (or ReadyToRun-baked) native machine code for a single
+managed method out of a live .NET process (or `WithHeap`/`Full` dump) and
+writes the raw bytes to a file on disk. Closes the only disasm coverage gap:
+NativeAOT and R2R binaries live on disk and are already covered by
+`dotnet-native-mcp`; JIT-emitted code lives only in the target process memory.
+
+The bytes are emitted via a **file side-channel** (mirroring `collect_process_dump`)
+so binary payloads never enter the LLM context. Each captured region returns a
+`NextActionHint` for `dotnet-native-mcp.disassemble(rawBlob=true)` carrying the
+file path, size, architecture and load-base — feed that hint verbatim to
+disassemble.
+
+**Backend:** ClrMD `HotColdInfo`. **Requires:** CoreCLR target (NativeAOT
+returns an error envelope — use `dotnet-native-mcp.load_native_binary` against
+the binary on disk instead). On Linux also requires `CAP_SYS_PTRACE` for live
+attach.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `moduleVersionId` | `string` (GUID) | — | MVID of the method's declaring module (from a sampler hotspot's `MethodIdentity`) |
+| `metadataToken` | `string` | — | MethodDef token (`0x06000123` or decimal) |
+| `processId` | `int?` | auto-select | Live PID. Mutually exclusive with `dumpFilePath` |
+| `dumpFilePath` | `string?` | — | Path to a `WithHeap`/`Full` dump. Mutually exclusive with `processId` |
+| `codeAddress` | `string?` | — | Optional native IP (hex or decimal) for the fast `GetMethodByInstructionPointer` path; verified against `(mvid, token)` |
+| `tier` | `string?` | — | Informational label (`Tier0`/`Tier1`/etc.) echoed into the output file name. ClrMD does not expose tier metadata, so this is **not** a filter |
+| `outputDirectory` | `string?` | `<temp>/dotnet-diagnostics-mcp` | Where to write the `.bin` files |
+
+**Returns:** `CapturedMethodBytes`:
+
+```json
+{
+  "origin": "Live",
+  "processId": 12345,
+  "runtimeName": "coreclr",
+  "runtimeVersion": "10.0.0",
+  "architecture": "X64",
+  "method": { "moduleVersionId": "…", "metadataToken": 100663297, "methodName": "…", "typeFullName": "…" },
+  "regions": [
+    { "filePath": "/tmp/…/My.Type.Method-Hot--0x06000001.bin", "size": 412, "baseAddress": 140234567890, "architecture": "X64", "region": "Hot", "tier": null, "compilationType": "Jit" }
+  ],
+  "outputDirectory": "/tmp/…",
+  "warnings": []
+}
+```
+
+**Handoff:** every region carries a `NextActionHint` for
+`dotnet-native-mcp.disassemble` with `imagePath`, `rawBlob: true`, `rva: 0`,
+`size`, `architecture` and `baseAddress` — pass those through unchanged.
+
+**Side effects:** writes one `.bin` file per region (Hot, plus Cold when the
+JIT split the method). Suspend window on live attach is typically < 100 ms.
+**NativeAOT/R2R targets are rejected** with an explanatory error envelope.
