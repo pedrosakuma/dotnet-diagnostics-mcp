@@ -254,18 +254,20 @@ public sealed class DiagnosticTools
     [Description(
         "Samples OS-level memory metrics (RSS, PSS, anonymous/private pages, page faults) " +
         "at regular intervals over a configurable window, then computes per-second deltas and a " +
-        "growth verdict ('growing', 'stable', 'shrinking'). Works on any runtime — no EventPipe " +
-        "session required. " +
-        "On Linux reads /proc/<pid>/smaps_rollup (Rss, Pss, Anonymous) and /proc/<pid>/stat " +
-        "(minflt/majflt) for each sample. On Windows calls GetProcessMemoryInfo " +
+        "growth verdict ('growing', 'stable', 'shrinking'). Works on any OS process — CoreCLR, " +
+        "NativeAOT, or non-.NET — no EventPipe session required. " +
+        "On Linux reads /proc/<pid>/smaps_rollup (Rss, Pss, Anonymous) with an automatic " +
+        "fallback to /proc/<pid>/smaps accumulation on kernels < 4.14, and /proc/<pid>/stat " +
+        "(minflt/majflt) for page-fault counters. On Windows calls GetProcessMemoryInfo " +
         "(WorkingSetSize, PrivateUsage, PageFaultCount). " +
         "Use this as a lightweight memory-leak signal before reaching for heap dumps — it answers " +
         "'is the process growing and how fast?' without walking the heap. " +
-        "processId is optional: when exactly one .NET process is reachable the server auto-selects it.")]
+        "When processId is provided it is used directly as the OS pid (no .NET IPC check). " +
+        "When processId is omitted the server auto-selects the lone reachable .NET process.")]
     public static async Task<DiagnosticResult<MemoryTrend>> GetMemoryTrend(
         IMemoryTrendCollector collector,
         IProcessContextResolver resolver,
-        [Description("Operating system process id of the target process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Operating system process id of the target process. When provided, any OS process is accepted (no .NET IPC required). Optional — omit to auto-select the lone reachable .NET process.")] int? processId = null,
         [Description("Duration of the observation window in seconds. Must be >= 2. Defaults to 10.")] int durationSeconds = 10,
         [Description("Interval between consecutive samples in seconds. Must be >= 1. Defaults to 2.")] int sampleEverySeconds = 2,
         CancellationToken cancellationToken = default)
@@ -273,9 +275,27 @@ public sealed class DiagnosticTools
         if (durationSeconds < 2) return InvalidArg<MemoryTrend>(nameof(durationSeconds), "must be >= 2");
         if (sampleEverySeconds < 1) return InvalidArg<MemoryTrend>(nameof(sampleEverySeconds), "must be >= 1");
 
-        var resolved = await ResolveContextAsync<MemoryTrend>(resolver, processId, cancellationToken).ConfigureAwait(false);
-        if (resolved.Failure is not null) return resolved.Failure;
-        var pid = resolved.ProcessId;
+        int pid;
+        ProcessContext? context = null;
+
+        if (processId is > 0)
+        {
+            // Explicit OS pid: bypass the .NET diagnostic IPC resolver so the tool works on
+            // any process — NativeAOT, non-.NET, or any pid not visible to the IPC socket.
+            pid = processId.Value;
+        }
+        else if (processId is < 0)
+        {
+            return InvalidArg<MemoryTrend>(nameof(processId), "must be a positive process id");
+        }
+        else
+        {
+            // null or 0 → auto-resolve via the .NET diagnostic IPC (finds the lone .NET process).
+            var resolved = await ResolveContextAsync<MemoryTrend>(resolver, null, cancellationToken).ConfigureAwait(false);
+            if (resolved.Failure is not null) return resolved.Failure;
+            pid = resolved.ProcessId;
+            context = resolved.Context;
+        }
 
         var trend = await collector.CollectAsync(pid, durationSeconds, sampleEverySeconds, cancellationToken).ConfigureAwait(false);
 
@@ -306,7 +326,7 @@ public sealed class DiagnosticTools
             };
 
         var ok = DiagnosticResult.Ok(trend, summary, hints);
-        return WithContext(ok, resolved.Context);
+        return WithContext(ok, context);
     }
 
     [McpServerTool(

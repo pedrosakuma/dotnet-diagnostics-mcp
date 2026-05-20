@@ -117,10 +117,35 @@ public sealed partial class MemoryTrendCollector : IMemoryTrendCollector
     private MemoryTrendSample? TakeLinuxSample(int processId, DateTimeOffset timestamp, List<string> notes)
     {
         var pid = processId.ToString(CultureInfo.InvariantCulture);
-        var smapsPath = Path.Combine(_procRoot, pid, "smaps_rollup");
-        var statPath = Path.Combine(_procRoot, pid, "stat");
+        var procDir = Path.Combine(_procRoot, pid);
+        var smapsRollupPath = Path.Combine(procDir, "smaps_rollup");
+        var statPath = Path.Combine(procDir, "stat");
 
-        var smaps = ReadSmapsRollup(smapsPath, notes);
+        var smaps = ReadSmapsRollup(smapsRollupPath, notes, out bool rollupMissing);
+        if (smaps is null && rollupMissing)
+        {
+            if (Directory.Exists(procDir))
+            {
+                // smaps_rollup is absent but the process is still alive — kernel < 4.14.
+                // Fall back to summing the per-mapping fields in /proc/<pid>/smaps.
+                // The result is identical: both files expose the same Rss/Pss/Anonymous fields.
+                if (notes.All(n => !n.Contains("smaps_rollup not present", StringComparison.Ordinal)))
+                {
+                    notes.Add($"smaps_rollup not present for pid {processId} (kernel < 4.14); " +
+                              $"falling back to /proc/{processId}/smaps accumulation — results are equivalent.");
+                }
+                smaps = ReadSmapsAccumulated(Path.Combine(procDir, "smaps"), notes);
+            }
+            else
+            {
+                if (notes.All(n => !n.Contains("exited or /proc", StringComparison.Ordinal)))
+                {
+                    notes.Add($"Could not read memory for pid {processId}: " +
+                              "process may have exited or /proc is restricted.");
+                }
+            }
+        }
+
         if (smaps is null) return null;
 
         var (minorFaults, majorFaults) = ReadStatFaults(statPath, notes);
@@ -137,30 +162,37 @@ public sealed partial class MemoryTrendCollector : IMemoryTrendCollector
 
     private readonly record struct SmapsSnapshot(long RssKb, long PssKb, long AnonKb);
 
-    private static SmapsSnapshot? ReadSmapsRollup(string path, List<string> notes)
+    /// <summary>
+    /// Reads <c>/proc/&lt;pid&gt;/smaps_rollup</c> (kernel ≥ 4.14). Returns null on
+    /// <see cref="FileNotFoundException"/> / <see cref="DirectoryNotFoundException"/>
+    /// (sets <paramref name="fileNotFound"/> = true) so the caller can fall back to
+    /// <see cref="ReadSmapsAccumulated"/> without losing the error context.
+    /// </summary>
+    private static SmapsSnapshot? ReadSmapsRollup(string path, List<string> notes, out bool fileNotFound)
     {
+        fileNotFound = false;
         long rss = 0, pss = 0, anon = 0;
         bool hasRss = false;
         try
         {
             foreach (var line in File.ReadAllLines(path))
             {
-                // Format: "FieldName:    1234 kB"
-                var colon = line.IndexOf(':', StringComparison.Ordinal);
-                if (colon <= 0) continue;
-                var key = line.AsSpan(0, colon).Trim();
-                var rest = line.AsSpan(colon + 1).Trim();
-                // Remove " kB" suffix
-                var spaceIdx = rest.IndexOf(' ');
-                var valueSpan = spaceIdx > 0 ? rest[..spaceIdx] : rest;
-                if (!long.TryParse(valueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) continue;
-
-                if (key.SequenceEqual("Rss")) { rss = v; hasRss = true; }
-                else if (key.SequenceEqual("Pss")) pss = v;
-                else if (key.SequenceEqual("Anonymous")) anon = v;
+                ParseSmapsLine(line.AsSpan(), ref rss, ref pss, ref anon, ref hasRss, accumulate: false);
             }
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException or IOException)
+        catch (FileNotFoundException)
+        {
+            fileNotFound = true;
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // proc dir missing → process exited; treat the same as file-not-found so the
+            // caller can check Directory.Exists and produce the right note.
+            fileNotFound = true;
+            return null;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
             notes.Add($"Could not read {path}: {ex.GetType().Name}. Process may have exited or /proc is restricted.");
             return null;
@@ -168,6 +200,55 @@ public sealed partial class MemoryTrendCollector : IMemoryTrendCollector
 
         if (!hasRss) return null;
         return new SmapsSnapshot(rss, pss, anon);
+    }
+
+    /// <summary>
+    /// Fallback for kernels without <c>smaps_rollup</c> (kernel &lt; 4.14).
+    /// Accumulates <c>Rss</c>, <c>Pss</c>, and <c>Anonymous</c> across all per-mapping
+    /// entries in <c>/proc/&lt;pid&gt;/smaps</c>. Produces the same totals as
+    /// <c>smaps_rollup</c> — just slower, because it reads a per-region file.
+    /// </summary>
+    private static SmapsSnapshot? ReadSmapsAccumulated(string path, List<string> notes)
+    {
+        long rss = 0, pss = 0, anon = 0;
+        bool hasRss = false;
+        try
+        {
+            foreach (var line in File.ReadAllLines(path))
+            {
+                ParseSmapsLine(line.AsSpan(), ref rss, ref pss, ref anon, ref hasRss, accumulate: true);
+            }
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException or IOException)
+        {
+            notes.Add($"Could not read {path}: {ex.GetType().Name}. Cannot collect memory samples for this interval.");
+            return null;
+        }
+
+        if (!hasRss) return null;
+        return new SmapsSnapshot(rss, pss, anon);
+    }
+
+    // Parses a single line from smaps_rollup or smaps and updates the running totals in-place.
+    // Lines that are not Rss, Pss, or Anonymous fields (including mapping header lines in smaps)
+    // are silently skipped. accumulate=true sums across many mappings (smaps); false assigns (smaps_rollup).
+    private static void ParseSmapsLine(ReadOnlySpan<char> line,
+        ref long rss, ref long pss, ref long anon, ref bool hasRss, bool accumulate)
+    {
+        // Format: "FieldName:    1234 kB" — mapping header lines in smaps contain no colon
+        // at position > 0 (they start with a hex address range), so the colon check filters them.
+        var colon = line.IndexOf(':');
+        if (colon <= 0) return;
+        var key = line[..colon].Trim();
+        var rest = line[(colon + 1)..].Trim();
+        // Value is the first token (strip the trailing " kB" unit).
+        var spaceIdx = rest.IndexOf(' ');
+        var valueSpan = spaceIdx > 0 ? rest[..spaceIdx] : rest;
+        if (!long.TryParse(valueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) return;
+
+        if (key.SequenceEqual("Rss")) { if (accumulate) rss += v; else rss = v; hasRss = true; }
+        else if (key.SequenceEqual("Pss")) { if (accumulate) pss += v; else pss = v; }
+        else if (key.SequenceEqual("Anonymous")) { if (accumulate) anon += v; else anon = v; }
     }
 
     private static (long MinorFaults, long MajorFaults) ReadStatFaults(string path, List<string> notes)
