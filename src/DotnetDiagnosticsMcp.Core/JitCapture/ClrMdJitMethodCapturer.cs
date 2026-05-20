@@ -45,11 +45,17 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
 
         return Task.Run(() =>
         {
-            // suspend=true mirrors ClrMdDumpInspector / ClrMdThreadSnapshotInspector — the
-            // window is bounded by the time it takes to walk modules + read ≤ a few KiB of
-            // native code, typically <100 ms for a single method.
-            using var target = DataTarget.AttachToProcess(processId, suspend: true);
-            return Capture(target, request, CapturedMethodBytesOrigin.Live, cancellationToken);
+            CapturedMethodBytes artifact;
+            IReadOnlyList<PendingWrite> writes;
+            // suspend=true mirrors ClrMdDumpInspector / ClrMdThreadSnapshotInspector. We keep
+            // the window minimal by deferring all disk I/O to after Dispose — only the
+            // ClrMD walk + the chunked memory reads happen while the target is suspended.
+            using (var target = DataTarget.AttachToProcess(processId, suspend: true))
+            {
+                (artifact, writes) = Capture(target, request, CapturedMethodBytesOrigin.Live, cancellationToken);
+            }
+            FinalizeWrites(artifact.OutputDirectory, writes);
+            return artifact;
         }, cancellationToken);
     }
 
@@ -64,12 +70,30 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
 
         return Task.Run(() =>
         {
-            using var target = DataTarget.LoadDump(dumpFilePath);
-            return Capture(target, request, CapturedMethodBytesOrigin.Dump, cancellationToken);
+            CapturedMethodBytes artifact;
+            IReadOnlyList<PendingWrite> writes;
+            using (var target = DataTarget.LoadDump(dumpFilePath))
+            {
+                (artifact, writes) = Capture(target, request, CapturedMethodBytesOrigin.Dump, cancellationToken);
+            }
+            FinalizeWrites(artifact.OutputDirectory, writes);
+            return artifact;
         }, cancellationToken);
     }
 
-    private CapturedMethodBytes Capture(
+    private static void FinalizeWrites(string outputDir, IReadOnlyList<PendingWrite> writes)
+    {
+        if (writes.Count == 0) return;
+        Directory.CreateDirectory(outputDir);
+        foreach (var w in writes)
+        {
+            File.WriteAllBytes(w.Path, w.Bytes);
+        }
+    }
+
+    private readonly record struct PendingWrite(string Path, byte[] Bytes);
+
+    private (CapturedMethodBytes Artifact, IReadOnlyList<PendingWrite> Writes) Capture(
         DataTarget target,
         MethodCaptureRequest request,
         CapturedMethodBytesOrigin origin,
@@ -87,6 +111,7 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
         var runtimeName = clrInfo.Flavor.ToString();
         var runtimeVersion = clrInfo.Version.ToString();
         var warnings = new List<string>();
+        var outputDir = ResolveOutputDirectory(request, pid);
 
         var method = ResolveMethod(runtime, request, warnings, ct);
         if (method is null)
@@ -109,24 +134,22 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
                 "Method has no JIT-emitted code (HotStart=0 or HotSize=0). " +
                 "Possible causes: abstract/extern method, not yet JITted on the target's current execution path, " +
                 "or ReadyToRun-only with no live thunk. Trigger an execution path that calls the method, then retry.");
-            return new CapturedMethodBytes(origin, pid, runtimeName, runtimeVersion, arch, identity,
-                Array.Empty<MethodBytesRef>(), ResolveOutputDirectory(request, pid), warnings);
+            return (new CapturedMethodBytes(origin, pid, runtimeName, runtimeVersion, arch, identity,
+                Array.Empty<MethodBytesRef>(), outputDir, warnings), Array.Empty<PendingWrite>());
         }
-
-        var outputDir = ResolveOutputDirectory(request, pid);
-        Directory.CreateDirectory(outputDir);
 
         var regions = new List<MethodBytesRef>(2);
-        regions.Add(ReadRegion(reader, hotStart, hotSize, "Hot", request, identity, method, arch, outputDir, warnings, ct));
+        var writes = new List<PendingWrite>(2);
+        AppendRegion(reader, hotStart, hotSize, "Hot", request, identity, method, arch, outputDir, regions, writes, warnings, ct);
         if (coldStart != 0 && coldSize > 0)
         {
-            regions.Add(ReadRegion(reader, coldStart, coldSize, "Cold", request, identity, method, arch, outputDir, warnings, ct));
+            AppendRegion(reader, coldStart, coldSize, "Cold", request, identity, method, arch, outputDir, regions, writes, warnings, ct);
         }
 
-        return new CapturedMethodBytes(
+        return (new CapturedMethodBytes(
             origin, pid, runtimeName, runtimeVersion, arch,
             identity, regions, outputDir,
-            warnings.Count > 0 ? warnings : null);
+            warnings.Count > 0 ? warnings : null), writes);
     }
 
     private ClrMethod? ResolveMethod(
@@ -157,17 +180,29 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
 
         if (viaIp is not null && req.CodeAddress is ulong ipOk)
         {
-            // Still verify the IP-resolved method's module matches the requested MVID, so
-            // we don't return code from a same-token namesake in a different assembly.
+            // Verify the IP-resolved method's module matches the requested MVID, so we
+            // don't return code from a same-token namesake in a different assembly.
+            // Note: unverifiable MVID (null — dynamic module, single-file bundle, missing
+            // or unreadable on-disk path) is NOT treated as a positive match. We fall
+            // back to the full (MVID, token) walk to guarantee module identity.
             var ipModule = viaIp.Type?.Module;
             var ipMvid = ipModule is null ? null : TryReadMvid(ipModule.Name);
-            if (ipMvid is null || ipMvid.Value == req.ModuleVersionId)
+            if (ipMvid is { } known && known == req.ModuleVersionId)
             {
                 return viaIp;
             }
-            warnings.Add(
-                $"codeAddress 0x{ipOk:X} resolved to method in module {ipModule?.Name ?? "<unknown>"} (mvid={ipMvid:D}) " +
-                $"but request asked for mvid={req.ModuleVersionId:D}; ignoring the IP override.");
+            if (ipMvid is null)
+            {
+                warnings.Add(
+                    $"codeAddress 0x{ipOk:X} resolved to a method in module {ipModule?.Name ?? "<unknown>"} whose MVID could not be verified " +
+                    "(dynamic module, single-file bundle, or missing/unreadable on-disk image); falling back to MVID+token lookup to guarantee module identity.");
+            }
+            else
+            {
+                warnings.Add(
+                    $"codeAddress 0x{ipOk:X} resolved to method in module {ipModule?.Name ?? "<unknown>"} (mvid={ipMvid:D}) " +
+                    $"but request asked for mvid={req.ModuleVersionId:D}; ignoring the IP override.");
+            }
         }
 
         ClrMethod? match = null;
@@ -220,7 +255,7 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
         return match;
     }
 
-    private static MethodBytesRef ReadRegion(
+    private static void AppendRegion(
         IDataReader reader,
         ulong start,
         int size,
@@ -230,6 +265,8 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
         ClrMethod method,
         string arch,
         string outputDir,
+        List<MethodBytesRef> regions,
+        List<PendingWrite> writes,
         List<string> warnings,
         CancellationToken ct)
     {
@@ -255,21 +292,28 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
 
         var fileName = BuildFileName(identity, method, region, req.Tier);
         var path = Path.Combine(outputDir, fileName);
-        File.WriteAllBytes(path, totalRead == size ? buffer : buffer.AsSpan(0, totalRead).ToArray());
+        var payload = totalRead == size ? buffer : buffer.AsSpan(0, totalRead).ToArray();
 
-        return new MethodBytesRef(
+        regions.Add(new MethodBytesRef(
             FilePath: path,
             Size: totalRead,
             BaseAddress: unchecked((long)start),
             Architecture: arch,
             Region: region,
             Tier: req.Tier,
-            CompilationType: method.CompilationType.ToString());
+            CompilationType: method.CompilationType.ToString()));
+
+        writes.Add(new PendingWrite(path, payload));
     }
 
     private static string ResolveOutputDirectory(MethodCaptureRequest req, int pid)
     {
-        if (!string.IsNullOrWhiteSpace(req.OutputDirectory)) return req.OutputDirectory!;
+        // Always return an absolute path so the file side-channel handoff to
+        // dotnet-native-mcp.disassemble works regardless of working directory.
+        if (!string.IsNullOrWhiteSpace(req.OutputDirectory))
+        {
+            return Path.GetFullPath(req.OutputDirectory!);
+        }
         return Path.Combine(
             Path.GetTempPath(),
             "dotnet-diagnostics-mcp",
