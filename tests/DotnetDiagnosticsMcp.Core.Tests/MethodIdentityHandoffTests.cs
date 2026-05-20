@@ -214,6 +214,24 @@ public class MethodIdentityHandoffTests
         p.GenericArity.Should().Be(0);
     }
 
+    [Theory]
+    // Regression for #60: dogfooding against assembly-mcp surfaced four real CPU-sample
+    // hotspot frames where commas in the IL parameter signature were suspected of bleeding
+    // into the typeFullName / methodName split. Lock the contract here so the parser cannot
+    // silently regress on multi-arg, dotted, nested, or pointer-typed parameter lists.
+    [InlineData("System.Threading.Monitor.Wait(class System.Object,int32)", "System.Threading.Monitor", "Wait")]
+    [InlineData("Interop+Sys.Read(class System.Runtime.InteropServices.SafeHandle,unsigned int8*,int32)", "Interop+Sys", "Read")]
+    [InlineData("System.Threading.Thread+StartHelper.Callback(class System.Object)", "System.Threading.Thread+StartHelper", "Callback")]
+    [InlineData("System.Threading.Tasks.Task.InternalWait(int32,value class System.Threading.CancellationToken)", "System.Threading.Tasks.Task", "InternalWait")]
+    public void Parser_60_CommaInParameterSignature_DoesNotBleedIntoIdentity(string fullName, string expectedType, string expectedMethod)
+    {
+        var p = EventPipeCpuSampler.ParseFullMethodName(fullName);
+        p.TypeFullName.Should().Be(expectedType);
+        p.MethodName.Should().Be(expectedMethod);
+        p.GenericArity.Should().Be(0);
+        p.GenericTypeArguments.Should().BeNull();
+    }
+
     [Fact]
     public void Parser_TopLevelMain_WithoutParams_HasZeroArity()
     {
