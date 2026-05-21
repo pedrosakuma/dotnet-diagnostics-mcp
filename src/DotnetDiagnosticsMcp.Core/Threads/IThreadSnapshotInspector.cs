@@ -115,9 +115,7 @@ public sealed record ManagedStackFrame(
     MethodIdentity? Identity = null);
 
 /// <summary>
-/// One held monitor / sync block (the closest thing ClrMD 3.x exposes to "locks"). Waiter
-/// thread IDs are not directly available — only a count — so the drilldown view surfaces what's
-/// known and flags ambiguity rather than guessing.
+/// One held monitor / sync block (the closest thing ClrMD 3.x exposes to "locks").
 /// </summary>
 public sealed record MonitorLockState(
     ulong ObjectAddress,
@@ -128,4 +126,14 @@ public sealed record MonitorLockState(
     int RecursionCount,
     int WaitingThreadCount,
     bool IsContended,
-    string Source);
+    string Source)
+{
+    /// <summary>
+    /// Managed thread ids inferred or observed as waiting on this lock. For ClrMD-backed monitor
+    /// snapshots this is derived from stack-root inspection, so the list may be incomplete.
+    /// </summary>
+    public IReadOnlyList<int> WaitingManagedThreadIds { get; init; } = Array.Empty<int>();
+
+    /// <summary>Lock kind when recoverable. SyncBlock-backed locks are monitors.</summary>
+    public string LockKind { get; init; } = "Monitor";
+}
