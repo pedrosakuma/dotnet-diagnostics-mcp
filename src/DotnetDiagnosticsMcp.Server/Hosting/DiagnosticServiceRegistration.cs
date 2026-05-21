@@ -53,6 +53,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IProvenanceCollector, DotnetDiagnosticsMcp.Core.Memory.EnvironmentProvenanceCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IInvestigationSummaryExporter, DotnetDiagnosticsMcp.Core.Memory.InvestigationSummaryExporter>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.ISummaryComparer, DotnetDiagnosticsMcp.Core.Memory.SummaryComparer>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IMemoryTrendCollector, DotnetDiagnosticsMcp.Core.Memory.MemoryTrendCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHandleStore>(_ =>
             new DotnetDiagnosticsMcp.Core.Drilldown.MemoryDiagnosticHandleStore(maxEntries: 32));
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner, DotnetDiagnosticsMcp.Core.Jobs.CollectionJobRunner>();

@@ -187,6 +187,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`get_process_info`](#get_process_info) | cheap | no | none |
 | [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) | ~2 s | no | opens a short EventPipe probe |
 | [`get_container_signals`](#get_container_signals) | cheap | no | reads `/sys/fs/cgroup` + `/proc` files |
+| [`get_memory_trend`](#get_memory_trend) | window-bound | no | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
 | `collect_off_cpu_sample` (Linux/Windows) | window-bound | no | system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
 | `query_off_cpu_snapshot` | cheap | no | drilldown on handle from `collect_off_cpu_sample` |
 | [`snapshot_counters`](#snapshot_counters) | window-bound | no | opens an EventPipe session |
@@ -308,6 +309,79 @@ events is used to classify the runtime as **CoreCLR** vs **NativeAOT**.
 **Notes:** always call this **first** in a session. The result tells the LLM
 (or human) which other tools can be used on the target. NativeAOT will return
 `runtime = "NativeAot"` and `canSampleCpu = false`.
+
+---
+
+## `get_memory_trend`
+
+Samples OS-level memory metrics at regular intervals over a configurable window
+and computes per-second deltas and a growth verdict. Works on **any** runtime
+(CoreCLR, NativeAOT, even non-.NET processes) — no EventPipe session required.
+
+Use this as a **lightweight memory-leak signal** before reaching for heap dumps.
+It answers "is the process growing and how fast?" without walking the heap.
+
+**Sources:**
+- **Linux**: `/proc/<pid>/smaps_rollup` (Rss, Pss, Anonymous) and
+  `/proc/<pid>/stat` fields 10 & 12 (minflt / majflt). Pure file reads —
+  no privileges, no EventPipe.
+- **Windows**: `GetProcessMemoryInfo(PROCESS_MEMORY_COUNTERS_EX)`:
+  `WorkingSetSize` (RSS), `PrivateUsage` (private committed bytes),
+  `PageFaultCount`. Requires `PROCESS_QUERY_INFORMATION` access to the target.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target process id |
+| `durationSeconds` | `int` | `10` | Observation window length in seconds. Must be ≥ 2. |
+| `sampleEverySeconds` | `int` | `2` | Interval between consecutive samples in seconds. Must be ≥ 1. |
+
+**Returns:** `MemoryTrend`:
+
+```json
+{
+  "processId": 12345,
+  "windowStart": "2026-05-18T20:00:00Z",
+  "windowEnd": "2026-05-18T20:00:10Z",
+  "samples": [
+    {
+      "timestamp": "2026-05-18T20:00:00Z",
+      "rssBytes": 104857600,
+      "pssBytes": 52428800,
+      "privateAnonBytes": 83886080,
+      "heapRegionBytes": null,
+      "majorFaults": 12,
+      "minorFaults": 50000
+    }
+  ],
+  "deltas": {
+    "rssBytesPerSec": 1200000.0,
+    "pssBytesPerSec": 600000.0,
+    "majorFaultsPerSec": 0.2
+  },
+  "verdict": "growing",
+  "notes": []
+}
+```
+
+**Verdict heuristic:** RSS growth > 1 MiB/s → `growing`; RSS decrease > 1
+MiB/s → `shrinking`; otherwise → `stable`. All three values are
+stable-but-informative labels — they do not distinguish between heap and
+stack allocations.
+
+**Field notes:**
+- `pssBytes` is Linux-only (Proportional Set Size — shared pages charged
+  proportionally). Always `null` on Windows.
+- `heapRegionBytes` is `null` on both platforms (requires a full
+  `/proc/<pid>/smaps` walk; omitted for cost reasons).
+- On Windows, `majorFaults` is always `0` — Windows does not separate
+  major/minor faults; the combined count appears in `minorFaults`.
+
+**Next-action hints:**
+- `verdict = "growing"` → suggests `inspect_live_heap` (identify dominant
+  retainers) and `get_container_signals` (cross-check against cgroup limits).
+- `verdict = "stable"` or `"shrinking"` → suggests `snapshot_counters`.
 
 ---
 
