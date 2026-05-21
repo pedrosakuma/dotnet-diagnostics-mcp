@@ -67,6 +67,21 @@ public sealed class ToolGuardTests
     }
 
     [Fact]
+    public async Task CollectThreadSnapshot_MissingEuStack_TranslatesToToolNotFound()
+    {
+        var inspector = new ThrowingThreadSnapshotInspector(
+            new ExternalToolNotFoundException("eu-stack", "eu-stack is not available on this host."));
+        var handles = new MemoryDiagnosticHandleStore();
+
+        var result = await DiagnosticTools.CollectThreadSnapshot(
+            inspector, handles, EchoResolver(), processId: 42, cancellationToken: default);
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be("ToolNotFound");
+        result.Error.Message.Should().Contain("eu-stack");
+    }
+
+    [Fact]
     public async Task InspectLiveHeap_OperationNotPermitted_TranslatesToPermissionDenied()
     {
         // Canonical EPERM message that ClrMD can produce when the kernel rejects ptrace

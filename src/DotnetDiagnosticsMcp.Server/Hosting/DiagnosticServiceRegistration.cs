@@ -35,6 +35,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<IProcessContextResolver, ProcessContextResolver>();
         services.AddSingleton<ICounterCollector, EventPipeCounterCollector>();
         services.AddSingleton<EventPipeCpuSampler>();
+        services.AddSingleton<EventPipeAllocationSampler>();
         services.AddSingleton<PerfNativeAotCpuSampler>();
         services.AddSingleton<EtwNativeAotCpuSampler>();
         services.AddSingleton<ICpuSampler, RoutingCpuSampler>();
@@ -46,12 +47,22 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<IEventSourceCollector, EventPipeEventSourceCollector>();
         services.AddSingleton<IProcessDumper, DiagnosticsClientDumper>();
         services.AddSingleton<IDumpInspector, ClrMdDumpInspector>();
-        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotInspector, DotnetDiagnosticsMcp.Core.Threads.ClrMdThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.ClrMdThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.LinuxNativeThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.PerfReplayThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.EtwNativeThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.ClrMdThreadSnapshotBackend>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.LinuxNativeThreadSnapshotBackend>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.EtwNativeThreadSnapshotBackend>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.PerfReplayThreadSnapshotBackend>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotInspector, DotnetDiagnosticsMcp.Core.Threads.RoutingThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.JitCapture.IJitMethodCapturer, DotnetDiagnosticsMcp.Core.JitCapture.ClrMdJitMethodCapturer>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Investigation.IInvestigationPlanner>(_ =>
             new DotnetDiagnosticsMcp.Core.Investigation.InvestigationPlanner());
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IProvenanceCollector, DotnetDiagnosticsMcp.Core.Memory.EnvironmentProvenanceCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IInvestigationSummaryExporter, DotnetDiagnosticsMcp.Core.Memory.InvestigationSummaryExporter>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.ISummaryComparer, DotnetDiagnosticsMcp.Core.Memory.SummaryComparer>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IMemoryTrendCollector, DotnetDiagnosticsMcp.Core.Memory.MemoryTrendCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHandleStore>(_ =>
             new DotnetDiagnosticsMcp.Core.Drilldown.MemoryDiagnosticHandleStore(maxEntries: 32));
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner, DotnetDiagnosticsMcp.Core.Jobs.CollectionJobRunner>();

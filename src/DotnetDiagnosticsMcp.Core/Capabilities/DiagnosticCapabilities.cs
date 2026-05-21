@@ -70,4 +70,24 @@ public sealed record DiagnosticCapabilities(
     /// when a ClrMD attach actually fails. Null only on legacy code paths that
     /// haven't been updated to populate the probe.</summary>
     public string? AttachClrMdReason { get; init; }
+
+    /// <summary>
+    /// True when <c>collect_thread_snapshot</c> is expected to succeed for this target/runtime on
+    /// the current sidecar host. This may be provided by different backends depending on runtime
+    /// and OS (for example ClrMD vs linux-native-stack).
+    /// </summary>
+    public bool CanCollectThreadSnapshot { get; init; }
+
+    /// <summary>
+    /// Identifier of the backend expected to serve <c>collect_thread_snapshot</c> when
+    /// <see cref="CanCollectThreadSnapshot"/> is true (for example
+    /// <c>clrmd-thread-walk</c> or <c>linux-native-stack</c>).
+    /// </summary>
+    public string? ThreadSnapshotSource { get; init; }
+
+    /// <summary>
+    /// Human-readable prerequisites for thread snapshot collection on this host (tooling,
+    /// privileges, OS gates). Useful when <see cref="CanCollectThreadSnapshot"/> is false.
+    /// </summary>
+    public string? ThreadSnapshotPreconditions { get; init; }
 }

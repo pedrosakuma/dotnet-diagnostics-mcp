@@ -60,12 +60,24 @@ public sealed record ThreadSnapshotArtifact(
     IReadOnlyList<ManagedThread> Threads,
     IReadOnlyList<MonitorLockState> Locks)
 {
+    /// <summary>Collector backend that produced this snapshot (for example <c>clrmd-thread-walk</c> or <c>linux-native-stack</c>).</summary>
+    public string? Source { get; init; }
     /// <summary>Path to the originating dump file when <see cref="Origin"/> is <see cref="ThreadSnapshotOrigin.Dump"/>; <c>null</c> for live captures.</summary>
     public string? DumpFilePath { get; init; }
     /// <summary>On-disk size of the originating dump file; <c>null</c> for live captures.</summary>
     public long? DumpFileSizeBytes { get; init; }
     /// <summary>Diagnostic warnings emitted during the walk (degraded data, ClrMD limitations, …).</summary>
     public IReadOnlyList<string>? Warnings { get; init; }
+    /// <summary>
+    /// Precision marker for the snapshot shape. Defaults to <c>exact</c>; fallback collectors can
+    /// stamp a degraded mode (for example <c>perf-replay-approx</c>).
+    /// </summary>
+    public string SnapshotKind { get; init; } = "exact";
+    /// <summary>
+    /// Sampling/replay window in seconds for approximate snapshots. <c>null</c> for point-in-time
+    /// snapshots captured by direct runtime/ptrace walks.
+    /// </summary>
+    public int? WindowSeconds { get; init; }
 }
 
 /// <summary>One managed thread observed in the runtime.</summary>

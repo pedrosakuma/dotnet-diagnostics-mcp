@@ -3,6 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Core diagnostics library for dotnet-diagnostics-mcp. Wraps Microsoft.Diagnostics.NETCore.Client and TraceEvent into a transport-agnostic API consumed by the MCP server.</Description>
   </PropertyGroup>
 

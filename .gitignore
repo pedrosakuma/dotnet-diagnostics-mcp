@@ -33,3 +33,4 @@ Thumbs.db
 
 # Bicep build artifacts (compiled ARM templates)
 deploy/azure/**/main.json
+nupkgs/

@@ -33,6 +33,9 @@ public sealed class CapabilityOffCpuDiscoverabilityTests
 
         caps.CanSampleOffCpu.Should().BeFalse(
             "the flag is an init-only addition; existing positional callers must still compile and default to a conservative false.");
+        caps.CanCollectThreadSnapshot.Should().BeFalse();
+        caps.ThreadSnapshotSource.Should().BeNull();
+        caps.ThreadSnapshotPreconditions.Should().BeNull();
     }
 
     [Fact]
@@ -50,9 +53,17 @@ public sealed class CapabilityOffCpuDiscoverabilityTests
             CanCollectCustomEventSource: true,
             CanCollectProcessDump: true,
             Notes: "") with
-        { CanSampleOffCpu = true };
+        {
+            CanSampleOffCpu = true,
+            CanCollectThreadSnapshot = true,
+            ThreadSnapshotSource = "linux-native-stack",
+            ThreadSnapshotPreconditions = "requires eu-stack",
+        };
 
         caps.CanSampleOffCpu.Should().BeTrue();
+        caps.CanCollectThreadSnapshot.Should().BeTrue();
+        caps.ThreadSnapshotSource.Should().Be("linux-native-stack");
+        caps.ThreadSnapshotPreconditions.Should().Be("requires eu-stack");
     }
 
     [Fact]

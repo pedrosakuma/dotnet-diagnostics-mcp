@@ -61,6 +61,7 @@ tests/
 
 Full schemas and return shapes: [`docs/tool-reference.md`](./docs/tool-reference.md).
 Common investigation recipes: [`docs/investigation-playbooks.md`](./docs/investigation-playbooks.md).
+NativeAOT coverage matrix (tool × runtime × OS): [`docs/aot-coverage.md`](./docs/aot-coverage.md).
 Client setup (C# SDK, GUI clients, curl): [`docs/client-setup.md`](./docs/client-setup.md).
 Kubernetes sidecar: [`deploy/k8s/README.md`](./deploy/k8s/README.md).
 Azure (App Service + Container Apps) recipes: [`deploy/azure/README.md`](./deploy/azure/README.md).
@@ -89,15 +90,16 @@ Three distributions of the MCP server, all wire-compatible. Pick whichever fits 
 dotnet tool install -g dotnet-diagnostics-mcp
 dotnet-diagnostics-mcp --urls http://127.0.0.1:8787
 
-# Container (no SDK needed; predictable filesystem)
+# Container (no SDK needed; predictable filesystem). The default image bundles `perf` so
+# off-CPU sampling and NativeAOT CPU sampling work out of the box (still need
+# CAP_PERFMON, or perf_event_paranoid <= 1 on the host, for `perf` to actually collect).
 docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
   -e MCP_BEARER_TOKEN=$(openssl rand -hex 32) \
   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
 
-# For off-CPU sampling (collect_off_cpu_sample) or NativeAOT CPU sampling, use the
-# `-perf` variant which ships linux-perf preinstalled:
-#   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest-perf
-# (Requires CAP_PERFMON or perf_event_paranoid <= -1 on the host.)
+# Want a smaller image without `perf` (~80 MB lighter, disables off-CPU sampling
+# and the perf-replay thread-snapshot fallback)? Use the `-lean` tag:
+#   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest-lean
 
 # Or grab a self-contained single-file binary for your OS/arch from the Releases page.
 ```

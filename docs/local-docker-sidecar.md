@@ -16,6 +16,20 @@ docker build -t dotnet-diagnostics-mcp:dev -f deploy/Dockerfile .
 docker build -t coreclr-sample:dev   -f samples/CoreClrSample/Dockerfile .
 ```
 
+> 🔧 **Need a smaller image without `perf`?** Add `--build-arg INSTALL_PERF=false`
+> to the sidecar build. The default image ships `perf` so `collect_off_cpu_sample`
+> and the Linux NativeAOT perf-replay thread-snapshot fallback work out of the
+> box (perf still needs `CAP_PERFMON` at runtime — add `--cap-add PERFMON` to the
+> sidecar `docker run`, or lower `kernel.perf_event_paranoid` on the host).
+> Opting out of the install skips ~80 MB of `linux-tools-*` packages; the capability
+> detector will then report `canSampleOffCpu: false`. See issue #104.
+>
+> ```bash
+> docker build --build-arg INSTALL_PERF=false \
+>   -t dotnet-diagnostics-mcp:dev-lean -f deploy/Dockerfile .
+> ```
+>
+
 ## Run the topology
 
 ```bash

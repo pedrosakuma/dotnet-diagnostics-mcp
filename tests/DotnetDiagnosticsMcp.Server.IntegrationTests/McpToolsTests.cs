@@ -10,6 +10,7 @@ using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
+using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
@@ -40,6 +41,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "get_diagnostic_capabilities",
             "snapshot_counters",
             "collect_cpu_sample",
+            "collect_allocation_sample",
             "collect_exceptions",
             "collect_gc_events",
             "collect_event_source",
@@ -57,8 +59,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "cancel_collection",
             "query_collection",
             "get_container_signals",
+            "get_memory_trend",
             "collect_off_cpu_sample",
-            "query_off_cpu_snapshot");
+            "query_off_cpu_snapshot",
+            "capture_method_bytes");
 
         // Tools that historically required `processId` are now bootstrap-implicit (issue #42):
         // when omitted the server auto-selects the lone .NET process visible to it. The only
@@ -72,6 +76,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["get_diagnostic_capabilities"] = Array.Empty<string>(),
             ["snapshot_counters"] = Array.Empty<string>(),
             ["collect_cpu_sample"] = Array.Empty<string>(),
+            ["collect_allocation_sample"] = Array.Empty<string>(),
             ["collect_exceptions"] = Array.Empty<string>(),
             ["collect_gc_events"] = Array.Empty<string>(),
             ["collect_event_source"] = new[] { "providerName" },
@@ -89,8 +94,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["cancel_collection"] = new[] { "handle" },
             ["query_collection"] = new[] { "handle" },
             ["get_container_signals"] = Array.Empty<string>(),
+            ["get_memory_trend"] = Array.Empty<string>(),
             ["collect_off_cpu_sample"] = Array.Empty<string>(),
             ["query_off_cpu_snapshot"] = new[] { "handle" },
+            ["capture_method_bytes"] = new[] { "moduleVersionId", "metadataToken" },
         };
 
         // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
@@ -106,7 +113,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "processId",
             "durationSeconds", "topN", "maxRecent", "maxEvents", "eventLevel",
             "dumpType", "outputDirectory", "rootMethodFilter", "maxDepth", "maxNodes",
-            "intervalSeconds", "symptom", "hypothesis", "baseline", "maxToolCalls",
+            "intervalSeconds", "sampleEverySeconds", "symptom", "hypothesis", "baseline", "maxToolCalls",
             "dumpRequiresApproval", "format", "topHotspots", "buildAssemblyName",
             "previousInvestigationId", "fixCommitSha", "fixPullRequestUrl", "fixDescription", "notes",
             "resolveSourceLines", "symbolPath", "maxResolvedSources",
@@ -986,6 +993,54 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         envelope!.Error.Should().NotBeNull("invalid arguments must surface a structured DiagnosticError");
         envelope.Error!.Kind.Should().Be("InvalidArgument");
         envelope.Hints.Should().NotBeEmpty("error responses must include at least one recovery hint");
+    }
+
+    [Fact]
+    public async Task GetMemoryTrend_RejectsInvalidDuration()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "get_memory_trend",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 1, // < 2, must be rejected
+            },
+            cancellationToken: CancellationToken.None);
+
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error.Should().NotBeNull("durationSeconds < 2 must surface a structured DiagnosticError");
+        envelope.Error!.Kind.Should().Be("InvalidArgument");
+    }
+
+    [Fact]
+    public async Task GetMemoryTrend_ReturnsTrendWithSamplesAndVerdict()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "get_memory_trend",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 4,
+                ["sampleEverySeconds"] = 1,
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var trend = DeserializeStructured<DotnetDiagnosticsMcp.Core.Memory.MemoryTrend>(result);
+        trend.Should().NotBeNull();
+        trend!.ProcessId.Should().Be(Environment.ProcessId);
+        trend.Samples.Should().HaveCountGreaterThanOrEqualTo(2, "a 4s window with 1s interval must yield at least 2 samples");
+        trend.Verdict.Should().BeOneOf("growing", "stable", "shrinking");
+        trend.Deltas.Should().NotBeNull();
+        trend.Samples.Should().AllSatisfy(s =>
+        {
+            s.RssBytes.Should().BeGreaterThan(0, "RSS must be positive for a running process");
+        });
     }
 
     private async Task<McpClient> ConnectAsync(ModelContextProtocol.Client.McpClientOptions? clientOptions = null)

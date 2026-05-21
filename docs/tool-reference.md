@@ -201,6 +201,8 @@ rodando.
   censored (`IsCensored=true`) com duração lower-bound, igual ao Linux.
   Requer **elevação administrativa** (ou `SeSystemProfilePrivilege`); sem isso
   devolve `InvalidOperation` com hint pra rodar o sidecar como Administrator.
+  Pra produção, ver [`windows-sidecar-service.md`](./windows-sidecar-service.md)
+  (Windows Service com `LocalSystem` ou conta dedicada + privilégio único).
   `SymbolSource: "etw-cswitch-pdb"` (resolve PDBs locais + `_NT_SYMBOL_PATH`).
 - **Managed↔kernel stack merge:** ainda não — frames são puramente nativos /
   kernel em ambas as plataformas. Sub-slice 2c.
@@ -215,20 +217,28 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 
 ## Quick index
 
-| Tool | Cost | Requires CoreCLR? | Side effects |
-|---|---|---|---|
-| [`list_dotnet_processes`](#list_dotnet_processes) | cheap | no | none |
-| [`get_process_info`](#get_process_info) | cheap | no | none |
-| [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) | ~2 s | no | opens a short EventPipe probe |
-| [`get_container_signals`](#get_container_signals) | cheap | no | reads `/sys/fs/cgroup` + `/proc` files |
-| `collect_off_cpu_sample` (Linux/Windows) | window-bound | no | system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
-| `query_off_cpu_snapshot` | cheap | no | drilldown on handle from `collect_off_cpu_sample` |
-| [`snapshot_counters`](#snapshot_counters) | window-bound | no | opens an EventPipe session |
-| [`collect_cpu_sample`](#collect_cpu_sample) | window-bound | **yes** | EventPipe + temp `.nettrace` on disk |
-| [`collect_exceptions`](#collect_exceptions) | window-bound | no | EventPipe session |
-| [`collect_gc_events`](#collect_gc_events) | window-bound | no | EventPipe session |
-| [`collect_event_source`](#collect_event_source) | window-bound | no | EventPipe session |
-| [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | **writes a dump file to disk** |
+> NativeAOT coverage detail (which symbol source per tool, per OS): see
+> [`aot-coverage.md`](./aot-coverage.md).
+
+| Tool | Cost | Requires CoreCLR? | NativeAOT? | Side effects |
+|---|---|---|---|---|
+| [`list_dotnet_processes`](#list_dotnet_processes) | cheap | no | ✅ | none |
+| [`get_process_info`](#get_process_info) | cheap | no | ✅ | none |
+| [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) | ~2 s | no | ✅ | opens a short EventPipe probe |
+| [`get_container_signals`](#get_container_signals) | cheap | no | ✅ (Linux) | reads `/sys/fs/cgroup` + `/proc` files |
+| [`get_memory_trend`](#get_memory_trend) | window-bound | no | ✅ | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
+| `collect_off_cpu_sample` (Linux/Windows) | window-bound | no | ✅ (Linux) | system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
+| `query_off_cpu_snapshot` | cheap | no | ✅ | drilldown on handle from `collect_off_cpu_sample` |
+| [`snapshot_counters`](#snapshot_counters) | window-bound | no | ✅ | opens an EventPipe session |
+| [`collect_cpu_sample`](#collect_cpu_sample) | window-bound | no | ✅ (perf/ETW, native frames) | EventPipe + temp `.nettrace` on disk |
+| [`collect_allocation_sample`](#collect_allocation_sample) | window-bound | no | ⚠️ TypeName empty | EventPipe session |
+| [`collect_exceptions`](#collect_exceptions) | window-bound | no | ✅ | EventPipe session |
+| [`collect_gc_events`](#collect_gc_events) | window-bound | no | ✅ | EventPipe session |
+| [`collect_event_source`](#collect_event_source) | window-bound | no | ⚠️ provider must be embedded at publish | EventPipe session |
+| `collect_thread_snapshot` / `query_thread_snapshot` | seconds | no | ✅ via `linux-native-stack` / `etw-native-stack` | ptrace attach (Linux) / kernel logger (Windows) |
+| `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap |
+| [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | ✅ (native dump) | **writes a dump file to disk** |
+| [`capture_method_bytes`](#capture_method_bytes) | cheap | **yes** | ❌ (use `dotnet-native-mcp.disassemble`) | reads JIT code-heap |
 
 "Window-bound" means the duration is the dominant cost; the tool will block for
 ~`durationSeconds`.
@@ -264,6 +274,14 @@ When ptrace cannot be granted, fall back to `collect_process_dump` +
 `inspect_dump` (the dump capture runs in the target's own process, so it does
 not require ptrace from the sidecar — but writing the dump file is still
 gated on the diagnostic socket UID).
+
+For **NativeAOT on Linux**, `collect_thread_snapshot` now routes to
+`eu-stack -p <pid>` (elfutils) instead of ClrMD. The snapshot payload carries
+`source: "linux-native-stack"` and maps wait reason from
+`/proc/<pid>/task/<tid>/{status,wchan}` (`BlockedOnLock`, `BlockedOnIO`,
+`BlockedOnUninterruptibleIO`, `Stopped`, `Running`). This path still requires
+same-UID + ptrace gate; when denied the `PermissionDenied` envelope includes a
+hint to the perf-replay fallback tracked in issue #92.
 
 ---
 
@@ -342,6 +360,79 @@ events is used to classify the runtime as **CoreCLR** vs **NativeAOT**.
 **Notes:** always call this **first** in a session. The result tells the LLM
 (or human) which other tools can be used on the target. NativeAOT will return
 `runtime = "NativeAot"` and `canSampleCpu = false`.
+
+---
+
+## `get_memory_trend`
+
+Samples OS-level memory metrics at regular intervals over a configurable window
+and computes per-second deltas and a growth verdict. Works on **any** runtime
+(CoreCLR, NativeAOT, even non-.NET processes) — no EventPipe session required.
+
+Use this as a **lightweight memory-leak signal** before reaching for heap dumps.
+It answers "is the process growing and how fast?" without walking the heap.
+
+**Sources:**
+- **Linux**: `/proc/<pid>/smaps_rollup` (Rss, Pss, Anonymous) and
+  `/proc/<pid>/stat` fields 10 & 12 (minflt / majflt). Pure file reads —
+  no privileges, no EventPipe.
+- **Windows**: `GetProcessMemoryInfo(PROCESS_MEMORY_COUNTERS_EX)`:
+  `WorkingSetSize` (RSS), `PrivateUsage` (private committed bytes),
+  `PageFaultCount`. Requires `PROCESS_QUERY_INFORMATION` access to the target.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target process id |
+| `durationSeconds` | `int` | `10` | Observation window length in seconds. Must be ≥ 2. |
+| `sampleEverySeconds` | `int` | `2` | Interval between consecutive samples in seconds. Must be ≥ 1. |
+
+**Returns:** `MemoryTrend`:
+
+```json
+{
+  "processId": 12345,
+  "windowStart": "2026-05-18T20:00:00Z",
+  "windowEnd": "2026-05-18T20:00:10Z",
+  "samples": [
+    {
+      "timestamp": "2026-05-18T20:00:00Z",
+      "rssBytes": 104857600,
+      "pssBytes": 52428800,
+      "privateAnonBytes": 83886080,
+      "heapRegionBytes": null,
+      "majorFaults": 12,
+      "minorFaults": 50000
+    }
+  ],
+  "deltas": {
+    "rssBytesPerSec": 1200000.0,
+    "pssBytesPerSec": 600000.0,
+    "majorFaultsPerSec": 0.2
+  },
+  "verdict": "growing",
+  "notes": []
+}
+```
+
+**Verdict heuristic:** RSS growth > 1 MiB/s → `growing`; RSS decrease > 1
+MiB/s → `shrinking`; otherwise → `stable`. All three values are
+stable-but-informative labels — they do not distinguish between heap and
+stack allocations.
+
+**Field notes:**
+- `pssBytes` is Linux-only (Proportional Set Size — shared pages charged
+  proportionally). Always `null` on Windows.
+- `heapRegionBytes` is `null` on both platforms (requires a full
+  `/proc/<pid>/smaps` walk; omitted for cost reasons).
+- On Windows, `majorFaults` is always `0` — Windows does not separate
+  major/minor faults; the combined count appears in `minorFaults`.
+
+**Next-action hints:**
+- `verdict = "growing"` → suggests `inspect_live_heap` (identify dominant
+  retainers) and `get_container_signals` (cross-check against cgroup limits).
+- `verdict = "stable"` or `"shrinking"` → suggests `snapshot_counters`.
 
 ---
 
@@ -432,11 +523,23 @@ reports the aggregate symbol-resolution quality of `topHotspots`:
 - `Unknown` / omitted — CoreCLR sample (the EventPipe path resolves managed
   names directly; this field does not apply).
 
-**Requires CoreCLR.** Returns `not_supported` style behaviour (empty samples) on
-NativeAOT — confirm via `get_diagnostic_capabilities` first.
+**Routing.** `collect_cpu_sample` dispatches based on
+`get_diagnostic_capabilities`:
 
-**NativeAOT fallback** uses the Linux `perf` profiler. On Debian/Ubuntu/WSL the
-distro ships a wrapper at `/usr/bin/perf` that fails unless the matching
+- **CoreCLR (Linux + Windows)** — EventPipe `SampleProfiler` over the
+  diagnostic socket; managed frames carry the `(mvid, token)` handoff.
+- **NativeAOT / Linux** — system-wide `perf record` (frames are native;
+  managed names recovered from the AOT `.symbols.map` sidecar when present).
+- **NativeAOT / Windows** — NT Kernel Logger `PerfInfo/SampledProfile` via
+  ETW; admin elevation (or `SeSystemProfilePrivilege`) required. Frames are
+  native; managed names recovered from the PE export table + PDB.
+
+Confirm the dispatch path up front with `get_diagnostic_capabilities` →
+`data.canSampleCpu`. Coverage and AOT caveats are summarized in
+[`aot-coverage.md`](./aot-coverage.md).
+
+**NativeAOT/Linux perf install.** On Debian/Ubuntu/WSL the distro ships a
+wrapper at `/usr/bin/perf` that fails unless the matching
 `linux-tools-$(uname -r)` package is installed. The sampler auto-discovers a
 working binary by probing `/usr/lib/linux-tools-*/perf` (kernel-matched first,
 then newest-first); when nothing usable is found, `IsAvailable` returns false
@@ -451,9 +554,70 @@ yields a few thousand samples; bump `durationSeconds` for sparse workloads.
 
 ---
 
+## `collect_allocation_sample`
+
+Captures allocation samples from the target process via `GCAllocationTick`
+events from `Microsoft-Windows-DotNETRuntime` (keyword `GCKeyword=0x1`, level
+Verbose). The GC fires this event roughly every **100 KB of total managed
+allocations** and carries the TypeName of the most recently allocated object
+plus a call stack. The call stack is accessible via `get_call_tree` using the
+handle returned by this tool.
+
+**CoreCLR**: TypeName is fully populated with managed type names. The call tree
+resolves to managed method names via rundown events. `MethodIdentity` (MVID +
+metadata token) is emitted for top-N frames, enabling the assembly-mcp handoff.
+
+**NativeAOT**: `GCAllocationTick` events fire, but the runtime **does not**
+populate the `TypeName` field — managed type metadata is stripped at compile
+time. All events roll up under `<unknown>`. The call tree is captured but
+contains native frame addresses only. See [`aot-coverage.md`](./aot-coverage.md)
+for the full NativeAOT diagnostic matrix.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target process id (optional — auto-selects when only one .NET process is visible) |
+| `durationSeconds` | `int` | `10` | Sampling window. Must be ≥ 1. |
+| `topN` | `int` | `25` | Maximum types per ranked list. Must be ≥ 1. |
+
+**Returns:** `AllocationSample` with a drilldown `handle`:
+
+```json
+{
+  "processId": 12345,
+  "startedAt": "2026-05-18T20:00:00Z",
+  "duration": "00:00:10",
+  "totalEvents": 14250,
+  "totalBytes": 1469161472,
+  "topByBytes": [
+    { "typeName": "System.String", "totalBytes": 1400000000, "eventCount": 14000, "dominantKind": "Small" },
+    { "typeName": "System.Byte[]", "totalBytes": 60000000, "eventCount": 200, "dominantKind": "Large" }
+  ],
+  "topByCount": [
+    { "typeName": "System.String", "totalBytes": 1400000000, "eventCount": 14000, "dominantKind": "Small" }
+  ]
+}
+```
+
+`TopByBytes` ranks by total allocated bytes — the dominant signal for allocation
+pressure. `TopByCount` ranks by sampling event count — useful when many small
+types compete with one large-object type.
+
+**Notes on sampling semantics:** `GCAllocationTick` is a sampled event, not
+an instrumented one. It samples the *most recently allocated* type when the
+total allocation counter crosses each 100 KB threshold. High-frequency types
+are sampled proportionally more often, making the top-N ranking statistically
+accurate for steady workloads.
+
+**Run after** `snapshot_counters` shows elevated `gen-0-gc-count`,
+`gen-1-gc-count`, or growing `gc-heap-size`. Use `get_call_tree` with the
+returned handle to find which allocation sites are responsible.
+
+---
+
 ## `collect_exceptions`
 
-Subscribes to the runtime `Exception` keyword and captures every managed
 exception thrown by the process during the window.
 
 **Parameters:**
@@ -628,3 +792,60 @@ Writes a process dump to disk via the diagnostic IPC channel.
 **Side effects:** **writes to disk** on the server. In a sidecar topology the
 file lives on the sidecar container's filesystem — mount a PVC if you expect
 to capture more than transient dumps.
+
+## `capture_method_bytes`
+
+Reads the JIT-emitted (or ReadyToRun-baked) native machine code for a single
+managed method out of a live .NET process (or `WithHeap`/`Full` dump) and
+writes the raw bytes to a file on disk. Closes the only disasm coverage gap:
+NativeAOT and R2R binaries live on disk and are already covered by
+`dotnet-native-mcp`; JIT-emitted code lives only in the target process memory.
+
+The bytes are emitted via a **file side-channel** (mirroring `collect_process_dump`)
+so binary payloads never enter the LLM context. Each captured region returns a
+`NextActionHint` for `dotnet-native-mcp.disassemble(rawBlob=true)` carrying the
+file path, size, architecture and load-base — feed that hint verbatim to
+disassemble.
+
+**Backend:** ClrMD `HotColdInfo`. **Requires:** CoreCLR target (NativeAOT
+returns an error envelope — use `dotnet-native-mcp.load_native_binary` against
+the binary on disk instead). On Linux also requires `CAP_SYS_PTRACE` for live
+attach.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `moduleVersionId` | `string` (GUID) | — | MVID of the method's declaring module (from a sampler hotspot's `MethodIdentity`) |
+| `metadataToken` | `string` | — | MethodDef token (`0x06000123` or decimal) |
+| `processId` | `int?` | auto-select | Live PID. Mutually exclusive with `dumpFilePath` |
+| `dumpFilePath` | `string?` | — | Path to a `WithHeap`/`Full` dump. Mutually exclusive with `processId` |
+| `codeAddress` | `string?` | — | Optional native IP (hex or decimal) for the fast `GetMethodByInstructionPointer` path; verified against `(mvid, token)` |
+| `tier` | `string?` | — | Informational label (`Tier0`/`Tier1`/etc.) echoed into the output file name. ClrMD does not expose tier metadata, so this is **not** a filter |
+| `outputDirectory` | `string?` | `<temp>/dotnet-diagnostics-mcp` | Where to write the `.bin` files |
+
+**Returns:** `CapturedMethodBytes`:
+
+```json
+{
+  "origin": "Live",
+  "processId": 12345,
+  "runtimeName": "coreclr",
+  "runtimeVersion": "10.0.0",
+  "architecture": "X64",
+  "method": { "moduleVersionId": "…", "metadataToken": 100663297, "methodName": "…", "typeFullName": "…" },
+  "regions": [
+    { "filePath": "/tmp/…/My.Type.Method-Hot--0x06000001.bin", "size": 412, "baseAddress": 140234567890, "architecture": "X64", "region": "Hot", "tier": null, "compilationType": "Jit" }
+  ],
+  "outputDirectory": "/tmp/…",
+  "warnings": []
+}
+```
+
+**Handoff:** every region carries a `NextActionHint` for
+`dotnet-native-mcp.disassemble` with `imagePath`, `rawBlob: true`, `rva: 0`,
+`size`, `architecture` and `baseAddress` — pass those through unchanged.
+
+**Side effects:** writes one `.bin` file per region (Hot, plus Cold when the
+JIT split the method). Suspend window on live attach is typically < 100 ms.
+**NativeAOT/R2R targets are rejected** with an explanatory error envelope.

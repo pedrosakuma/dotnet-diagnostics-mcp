@@ -98,6 +98,16 @@ The .NET diagnostic IPC socket at `/tmp/dotnet-diagnostic-<pid>` inherits the **
 
 Failure surfaces as a structured `PermissionDenied` envelope (see #32). EventPipe-based tools (counters, cpu_sample, exceptions, gc, event_source) do **not** need `CAP_SYS_PTRACE`.
 
+### 🐚 Shell escapes when driving `gh` / `git`
+
+Three pitfalls that have eaten hours of debugging in past sessions:
+
+- **`!` in titles**: `gh issue create --title "MEX !deadlock equivalent"` silently fails because bash history expansion runs inside double quotes. The command exits 0, nothing is created, no error printed. Use **single-quoted titles** for anything containing `!`, or `set +H` in the same shell first.
+- **Inline `--body "..."` / `-m "..."` with markdown** (backticks, `$`, `!`, heredoc-like patterns) hangs or silently truncates. Always use `--body-file <path>` / `-F <path>` for non-trivial messages.
+- **Don't pipe `gh ... create` output** (`| tail`, `| head`, `2>&1 | …`). On non-success paths `gh` produces no URL and the pipe masks the failure. Verify with `gh pr view` / `gh issue list --search` after every create.
+
+When any of the above bites, the diagnostic signature is: `gh` exits 0, no URL on stdout, no resource on the server. Always confirm the resource exists before claiming the step completed.
+
 ### 🐳 `.dockerignore` must re-include `.editorconfig`
 
 Our `.dockerignore` starts with `*` (deny-all) and re-includes specific paths. **If you remove the `!.editorconfig` line, the publish breaks** with CA1848/CA1873 errors because the analyzer suppressions live in `.editorconfig`. Same applies to `!samples/` for sample images.

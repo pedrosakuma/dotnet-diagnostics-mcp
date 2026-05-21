@@ -11,6 +11,7 @@ using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Investigation;
+using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.OffCpu;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
@@ -253,6 +254,91 @@ public sealed class DiagnosticTools
     }
 
     [McpServerTool(
+        Name = "get_memory_trend",
+        Title = "Sample process memory growth over a window",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Samples OS-level memory metrics (RSS, PSS, anonymous/private pages, page faults) " +
+        "at regular intervals over a configurable window, then computes per-second deltas and a " +
+        "growth verdict ('growing', 'stable', 'shrinking'). Works on any OS process — CoreCLR, " +
+        "NativeAOT, or non-.NET — no EventPipe session required. " +
+        "On Linux reads /proc/<pid>/smaps_rollup (Rss, Pss, Anonymous) with an automatic " +
+        "fallback to /proc/<pid>/smaps accumulation on kernels < 4.14, and /proc/<pid>/stat " +
+        "(minflt/majflt) for page-fault counters. On Windows calls GetProcessMemoryInfo " +
+        "(WorkingSetSize, PrivateUsage, PageFaultCount). " +
+        "Use this as a lightweight memory-leak signal before reaching for heap dumps — it answers " +
+        "'is the process growing and how fast?' without walking the heap. " +
+        "When processId is provided it is used directly as the OS pid (no .NET IPC check). " +
+        "When processId is omitted the server auto-selects the lone reachable .NET process.")]
+    public static async Task<DiagnosticResult<MemoryTrend>> GetMemoryTrend(
+        IMemoryTrendCollector collector,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target process. When provided, any OS process is accepted (no .NET IPC required). Optional — omit to auto-select the lone reachable .NET process.")] int? processId = null,
+        [Description("Duration of the observation window in seconds. Must be >= 2. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Interval between consecutive samples in seconds. Must be >= 1. Defaults to 2.")] int sampleEverySeconds = 2,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 2) return InvalidArg<MemoryTrend>(nameof(durationSeconds), "must be >= 2");
+        if (sampleEverySeconds < 1) return InvalidArg<MemoryTrend>(nameof(sampleEverySeconds), "must be >= 1");
+
+        int pid;
+        ProcessContext? context = null;
+
+        if (processId is > 0)
+        {
+            // Explicit OS pid: bypass the .NET diagnostic IPC resolver so the tool works on
+            // any process — NativeAOT, non-.NET, or any pid not visible to the IPC socket.
+            pid = processId.Value;
+        }
+        else if (processId is < 0)
+        {
+            return InvalidArg<MemoryTrend>(nameof(processId), "must be a positive process id");
+        }
+        else
+        {
+            // null or 0 → auto-resolve via the .NET diagnostic IPC (finds the lone .NET process).
+            var resolved = await ResolveContextAsync<MemoryTrend>(resolver, null, cancellationToken).ConfigureAwait(false);
+            if (resolved.Failure is not null) return resolved.Failure;
+            pid = resolved.ProcessId;
+            context = resolved.Context;
+        }
+
+        var trend = await collector.CollectAsync(pid, durationSeconds, sampleEverySeconds, cancellationToken).ConfigureAwait(false);
+
+        const double bytesPerMiB = 1_048_576.0;
+        var rssMiB = trend.Deltas.RssBytesPerSec / bytesPerMiB;
+        var summary = trend.Samples.Count < 2
+            ? $"Process {pid}: could not collect enough samples — check Notes for details."
+            : $"Process {pid} memory over {durationSeconds}s ({trend.Samples.Count} samples): " +
+              $"verdict={trend.Verdict}, " +
+              $"rss={trend.Samples[^1].RssBytes / bytesPerMiB:F1} MiB, " +
+              $"Δrss={rssMiB:+0.00;-0.00;0.00} MiB/s.";
+
+        var hints = trend.Verdict == "growing"
+            ? new[]
+            {
+                new NextActionHint("inspect_live_heap",
+                    $"RSS growing at {rssMiB:F2} MiB/s — inspect the live heap to identify dominant retainers.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["topTypes"] = 25 }),
+                new NextActionHint("get_container_signals",
+                    "Cross-check memory against cgroup limits before concluding it is a leak.",
+                    new Dictionary<string, object?> { ["processId"] = pid }),
+            }
+            : new[]
+            {
+                new NextActionHint("snapshot_counters",
+                    "Memory looks stable — check runtime counters for CPU/GC pressure.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 5 }),
+            };
+
+        var ok = DiagnosticResult.Ok(trend, summary, hints);
+        return WithContext(ok, context);
+    }
+
+    [McpServerTool(
         Name = "snapshot_counters",
         Title = "Snapshot EventCounters",
         Destructive = false,
@@ -470,6 +556,83 @@ public sealed class DiagnosticTools
     }
 
     [McpServerTool(
+        Name = "collect_allocation_sample",
+        Title = "Collect allocation sample",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Captures allocation samples from the target process and returns the top-N types by total allocated bytes " +
+        "and by event count. Uses GCAllocationTick events from Microsoft-Windows-DotNETRuntime (GCKeyword=0x1, Verbose), " +
+        "which fire roughly every 100 KB of total managed allocations. " +
+        "On CoreCLR, TypeName is fully populated with managed type names. " +
+        "On NativeAOT, GCAllocationTick events fire but TypeName is empty — all events roll up under '<unknown>' " +
+        "and only the total event count and bytes are meaningful; use collect_cpu_sample for per-site attribution on AOT. " +
+        "Returns two ranked lists (TopByBytes, TopByCount) and a handle for call-site drill-down via get_call_tree. " +
+        "Run after snapshot_counters shows elevated GC pressure or growing gen0/gen1 heap sizes.")]
+    public static async Task<DiagnosticResult<AllocationSample>> CollectAllocationSample(
+        EventPipeAllocationSampler sampler,
+        IDiagnosticHandleStore handles,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Maximum number of types to return in each top-N list (TopByBytes and TopByCount). Must be >= 1. Defaults to 25.")] int topN = 25,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1) return InvalidArg<AllocationSample>(nameof(durationSeconds), "must be >= 1");
+        if (topN < 1) return InvalidArg<AllocationSample>(nameof(topN), "must be >= 1");
+
+        var resolved = await ResolveContextAsync<AllocationSample>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+        var ctx = resolved.Context;
+
+        AllocationSampleResult result;
+        try
+        {
+            result = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return DiagnosticResult.Fail<AllocationSample>(
+                ex.Message,
+                new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
+                new NextActionHint("get_diagnostic_capabilities", "Check capability matrix to confirm what's available for this process.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+        }
+
+        var sample = result.Summary;
+        var handle = handles.Register(pid, "allocation-sample", result.Artifact, CpuSampleHandleTtl);
+
+        var topType = sample.TopByBytes.Count > 0 ? sample.TopByBytes[0] : null;
+        var unknownOnly = topType?.TypeName == "<unknown>" && sample.TopByBytes.Count == 1;
+        var summaryText = unknownOnly
+            ? $"Captured {sample.TotalEvents} allocation events ({sample.TotalBytes:N0} bytes total) over {durationSeconds}s, " +
+              $"but TypeName was empty for all events (expected on NativeAOT). " +
+              $"Drill into allocation call sites with get_call_tree(handle=\"{handle.Id}\") to see native allocation frames."
+            : topType is not null
+                ? $"Captured {sample.TotalEvents} allocation events ({sample.TotalBytes:N0} bytes total) over {durationSeconds}s. " +
+                  $"Top type by bytes: {topType.TypeName} ({topType.TotalBytes:N0} bytes, {topType.EventCount} events). " +
+                  $"Drill into allocation call sites with get_call_tree(handle=\"{handle.Id}\")."
+                : $"Captured {sample.TotalEvents} allocation events but no type aggregation surfaced — " +
+                  $"increase durationSeconds or drive a workload that allocates during the window.";
+
+        var ok = DiagnosticResult.OkWithHandle(
+            sample,
+            summaryText,
+            handle.Id,
+            handle.ExpiresAt,
+            new NextActionHint("get_call_tree", "Walk the merged allocation call-site tree to find which code paths are allocating the most.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }),
+            new NextActionHint("collect_cpu_sample", "Cross-reference: identify hot CPU paths that correlate with the top allocating types.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }),
+            new NextActionHint("collect_gc_events", "Observe GC pause frequency and generation distribution caused by this allocation load.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }));
+        return WithContext(ok, ctx);
+    }
+
+    [McpServerTool(
         Name = "get_call_tree",
         Title = "Drill into CPU sample call tree",
         Destructive = false,
@@ -477,7 +640,8 @@ public sealed class DiagnosticTools
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Returns a pruned caller→callee tree from a prior collect_cpu_sample run, addressed by its handle. " +
+        "Returns a pruned caller→callee tree from a prior collect_cpu_sample or collect_allocation_sample run, " +
+        "addressed by its handle. " +
         "Use `rootMethodFilter` to anchor the walk at a method substring (case-insensitive). " +
         "`maxDepth` and `maxNodes` bound the response size so the LLM stays under its token budget. " +
         "Handles expire ~10 minutes after collection.")]
@@ -1547,7 +1711,6 @@ public sealed class DiagnosticTools
             var origin = snapshot.Origin.ToString().ToLowerInvariant();
             var blocked = snapshot.Threads.Count(t => t.IsLikelyBlocked);
             var contended = snapshot.Locks.Count(l => l.IsContended);
-
             ThreadSnapshotQueryResult summaryView;
             string summary;
             if (depth == SamplingDepth.Summary)
@@ -1575,6 +1738,20 @@ public sealed class DiagnosticTools
                 summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
             }
 
+            if (snapshot.SnapshotKind is not "exact")
+            {
+                summary += $" SnapshotKind={snapshot.SnapshotKind}";
+                if (snapshot.WindowSeconds is int w)
+                {
+                    summary += $" over {w}s window";
+                }
+                summary += ".";
+            }
+            if (snapshot.Warnings is { Count: > 0 })
+            {
+                summary += $" Caveats: {string.Join(" ", snapshot.Warnings.Take(3))}";
+            }
+
             var hint = blocked > 0 || contended > 0
                 ? new NextActionHint("query_thread_snapshot",
                     "Drill into the top blocked threads or the contended lock graph.",
@@ -1589,6 +1766,152 @@ public sealed class DiagnosticTools
     }
 
     [McpServerTool(
+        Name = "capture_method_bytes",
+        Title = "Capture JIT-emitted native code for a managed method",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Reads JIT-emitted machine code for a single managed method out of the runtime's " +
+        "code-heap and writes it to disk as a header-less raw blob, then emits a handoff " +
+        "hint to dotnet-native-mcp.disassemble(rawBlob=true). Closes the only gap left in " +
+        "disasm coverage (NativeAOT and R2R are already covered on-disk by dotnet-native-mcp; " +
+        "JIT-emitted code only lives in the live process / dump). Useful for diffing tier " +
+        "promotion (Tier0 → Tier1+PGO) of a hot method observed via " +
+        "collect_event_source(\"Microsoft-Windows-DotNETRuntime\", keywords=Jit|JitTracing). " +
+        "Supply at most ONE of processId or dumpFilePath: processId attaches via ClrMD with " +
+        "suspend (sub-second for a single method); dumpFilePath analyses a WithHeap/Full dump " +
+        "offline. When both are omitted the server auto-selects a live .NET process. The " +
+        "method is identified by its (moduleVersionId, metadataToken) handoff key — the same " +
+        "key dotnet-assembly-mcp uses. Optional codeAddress (e.g. from a MethodLoad_V2 event) " +
+        "is a fast-path; tier is an informational label echoed back (ClrMD does not expose " +
+        "the JIT OptimizationTier directly). NativeAOT and pure ReadyToRun targets are not " +
+        "supported — disassemble the on-disk binary with dotnet-native-mcp.disassemble instead.")]
+    public static async Task<DiagnosticResult<CapturedMethodBytes>> CaptureMethodBytes(
+        IJitMethodCapturer capturer,
+        IProcessContextResolver resolver,
+        [Description("PE module MVID (D format, e.g. '6f5c9bf0-1e0b-4f3b-9a8e-…') of the assembly that declares the method. Required.")] string moduleVersionId,
+        [Description("IL method-def metadata token (table 0x06). Accepts decimal or hex (0x06000142). Required.")] string metadataToken,
+        [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath. Optional — when both processId and dumpFilePath are null/empty the server auto-selects a live .NET process.")] int? processId = null,
+        [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
+        [Description("Optional fast-path: a code address already observed for this method (e.g. MethodCodeStart from MethodLoad_V2). Hex (with or without 0x prefix) or decimal. Mismatches with (moduleVersionId, metadataToken) surface as a warning, not a hard error.")] string? codeAddress = null,
+        [Description("Optional tier label echoed back on the result (e.g. 'Tier0', 'Tier1', 'Tier1OSR'). ClrMD does not expose the JIT OptimizationTier directly; this field is informational. The authoritative MethodCompilationType (None/Jit/Ngen) is always returned.")] string? tier = null,
+        [Description("Output directory for the .bin file(s). Defaults to {temp}/dotnet-diagnostics-mcp/method-bytes/{pid}/.")] string? outputDirectory = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(moduleVersionId)) return InvalidArg<CapturedMethodBytes>(nameof(moduleVersionId), "is required");
+        if (!Guid.TryParse(moduleVersionId, out var mvid)) return InvalidArg<CapturedMethodBytes>(nameof(moduleVersionId), "must be a GUID in 'D' format");
+        if (string.IsNullOrWhiteSpace(metadataToken)) return InvalidArg<CapturedMethodBytes>(nameof(metadataToken), "is required");
+        if (!TryParseHexOrInt(metadataToken, out var tokenValue) || tokenValue <= 0)
+        {
+            return InvalidArg<CapturedMethodBytes>(nameof(metadataToken), "must be a positive integer (decimal or 0x-prefixed hex)");
+        }
+
+        ulong? codeAddressValue = null;
+        if (!string.IsNullOrWhiteSpace(codeAddress))
+        {
+            if (!TryParseUnsignedHexOrInt(codeAddress, out var addr) || addr == 0)
+            {
+                return InvalidArg<CapturedMethodBytes>(nameof(codeAddress), "must be a non-zero address (decimal or 0x-prefixed hex)");
+            }
+            codeAddressValue = addr;
+        }
+
+        var hasExplicitPid = processId.HasValue && processId.Value != 0;
+        var hasDump = !string.IsNullOrWhiteSpace(dumpFilePath);
+        if (hasExplicitPid && hasDump)
+        {
+            return InvalidArg<CapturedMethodBytes>(nameof(dumpFilePath), "processId and dumpFilePath are mutually exclusive");
+        }
+
+        int livePid = 0;
+        ProcessContext? liveCtx = null;
+        if (!hasDump)
+        {
+            var resolved = await ResolveContextAsync<CapturedMethodBytes>(resolver, processId, cancellationToken).ConfigureAwait(false);
+            if (resolved.Failure is not null) return resolved.Failure;
+            livePid = resolved.ProcessId;
+            liveCtx = resolved.Context;
+        }
+
+        var request = new MethodCaptureRequest(
+            ModuleVersionId: mvid,
+            MetadataToken: tokenValue,
+            CodeAddress: codeAddressValue,
+            Tier: tier,
+            OutputDirectory: outputDirectory);
+
+        return await GuardAttachAsync("capture_method_bytes", hasDump ? (int?)null : livePid, async () =>
+        {
+            var captured = hasDump
+                ? await capturer.CaptureFromDumpAsync(dumpFilePath!, request, cancellationToken).ConfigureAwait(false)
+                : await capturer.CaptureLiveAsync(livePid, request, cancellationToken).ConfigureAwait(false);
+
+            var summary = BuildCaptureSummary(captured);
+            var hint = BuildDisassembleHint(captured);
+            var result = hint is null
+                ? DiagnosticResult.Ok(captured, summary)
+                : DiagnosticResult.Ok(captured, summary, hint);
+            return WithContext(result, liveCtx);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string BuildCaptureSummary(CapturedMethodBytes captured)
+    {
+        var typeFqn = captured.Method.TypeFullName ?? "<unknown type>";
+        var methodName = captured.Method.MethodName;
+        var origin = captured.Origin.ToString().ToLowerInvariant();
+        if (captured.Regions.Count == 0)
+        {
+            return $"{origin} capture of {typeFqn}.{methodName} on pid {captured.ProcessId}: no JIT-emitted code present (method not yet JITted, abstract/extern, or ReadyToRun-only). " +
+                   "Check warnings on the payload for details.";
+        }
+        var sizes = string.Join(", ", captured.Regions.Select(r => $"{r.Region}={r.Size:N0} B"));
+        var first = captured.Regions[0];
+        return $"{origin} capture of {typeFqn}.{methodName} on pid {captured.ProcessId} ({captured.Architecture}, {first.CompilationType ?? "?"}): " +
+               $"{sizes}. Wrote {captured.Regions.Count} file(s) under {captured.OutputDirectory}.";
+    }
+
+    private static NextActionHint? BuildDisassembleHint(CapturedMethodBytes captured)
+    {
+        if (captured.Regions.Count == 0) return null;
+        var hot = captured.Regions.FirstOrDefault(r => r.Region == "Hot") ?? captured.Regions[0];
+        return new NextActionHint(
+            "dotnet-native-mcp.disassemble",
+            $"Disassemble the captured {hot.Region} region. The file is a raw blob with no PE/ELF/Mach-O header — pass rawBlob=true so the disassembler skips header validation.",
+            new Dictionary<string, object?>
+            {
+                ["imagePath"] = hot.FilePath,
+                ["rawBlob"] = true,
+                ["rva"] = 0,
+                ["size"] = hot.Size,
+                ["architecture"] = hot.Architecture,
+                ["baseAddress"] = hot.BaseAddress,
+            });
+    }
+
+    private static bool TryParseHexOrInt(string value, out int result)
+    {
+        var s = value.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) || s.StartsWith("0X", StringComparison.Ordinal))
+        {
+            return int.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out result);
+        }
+        return int.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out result);
+    }
+
+    private static bool TryParseUnsignedHexOrInt(string value, out ulong result)
+    {
+        var s = value.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) || s.StartsWith("0X", StringComparison.Ordinal))
+        {
+            return ulong.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out result);
+        }
+        return ulong.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out result);
+    }
+
+    [McpServerTool(
         Name = "query_thread_snapshot",
         Title = "Drill into a thread + lock snapshot",
         Destructive = false,
@@ -1598,7 +1921,7 @@ public sealed class DiagnosticTools
     [Description(
         "Returns a slice of a thread snapshot previously captured by collect_thread_snapshot, addressed by its handle. Views: " +
         "`threads-summary` (every managed thread with state + top frame), " +
-        "`stack` (full captured frames of one thread — requires `threadId`, the managed thread id), " +
+        "`stack` (full captured frames of one thread — requires `threadId`; for `linux-native-stack` snapshots this is the OS thread id / TID), " +
         "`lock-graph` (every SyncBlock that is held or contended, sorted by waiter count then recursion), " +
         "`top-blocked` (threads ranked by IsLikelyBlocked then LockCount — fastest path to spot contention). " +
         "Handles expire ~10 minutes after capture; live-origin handles are invalidated when the target PID exits.")]
@@ -1606,7 +1929,7 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         [Description("Snapshot handle returned by collect_thread_snapshot.")] string handle,
         [Description("Which slice to return: 'threads-summary', 'stack', 'lock-graph' or 'top-blocked'.")] string view = "top-blocked",
-        [Description("For view='stack': managed thread id (ManagedThreadId) to return frames for. Ignored by other views.")] int? threadId = null,
+        [Description("For view='stack': thread id key to return frames for. CoreCLR snapshots use ManagedThreadId; linux-native-stack snapshots use OSThreadId (TID). Ignored by other views.")] int? threadId = null,
         [Description("Maximum entries returned by views that produce a ranked list ('threads-summary', 'top-blocked', 'lock-graph'). Defaults to 50.")] int topN = 50)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<ThreadSnapshotQueryResult>(nameof(handle), "is required");
@@ -1651,22 +1974,30 @@ public sealed class DiagnosticTools
         {
             return InvalidArg<ThreadSnapshotQueryResult>(nameof(threadId), "is required for view='stack'");
         }
-        var thread = snapshot.Threads.FirstOrDefault(t => t.ManagedThreadId == threadId.Value);
+        var isLinuxNativeStack = string.Equals(snapshot.Source, "linux-native-stack", StringComparison.Ordinal);
+        var thread = isLinuxNativeStack
+            ? snapshot.Threads.FirstOrDefault(t =>
+                threadId.Value > 0 &&
+                (uint)threadId.Value == t.OSThreadId)
+            : snapshot.Threads.FirstOrDefault(t => t.ManagedThreadId == threadId.Value);
         if (thread is null)
         {
+            var threadKind = isLinuxNativeStack ? "OS thread" : "managed thread";
             return DiagnosticResult.Fail<ThreadSnapshotQueryResult>(
-                $"Managed thread {threadId.Value} not present in snapshot '{handle}'.",
-                new DiagnosticError("ThreadNotFound", "The captured snapshot does not contain this managed thread id.", threadId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                $"{threadKind} {threadId.Value} not present in snapshot '{handle}'.",
+                new DiagnosticError("ThreadNotFound", "The captured snapshot does not contain this thread id.", threadId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 new NextActionHint("query_thread_snapshot",
                     "List the captured threads first.",
                     new Dictionary<string, object?> { ["handle"] = handle, ["view"] = "threads-summary" }));
         }
-        var summary = $"Stack of managed thread {thread.ManagedThreadId} (OS {thread.OSThreadId}, state {thread.State}) from snapshot '{handle}' — {thread.Frames.Count} frame(s).";
+        var selectedId = isLinuxNativeStack ? threadId.Value : thread.ManagedThreadId;
+        var threadLabel = isLinuxNativeStack ? "OS thread" : "managed thread";
+        var summary = $"Stack of {threadLabel} {selectedId} (OS {thread.OSThreadId}, state {thread.State}) from snapshot '{handle}' — {thread.Frames.Count} frame(s).";
         return DiagnosticResult.Ok(
             new ThreadSnapshotQueryResult(handle, "stack", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
             {
                 Thread = thread,
-                ThreadId = thread.ManagedThreadId,
+                ThreadId = selectedId,
             },
             summary);
     }
@@ -2051,21 +2382,63 @@ public sealed class DiagnosticTools
                 ? $"{tool} could not attach{pidHint}: ptrace was denied even though the sidecar's static capability probe expected attach to succeed ({ptrace.Reason}). Likely cause: target process exited, or it runs under a different UID."
                 : $"{tool} could not attach{pidHint}: ptrace was denied — {ptrace.Reason}";
 
+            var hints = new List<NextActionHint>
+            {
+                new("get_diagnostic_capabilities",
+                    "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
+                    processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null),
+                new("inspect_dump",
+                    "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
+                    processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null),
+            };
+
+            if (string.Equals(tool, "collect_thread_snapshot", StringComparison.Ordinal))
+            {
+                hints.Add(new NextActionHint(
+                    "collect_off_cpu_sample",
+                    "If ptrace cannot be granted, use the perf-replay fallback path tracked in issue #92 (short capture + thread-state inference).",
+                    processId is int pidForReplay && pidForReplay > 0 ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 } : null));
+            }
+
             return DiagnosticResult.Fail<T>(
                 headline,
                 new DiagnosticError("PermissionDenied", message, typeName),
-                new NextActionHint("get_diagnostic_capabilities", "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
-                    processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null),
-                new NextActionHint("inspect_dump", "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
-                    processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null));
+                hints.ToArray());
         }
 
         if (ex is UnauthorizedAccessException)
         {
+            if (string.Equals(tool, "collect_thread_snapshot", StringComparison.Ordinal))
+            {
+                return DiagnosticResult.Fail<T>(
+                    $"{tool} was denied access{pidHint}.",
+                    new DiagnosticError("PermissionDenied", message, typeName),
+                    new NextActionHint("list_dotnet_processes", "Verify the MCP server runs as the same UID as the target process."),
+                    new NextActionHint("collect_off_cpu_sample", "When ptrace cannot be granted, use the perf-replay fallback tracked in issue #92.",
+                        processId is int pidForReplay && pidForReplay > 0 ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 } : null));
+            }
+
             return DiagnosticResult.Fail<T>(
                 $"{tool} was denied access{pidHint}.",
                 new DiagnosticError("PermissionDenied", message, typeName),
                 new NextActionHint("list_dotnet_processes", "Verify the MCP server runs as the same UID as the target process."));
+        }
+
+        if (ex is ExternalToolNotFoundException missingTool)
+        {
+            if (string.Equals(tool, "collect_thread_snapshot", StringComparison.Ordinal))
+            {
+                return DiagnosticResult.Fail<T>(
+                    $"{tool} cannot run{pidHint}: required external tool '{missingTool.ToolName}' is missing.",
+                    new DiagnosticError("ToolNotFound", message, typeName),
+                    new NextActionHint("get_diagnostic_capabilities",
+                        "Re-check sidecar capabilities after installing elfutils (eu-stack).",
+                        processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null));
+            }
+
+            return DiagnosticResult.Fail<T>(
+                $"{tool} cannot run{pidHint}: required external tool '{missingTool.ToolName}' is missing.",
+                new DiagnosticError("ToolNotFound", message, typeName));
         }
 
         if (ex is ArgumentException or InvalidOperationException)

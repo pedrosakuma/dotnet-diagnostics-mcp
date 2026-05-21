@@ -123,6 +123,15 @@ dotnet tool install -g dotnet-diagnostics-mcp
 
 The script registers a Scheduled Task that starts at logon, restarts on failure 5 times at 30s intervals, and publishes the bearer token as a user-scope environment variable.
 
+> 🔒 **Need off-CPU sampling on Windows?** `collect_off_cpu_sample` uses the NT Kernel
+> Logger's `ContextSwitch` provider, which requires Administrator membership or
+> `SeSystemProfilePrivilege` — neither is held by the per-user Scheduled Task. For
+> production sidecar deployments that want off-CPU, see
+> [`windows-sidecar-service.md`](./windows-sidecar-service.md) (Windows Service install with
+> `LocalSystem` or a dedicated least-privilege service account). Every other tool
+> (counters, CPU sampling, exceptions, GC, EventSources, ETW NativeAOT CPU sampling) works
+> from the Scheduled Task without changes.
+
 Uninstall: `Unregister-ScheduledTask -TaskName 'dotnet-diagnostics-mcp' -Confirm:$false`.
 
 ### macOS — launchd `LaunchAgent`
@@ -164,7 +173,7 @@ Add this to your `mcp-config.json` (Claude Desktop, Claude Code, Copilot CLI, Cu
 
 ## 4. Optional — pair with `dotnet-assembly-mcp`
 
-After [#28](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/28) shipped, the diagnostics server resolves PDBs locally and stamps `SourceLocation` directly onto every `MethodIdentity`. That means **in a dev environment** where the source tree is open in your editor, `dotnet-diagnostics-mcp` alone is enough to follow a hotspot to its source line.
+The diagnostics server resolves PDBs locally and stamps `SourceLocation` directly onto every `MethodIdentity` it emits for CPU samples (see [#28](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/28)). That means **in a dev environment** where the source tree is open in your editor, `dotnet-diagnostics-mcp` alone is enough to follow a hotspot to its source line.
 
 The partner [`pedrosakuma/dotnet-assembly-mcp`](https://github.com/pedrosakuma/dotnet-assembly-mcp) remains the right call for:
 
@@ -175,7 +184,7 @@ The partner [`pedrosakuma/dotnet-assembly-mcp`](https://github.com/pedrosakuma/d
 When you want it, install side-by-side on a distinct port:
 
 ```bash
-dotnet tool install -g DotnetAssemblyMcp.Server
+dotnet tool install -g dotnet-assembly-mcp
 dotnet-assembly-mcp --urls http://127.0.0.1:8788
 ```
 

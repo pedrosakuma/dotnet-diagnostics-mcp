@@ -1,3 +1,4 @@
+using System.IO;
 using DotnetDiagnosticsMcp.Core.Container;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Internal;
@@ -53,6 +54,9 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var etwAvailable = _etwSampler is not null && _etwSampler.IsAvailable();
         var canSampleOffCpu = _offCpuSampler is not null && _offCpuSampler.IsAvailable();
         var ptrace = PtraceProbe.Detect();
+        var euStackAvailable = IsEuStackAvailable();
+        var (canCollectThreadSnapshot, threadSnapshotSource, threadSnapshotPreconditions) =
+            EvaluateThreadSnapshotSupport(runtime, ptrace, euStackAvailable, etwAvailable, canSampleOffCpu);
         // CoreCLR always supports SampleProfiler; whether the 2-second probe happened to
         // catch a Thread/Sample event is a function of workload, not capability. As long
         // as we classified the runtime as CoreCLR (preferably from module inspection,
@@ -67,7 +71,16 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var canCollectCustomEs = probe.SessionStarted;
         var canCollectDump = true;
 
-        var notes = BuildNotes(runtime, probe, perfAvailable, etwAvailable, canSampleOffCpu, ptrace);
+        var notes = BuildNotes(
+            runtime,
+            probe,
+            perfAvailable,
+            etwAvailable,
+            canSampleOffCpu,
+            ptrace,
+            canCollectThreadSnapshot,
+            threadSnapshotSource,
+            threadSnapshotPreconditions);
 
         var (inContainer, cgroupV2, canSeeThrottle) = await DetectContainerFlagsAsync(processId, cancellationToken).ConfigureAwait(false);
 
@@ -90,6 +103,9 @@ public sealed class CapabilityDetector : ICapabilityDetector
             CanSampleOffCpu = canSampleOffCpu,
             CanAttachClrMD = ptrace.CanAttach,
             AttachClrMdReason = ptrace.Reason,
+            CanCollectThreadSnapshot = canCollectThreadSnapshot,
+            ThreadSnapshotSource = threadSnapshotSource,
+            ThreadSnapshotPreconditions = threadSnapshotPreconditions,
         };
     }
 
@@ -252,7 +268,16 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return RuntimeFlavor.NativeAot;
     }
 
-    private static string BuildNotes(RuntimeFlavor runtime, ProbeResult probe, bool perfAvailable, bool etwAvailable, bool canSampleOffCpu, PtraceProbeResult ptrace)
+    private static string BuildNotes(
+        RuntimeFlavor runtime,
+        ProbeResult probe,
+        bool perfAvailable,
+        bool etwAvailable,
+        bool canSampleOffCpu,
+        PtraceProbeResult ptrace,
+        bool canCollectThreadSnapshot,
+        string? threadSnapshotSource,
+        string? threadSnapshotPreconditions)
     {
         if (!probe.SessionStarted)
         {
@@ -311,7 +336,94 @@ public sealed class CapabilityDetector : ICapabilityDetector
             primary += $" ClrMD live attach tools (collect_thread_snapshot, inspect_live_heap, inspect_dump on live PID, collect_process_dump) are NOT available: {ptrace.Reason}";
         }
 
+        if (canCollectThreadSnapshot && !string.IsNullOrWhiteSpace(threadSnapshotSource))
+        {
+            primary += $" collect_thread_snapshot is available via '{threadSnapshotSource}'.";
+        }
+        else if (!string.IsNullOrWhiteSpace(threadSnapshotPreconditions))
+        {
+            primary += $" collect_thread_snapshot is NOT available: {threadSnapshotPreconditions}";
+        }
+
         return primary;
+    }
+
+    internal static (bool CanCollect, string? Source, string? Preconditions) EvaluateThreadSnapshotSupport(
+        RuntimeFlavor runtime,
+        PtraceProbeResult ptrace,
+        bool euStackAvailable,
+        bool etwAvailable,
+        bool canSampleOffCpu)
+    {
+        if (runtime == RuntimeFlavor.CoreClr)
+        {
+            return (
+                CanCollect: ptrace.CanAttach,
+                Source: ptrace.CanAttach ? "clrmd-thread-walk" : null,
+                Preconditions: ptrace.CanAttach ? null : ptrace.Reason);
+        }
+
+        if (runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsLinux())
+        {
+            if (euStackAvailable && ptrace.CanAttach)
+            {
+                return (
+                    CanCollect: true,
+                    Source: "linux-native-stack",
+                    Preconditions: null);
+            }
+
+            if (canSampleOffCpu)
+            {
+                return (
+                    CanCollect: true,
+                    Source: "perf-replay-approx",
+                    Preconditions: "Approximate last-seen stacks from a short perf sched_switch replay window (not point-in-time).");
+            }
+
+            return (
+                CanCollect: false,
+                Source: null,
+                Preconditions: !euStackAvailable
+                    ? "eu-stack (elfutils) is missing from PATH and perf replay is unavailable (perf/CAP_PERFMON missing)."
+                    : $"eu-stack is available but ptrace attach failed: {ptrace.Reason}");
+        }
+
+        if (runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsWindows())
+        {
+            if (etwAvailable)
+            {
+                return (
+                    CanCollect: true,
+                    Source: "etw-native-stack",
+                    Preconditions: null);
+            }
+
+            return (
+                CanCollect: false,
+                Source: null,
+                Preconditions: "Requires Windows with administrative elevation (or SeSystemProfilePrivilege) for ETW kernel thread snapshots.");
+        }
+
+        return (
+            CanCollect: false,
+            Source: null,
+            Preconditions: "No thread snapshot backend is registered for this runtime/OS.");
+    }
+
+    private static bool IsEuStackAvailable()
+    {
+        if (!OperatingSystem.IsLinux()) return false;
+        var pathVar = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(pathVar)) return false;
+
+        foreach (var segment in pathVar.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(segment, "eu-stack");
+            if (File.Exists(candidate)) return true;
+        }
+
+        return false;
     }
 
     private sealed record ProbeResult(bool SessionStarted, long SampleEventsReceived, string? FailureReason);

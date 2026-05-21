@@ -23,6 +23,7 @@ internal static class PerfSchedScriptParser
 {
     internal sealed record SchedEvent(double TimestampSeconds, string PrevComm, int PrevTid, string PrevState,
         string NextComm, int NextTid, List<OffCpuFrame> Stack);
+    internal sealed record LastSeenSwitchOut(int Tid, string Comm, string PrevState, IReadOnlyList<OffCpuFrame> Stack, double TimestampSeconds);
 
     /// <summary>
     /// Records every sched_switch event observed for any TID in <paramref name="targetTids"/>
@@ -138,6 +139,64 @@ internal static class PerfSchedScriptParser
         }
 
         return (spans, switches);
+    }
+
+    /// <summary>
+    /// Returns the most recent sched_switch OUT event observed per target TID. This powers the
+    /// no-ptrace thread-snapshot fallback, which replays the "last seen" blocking stack for each
+    /// thread over a short perf window.
+    /// </summary>
+    public static IReadOnlyDictionary<int, LastSeenSwitchOut> ParseLastSeenSwitchOut(
+        string output,
+        HashSet<int> targetTids)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(targetTids);
+
+        var lines = output.Split('\n');
+        var byTid = new Dictionary<int, LastSeenSwitchOut>();
+
+        var i = 0;
+        while (i < lines.Length)
+        {
+            var raw = lines[i].TrimEnd('\r');
+            if (raw.Length == 0 || raw.StartsWith('#'))
+            {
+                i++;
+                continue;
+            }
+
+            var ev = TryParseHeader(raw);
+            if (ev is null)
+            {
+                i++;
+                continue;
+            }
+
+            i++;
+            while (i < lines.Length)
+            {
+                var line = lines[i].TrimEnd('\r');
+                if (line.Length == 0) { i++; break; }
+                if (line.Contains(" sched:sched_switch:", StringComparison.Ordinal)) break;
+                if (!char.IsWhiteSpace(line[0])) break;
+                var frame = ParseFrame(line);
+                if (frame is not null) ev.Stack.Add(frame);
+                i++;
+            }
+
+            if (!targetTids.Contains(ev.PrevTid)) continue;
+            if (ev.Stack.Count == 0) continue;
+
+            byTid[ev.PrevTid] = new LastSeenSwitchOut(
+                Tid: ev.PrevTid,
+                Comm: ev.PrevComm,
+                PrevState: NormalizeState(ev.PrevState),
+                Stack: ev.Stack,
+                TimestampSeconds: ev.TimestampSeconds);
+        }
+
+        return byTid;
     }
 
     private static string NormalizeState(string s)

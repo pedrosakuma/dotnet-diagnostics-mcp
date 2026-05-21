@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -94,15 +96,19 @@ app.MapGet("/generics", (int? iterations) =>
     var n = iterations ?? 50_000;
     var sumI = 0L;
     var sumS = 0L;
+    // Use a non-trivial string so Box<string>.Wrap and Echo<string> actually do work
+    // on each call — otherwise the body returns faster than the CPU sampling interval
+    // and the closed instantiations never land in any captured stack frame.
+    const string payload = "abcdefghijklmnopqrstuvwxyz";
     for (var i = 0; i < n; i++)
     {
         var boxI = new Box<int> { Value = i };
         sumI += boxI.Wrap();
         sumI += GenericFixture.Echo(i);
 
-        var boxS = new Box<string> { Value = "x" };
+        var boxS = new Box<string> { Value = payload };
         sumS += boxS.Wrap();
-        sumS += GenericFixture.Echo("x").Length;
+        sumS += GenericFixture.Echo(payload).Length;
     }
     return Results.Json(new { sumI, sumS });
 })
@@ -113,6 +119,7 @@ app.Run();
 sealed class Box<T>
 {
     public T? Value { get; set; }
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public int Wrap()
     {
         // Trivial work that dominates samples when called in a tight loop.
@@ -125,11 +132,17 @@ sealed class Box<T>
 
 static class GenericFixture
 {
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public static T Echo<T>(T value)
     {
         // Force the JIT to specialize so each instantiation shows up as a distinct MethodID.
+        // The inner loop guarantees the body is heavy enough that the CPU sampler can land
+        // a stack frame inside it (without it the call returns faster than the sampling
+        // interval and method-level closed generics never surface in the trace).
         var s = value?.ToString() ?? string.Empty;
-        if (s.Length < 0) throw new InvalidOperationException();
+        var h = 0;
+        for (var i = 0; i < s.Length; i++) h = unchecked(h * 31 + s[i]);
+        if (h == int.MinValue) throw new InvalidOperationException();
         return value;
     }
 }
