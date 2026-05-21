@@ -85,7 +85,7 @@ public sealed class PerfReplayThreadSnapshotInspector : IThreadSnapshotInspector
         var threads = BuildApproximateThreads(lastByTid, opts.MaxFramesPerThread);
 
         warnings.Add(
-            $"Approximate snapshot from perf sched replay over a {DefaultWindowSeconds}s window; this is not point-in-time.");
+            $"Approximate snapshot from perf sched replay over a {window.TotalSeconds:N0}s window; this is not point-in-time.");
         warnings.Add("Each thread shows the last stack seen at sched_switch OUT within the window (not its current stack).");
         warnings.Add("Threads that never switched off-CPU during the window are omitted.");
         warnings.Add("Wait reason is inferred from sched_switch prev_state (S/D/X), not /proc/.../wchan.");
@@ -185,7 +185,7 @@ public sealed class PerfReplayThreadSnapshotInspector : IThreadSnapshotInspector
     private async Task<string> CaptureScriptAsync(TimeSpan duration, CancellationToken ct)
     {
         var perfDataPath = Path.Combine(Path.GetTempPath(),
-            $"diagnosticsmcp-threadsnap-perf-{Guid.NewGuid():N}.data");
+            $"diagnostics-mcp-threadsnap-perf-{Guid.NewGuid():N}.data");
         try
         {
             await RecordAsync(perfDataPath, duration, ct).ConfigureAwait(false);
@@ -200,21 +200,34 @@ public sealed class PerfReplayThreadSnapshotInspector : IThreadSnapshotInspector
     private async Task RecordAsync(string outputPath, TimeSpan duration, CancellationToken ct)
     {
         var seconds = Math.Max(1, (int)Math.Ceiling(duration.TotalSeconds));
-        var args = $"record -a -e sched:sched_switch --call-graph dwarf -o \"{outputPath}\" -- sleep {seconds}";
-        _logger.LogDebug("Spawning perf for replay thread snapshot: {Bin} {Args}", ResolvePerfPath()!, args);
+        _logger.LogDebug(
+            "Spawning perf for replay thread snapshot: {Bin} record -a -e sched:sched_switch --call-graph dwarf -o {OutputPath} -- sleep {Seconds}",
+            ResolvePerfPath()!,
+            outputPath,
+            seconds);
 
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = ResolvePerfPath()!,
-                Arguments = args,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
             },
             EnableRaisingEvents = true,
         };
+        process.StartInfo.ArgumentList.Add("record");
+        process.StartInfo.ArgumentList.Add("-a");
+        process.StartInfo.ArgumentList.Add("-e");
+        process.StartInfo.ArgumentList.Add("sched:sched_switch");
+        process.StartInfo.ArgumentList.Add("--call-graph");
+        process.StartInfo.ArgumentList.Add("dwarf");
+        process.StartInfo.ArgumentList.Add("-o");
+        process.StartInfo.ArgumentList.Add(outputPath);
+        process.StartInfo.ArgumentList.Add("--");
+        process.StartInfo.ArgumentList.Add("sleep");
+        process.StartInfo.ArgumentList.Add(seconds.ToString(CultureInfo.InvariantCulture));
 
         process.Start();
         try
@@ -237,18 +250,20 @@ public sealed class PerfReplayThreadSnapshotInspector : IThreadSnapshotInspector
 
     private async Task<string> RunScriptAsync(string perfDataPath, CancellationToken ct)
     {
-        var args = $"script -i \"{perfDataPath}\" --no-inline";
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = ResolvePerfPath()!,
-                Arguments = args,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
             },
         };
+        process.StartInfo.ArgumentList.Add("script");
+        process.StartInfo.ArgumentList.Add("-i");
+        process.StartInfo.ArgumentList.Add(perfDataPath);
+        process.StartInfo.ArgumentList.Add("--no-inline");
 
         process.Start();
         var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);

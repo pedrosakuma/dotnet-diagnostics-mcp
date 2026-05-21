@@ -385,7 +385,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
                 Source: null,
                 Preconditions: !euStackAvailable
                     ? "eu-stack (elfutils) is missing from PATH and perf replay is unavailable (perf/CAP_PERFMON missing)."
-                    : ptrace.Reason);
+                    : $"eu-stack is available but ptrace attach failed: {ptrace.Reason}");
         }
 
         if (runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsWindows())
