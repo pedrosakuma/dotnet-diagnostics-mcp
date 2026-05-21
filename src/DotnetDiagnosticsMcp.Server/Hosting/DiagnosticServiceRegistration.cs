@@ -65,6 +65,12 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IMemoryTrendCollector, DotnetDiagnosticsMcp.Core.Memory.MemoryTrendCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHandleStore>(_ =>
             new DotnetDiagnosticsMcp.Core.Drilldown.MemoryDiagnosticHandleStore(maxEntries: 32));
+        services.AddSingleton<ModelContextProtocol.IMcpTaskStore>(_ =>
+            new ModelContextProtocol.InMemoryMcpTaskStore(
+                defaultTtl: System.TimeSpan.FromMinutes(10),
+                pollInterval: System.TimeSpan.FromSeconds(1),
+                maxTasks: 32,
+                maxTasksPerSession: 32));
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner, DotnetDiagnosticsMcp.Core.Jobs.CollectionJobRunner>();
         services.AddHostedService<HandleEvictionBackgroundService>();
 
