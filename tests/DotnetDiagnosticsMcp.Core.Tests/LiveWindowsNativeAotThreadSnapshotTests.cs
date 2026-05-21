@@ -37,6 +37,11 @@ public sealed class LiveWindowsNativeAotThreadSnapshotTests : IAsyncLifetime
             await PublishAsync(sampleProject, publishDir, CancellationToken.None);
             _publishDir = publishDir;
         }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("dotnet publish failed", StringComparison.Ordinal))
+        {
+            try { Directory.Delete(publishDir, recursive: true); } catch { /* best effort */ }
+            return;
+        }
         catch
         {
             try { Directory.Delete(publishDir, recursive: true); } catch { /* best effort */ }

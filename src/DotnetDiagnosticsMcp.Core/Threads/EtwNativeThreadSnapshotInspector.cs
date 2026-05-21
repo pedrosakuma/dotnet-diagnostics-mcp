@@ -57,7 +57,7 @@ public sealed class EtwNativeThreadSnapshotInspector : IThreadSnapshotInspector
 
         if (!IsAvailable())
         {
-            throw new InvalidOperationException(
+            throw new UnauthorizedAccessException(
                 "ETW native thread snapshots are not available. This requires Windows with administrative elevation " +
                 "(or SeSystemProfilePrivilege). Run the diagnostics sidecar as Administrator.");
         }
