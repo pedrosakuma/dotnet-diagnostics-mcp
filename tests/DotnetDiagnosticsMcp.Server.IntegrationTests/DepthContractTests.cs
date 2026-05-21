@@ -503,6 +503,7 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             TimeSpan duration,
             int topN = 25,
             SourceResolutionOptions? sourceResolution = null,
+            MethodInstantiationResolutionOptions? methodInstantiationResolution = null,
             CancellationToken cancellationToken = default)
         {
             var startedAt = DateTimeOffset.UnixEpoch;
