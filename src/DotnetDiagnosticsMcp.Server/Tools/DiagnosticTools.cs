@@ -480,17 +480,13 @@ public sealed class DiagnosticTools
                 async ct =>
                 {
                     var jobResult = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, ct).ConfigureAwait(false);
-                    var jobSample = jobResult.Summary;
-                    var jobTop = jobSample.TopHotspots.Count > 0 ? jobSample.TopHotspots[0] : null;
                     var dataHandle = handles.Register(pid, "cpu-sample", jobResult.Artifact, CpuSampleHandleTtl);
-                    var summaryText = jobTop is not null
-                        ? $"Captured {jobSample.TotalSamples} samples over {durationSeconds}s. Top method: {jobTop.Frame.Method} ({jobTop.InclusiveSamples} inclusive / {jobTop.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{dataHandle.Id}\")."
-                        : $"Captured {jobSample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
-                    var jobOk = DiagnosticResult.OkWithHandle(
-                        jobSample,
-                        summaryText,
+                    var jobOk = BuildCpuSampleResult(
+                        jobResult.Summary,
+                        durationSeconds,
                         dataHandle.Id,
                         dataHandle.ExpiresAt,
+                        depth,
                         new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
                             new Dictionary<string, object?> { ["handle"] = dataHandle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }));
                     return WithContext(jobOk, ctx);
@@ -525,29 +521,14 @@ public sealed class DiagnosticTools
                     new Dictionary<string, object?> { ["processId"] = pid }));
         }
 
-        var sample = result.Summary;
-        var top = sample.TopHotspots.Count > 0 ? sample.TopHotspots[0] : null;
         var handle = handles.Register(pid, "cpu-sample", result.Artifact, CpuSampleHandleTtl);
 
-        var inlineSample = sample;
-        var droppedHotspots = 0;
-        if (depth == SamplingDepth.Summary && sample.TopHotspots.Count > 3)
-        {
-            droppedHotspots = sample.TopHotspots.Count - 3;
-            inlineSample = sample with { TopHotspots = sample.TopHotspots.Take(3).ToArray() };
-        }
-
-        var summary = top is not null
-            ? (depth == SamplingDepth.Summary && droppedHotspots > 0
-                ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s — showing top {inlineSample.TopHotspots.Count} of {sample.TopHotspots.Count} hotspot(s) (dropped {droppedHotspots}; handle has all). Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\")."
-                : $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\").")
-            : $"Captured {sample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
-
-        var ok = DiagnosticResult.OkWithHandle(
-            inlineSample,
-            summary,
+        var ok = BuildCpuSampleResult(
+            result.Summary,
+            durationSeconds,
             handle.Id,
             handle.ExpiresAt,
+            depth,
             new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }),
             new NextActionHint("collect_exceptions", "Confirm hot path isn't driven by exception-heavy control flow.",
@@ -868,6 +849,32 @@ public sealed class DiagnosticTools
     }
 
     private static readonly TimeSpan CpuSampleHandleTtl = TimeSpan.FromMinutes(10);
+
+    private static DiagnosticResult<CpuSample> BuildCpuSampleResult(
+        CpuSample sample,
+        int durationSeconds,
+        string handleId,
+        DateTimeOffset handleExpiresAt,
+        SamplingDepth depth,
+        params NextActionHint[] hints)
+    {
+        var top = sample.TopHotspots.Count > 0 ? sample.TopHotspots[0] : null;
+        var inlineSample = sample;
+        var droppedHotspots = 0;
+        if (depth == SamplingDepth.Summary && sample.TopHotspots.Count > 3)
+        {
+            droppedHotspots = sample.TopHotspots.Count - 3;
+            inlineSample = sample with { TopHotspots = sample.TopHotspots.Take(3).ToArray() };
+        }
+
+        var summary = top is not null
+            ? (depth == SamplingDepth.Summary && droppedHotspots > 0
+                ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s — showing top {inlineSample.TopHotspots.Count} of {sample.TopHotspots.Count} hotspot(s) (dropped {droppedHotspots}; handle has all). Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handleId}\")."
+                : $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handleId}\").")
+            : $"Captured {sample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
+
+        return DiagnosticResult.OkWithHandle(inlineSample, summary, handleId, handleExpiresAt, hints);
+    }
 
     /// <summary>
     /// Default TTL applied to handles emitted by every windowed collector (counters, exceptions,
