@@ -76,8 +76,12 @@ public sealed class LinuxNativeThreadSnapshotInspector : IThreadSnapshotInspecto
         var warnings = new List<string>();
         var stopwatch = Stopwatch.StartNew();
 
-        var euStackOutput = await RunEuStackAsync(processId, cancellationToken).ConfigureAwait(false);
-        var parsedThreads = ParseEuStackOutput(euStackOutput, options.MaxFramesPerThread);
+        var euStackResult = await RunEuStackAsync(processId, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(euStackResult.PartialWarning))
+        {
+            warnings.Add(euStackResult.PartialWarning!);
+        }
+        var parsedThreads = ParseEuStackOutput(euStackResult.Stdout, options.MaxFramesPerThread);
 
         var threads = new List<ManagedThread>(parsedThreads.Count);
         foreach (var t in parsedThreads)
@@ -200,7 +204,15 @@ public sealed class LinuxNativeThreadSnapshotInspector : IThreadSnapshotInspecto
         return null;
     }
 
-    private async Task<string> RunEuStackAsync(int processId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Result of an <c>eu-stack</c> invocation. When eu-stack exits non-zero but still emits
+    /// stack frames on stdout (a common pattern on NativeAOT, where libdwfl fails to unwind
+    /// past the AOT entrypoint frame of TID 1), the stdout is returned alongside a
+    /// <see cref="PartialWarning"/> that explains why the exit was non-zero. See issue #105.
+    /// </summary>
+    internal readonly record struct EuStackResult(string Stdout, string? PartialWarning);
+
+    private async Task<EuStackResult> RunEuStackAsync(int processId, CancellationToken cancellationToken)
     {
         var path = ResolveEuStackPath();
         if (path is null)
@@ -241,20 +253,39 @@ public sealed class LinuxNativeThreadSnapshotInspector : IThreadSnapshotInspecto
         var stdout = await stdoutTask.ConfigureAwait(false);
         var stderr = await stderrTask.ConfigureAwait(false);
 
-        if (process.ExitCode != 0)
+        if (process.ExitCode == 0)
         {
-            if (LooksLikePermissionFailure(stderr))
-            {
-                throw new UnauthorizedAccessException(
-                    $"eu-stack could not attach to pid {processId}: {stderr.Trim()} " +
-                    "A perf-replay fallback is planned in issue #92 but not implemented in this slice.");
-            }
-
-            throw new InvalidOperationException(
-                $"eu-stack exited with code {process.ExitCode} while collecting pid {processId}. stderr: {stderr.Trim()}");
+            return new EuStackResult(stdout, PartialWarning: null);
         }
 
-        return stdout;
+        // Permission failures are surfaced as UnauthorizedAccessException so the router can
+        // fall through to PerfReplayThreadSnapshotInspector (issue #92).
+        if (LooksLikePermissionFailure(stderr))
+        {
+            throw new UnauthorizedAccessException(
+                $"eu-stack could not attach to pid {processId}: {stderr.Trim()} " +
+                "A perf-replay fallback is planned in issue #92 but not implemented in this slice.");
+        }
+
+        // On NativeAOT, eu-stack commonly emits valid frames for every thread and then fails to
+        // unwind the last frame of the AOT entrypoint on TID 1 ("dwfl_thread_getframes ...
+        // Callback returned failure"), exiting with code 1. Treat that as a partial success
+        // (issue #105): hand back the stdout we collected and surface the stderr warning as a
+        // snapshot-level note so the caller still gets thread visibility.
+        if (!string.IsNullOrWhiteSpace(stdout))
+        {
+            var note = $"eu-stack exited with code {process.ExitCode} but produced frames for the live threads; " +
+                $"partial unwind warning: {stderr.Trim()}";
+            _logger.LogDebug(
+                "eu-stack returned partial output for pid {Pid} (exit={Exit}). stderr: {Stderr}",
+                processId,
+                process.ExitCode,
+                stderr.Trim());
+            return new EuStackResult(stdout, PartialWarning: note);
+        }
+
+        throw new InvalidOperationException(
+            $"eu-stack exited with code {process.ExitCode} while collecting pid {processId}. stderr: {stderr.Trim()}");
     }
 
     private string? ResolveEuStackPath()

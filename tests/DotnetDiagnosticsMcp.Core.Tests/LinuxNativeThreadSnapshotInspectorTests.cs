@@ -71,4 +71,82 @@ public sealed class LinuxNativeThreadSnapshotInspectorTests
         t1.TopFrameMethod.Should().Be("Foo");
         t2.TopFrameMethod.Should().BeNull();
     }
+
+    [Fact]
+    public async Task InspectLiveAsync_TreatsExitNonZeroWithStdoutAsPartialSuccess()
+    {
+        // Regression for issue #105: on NativeAOT, eu-stack often emits valid frames for every
+        // thread and then warns "dwfl_thread_getframes ... Callback returned failure" on the
+        // AOT entrypoint of TID 1, exiting with code 1. We must keep the stdout frames and
+        // surface the warning instead of throwing.
+        if (!OperatingSystem.IsLinux()) return;
+
+        var pid = Environment.ProcessId;
+        var fakeEuStack = await CreateFakeEuStackAsync(
+            stdout: $"PID {pid} - process\nTID 1:\n#0  0x401000 main+0x10 (/app/Foo)\nTID 7:\n#0  0x401200 worker+0x20 (/app/Foo)\n",
+            stderr: "/usr/bin/eu-stack: dwfl_thread_getframes tid 1 at 0x401010 in /app/Foo: Callback returned failure",
+            exitCode: 1);
+
+        try
+        {
+            var inspector = new LinuxNativeThreadSnapshotInspector(euStackPath: fakeEuStack);
+            var artifact = await inspector.InspectLiveAsync(pid);
+
+            artifact.Threads.Should().HaveCountGreaterThan(0,
+                "stdout had two TIDs and the partial-output handler should keep them");
+            artifact.Warnings.Should().NotBeNull();
+            artifact.Warnings!.Should().Contain(w =>
+                w.Contains("eu-stack exited with code", StringComparison.Ordinal) &&
+                w.Contains("Callback returned failure", StringComparison.Ordinal));
+        }
+        finally
+        {
+            try { File.Delete(fakeEuStack); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task InspectLiveAsync_StillThrowsWhenStdoutIsEmpty()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+
+        var pid = Environment.ProcessId;
+        var fakeEuStack = await CreateFakeEuStackAsync(
+            stdout: string.Empty,
+            stderr: "eu-stack: total meltdown",
+            exitCode: 2);
+
+        try
+        {
+            var inspector = new LinuxNativeThreadSnapshotInspector(euStackPath: fakeEuStack);
+            var act = () => inspector.InspectLiveAsync(pid);
+
+            await act.Should().ThrowAsync<InvalidOperationException>();
+        }
+        finally
+        {
+            try { File.Delete(fakeEuStack); } catch { /* best effort */ }
+        }
+    }
+
+    private static async Task<string> CreateFakeEuStackAsync(string stdout, string stderr, int exitCode)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"fake-eu-stack-{Guid.NewGuid():N}.sh");
+        var script =
+            "#!/bin/sh\n" +
+            "cat <<'__STDOUT__'\n" +
+            stdout +
+            "__STDOUT__\n" +
+            "cat <<'__STDERR__' 1>&2\n" +
+            stderr + "\n" +
+            "__STDERR__\n" +
+            $"exit {exitCode}\n";
+        await File.WriteAllTextAsync(path, script);
+        var chmod = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("chmod", $"+x {path}") { UseShellExecute = false });
+        if (chmod is not null)
+        {
+            await chmod.WaitForExitAsync();
+        }
+        return path;
+    }
 }
