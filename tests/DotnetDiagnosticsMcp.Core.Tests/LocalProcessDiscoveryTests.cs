@@ -30,6 +30,17 @@ public sealed class LocalProcessDiscoveryTests
             var alive = OperatingSystem.IsLinux()
                 ? IsLinuxProcessLeader(p.ProcessId)
                 : SafeProcessExists(p.ProcessId);
+            if (!alive)
+            {
+                // The list is a live snapshot: short-lived helper processes (testhost, MSBuild)
+                // can exit between enumeration and assertion. That race is acceptable as long as
+                // the explicit per-PID path now rejects the vanished process instead of surfacing
+                // a stale diagnostic socket forever.
+                discovery.TryGetProcess(p.ProcessId).Should().BeNull(
+                    $"pid {p.ProcessId} vanished after enumeration, so the explicit lookup path must now reject it");
+                continue;
+            }
+
             alive.Should().BeTrue(
                 $"discovery returned pid {p.ProcessId} ({p.ManagedEntrypointAssemblyName}) but it is not a live thread-group leader — likely a stale diagnostic socket leaked through the enumeration filter.");
         }

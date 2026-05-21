@@ -141,6 +141,8 @@ public sealed record HeapSnapshotArtifact(
     public IReadOnlyList<DelegateTargetStat>? DelegateTargets { get; init; }
     /// <summary>Top duplicate strings by aggregate retained bytes. Gated by <see cref="DumpInspectionOptions.IncludeDuplicateStrings"/>.</summary>
     public IReadOnlyList<DuplicateStringStat>? DuplicateStrings { get; init; }
+    /// <summary>Pending async state machines reconstructed from the heap (SOS DumpAsync-style view).</summary>
+    public IReadOnlyList<AsyncOperationStat>? AsyncOperations { get; init; }
     /// <summary>Diagnostic warnings emitted during the walk (degraded data, ClrMD limitations, …).</summary>
     public IReadOnlyList<string>? Warnings { get; init; }
 }
@@ -234,6 +236,44 @@ public sealed record DuplicateStringStat(
     long InstanceCount,
     long TotalBytes,
     bool PreviewTruncated);
+
+/// <summary>One pending async state machine surfaced by <c>query_heap_snapshot(view="async")</c>.</summary>
+public sealed record AsyncOperationStat(
+    string StateMachineTypeFullName,
+    int State,
+    string? AwaiterTypeFullName,
+    long DirectSizeBytes)
+{
+    /// <summary>Address of the boxed state-machine object or embedded value-type payload.</summary>
+    public ulong StateMachineAddress { get; init; }
+    /// <summary>Owning <c>Task</c> object when the builder exposes one.</summary>
+    public ulong? TaskAddress { get; init; }
+    /// <summary>Best-effort <c>Task.Id</c> read from <c>m_taskId</c>.</summary>
+    public int? TaskId { get; init; }
+    /// <summary>Concrete runtime type of the owning task, often an async-state-machine box.</summary>
+    public string? TaskTypeFullName { get; init; }
+    /// <summary>Runtime type of <c>m_continuationObject</c> when one is present.</summary>
+    public string? ContinuationObjectTypeFullName { get; init; }
+    /// <summary>Best-effort async-stack reconstruction by following continuation objects to other pending state machines.</summary>
+    public IReadOnlyList<AsyncChainFrame>? Stack { get; init; }
+    /// <summary>Heap-walk order of the owning task / box. Lower means older when the order is observable.</summary>
+    public long? ObservedOrder { get; init; }
+}
+
+/// <summary>One frame in the reconstructed async continuation chain.</summary>
+public sealed record AsyncChainFrame(
+    string StateMachineTypeFullName,
+    int State,
+    string? AwaiterTypeFullName,
+    ulong StateMachineAddress)
+{
+    /// <summary>Owning <c>Task</c> address for this frame, when available.</summary>
+    public ulong? TaskAddress { get; init; }
+    /// <summary>Best-effort <c>Task.Id</c> for this frame.</summary>
+    public int? TaskId { get; init; }
+    /// <summary>Type name of the continuation object that links this frame to the next async state machine, when detected.</summary>
+    public string? ContinuationObjectTypeFullName { get; init; }
+}
 
 /// <summary>Output of <see cref="IDumpInspector.InspectAsync"/> projected for inline tool consumption.</summary>
 public sealed record DumpInspection(

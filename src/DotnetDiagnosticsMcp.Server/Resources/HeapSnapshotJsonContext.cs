@@ -22,4 +22,6 @@ internal sealed record HeapSnapshotErrorPayload(string Kind, string Error);
 [JsonSerializable(typeof(StaticFieldStat))]
 [JsonSerializable(typeof(DelegateTargetStat))]
 [JsonSerializable(typeof(DuplicateStringStat))]
+[JsonSerializable(typeof(AsyncOperationStat))]
+[JsonSerializable(typeof(AsyncChainFrame))]
 internal sealed partial class HeapSnapshotJsonContext : JsonSerializerContext;
