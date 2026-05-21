@@ -48,7 +48,7 @@ structured `PermissionDenied` envelope:
 ```
 
 Every other tool (`snapshot_counters`, `collect_cpu_sample`, `collect_exceptions`,
-`collect_gc_events`, `collect_event_source`, ETW NativeAOT CPU sampling) works fine from
+`collect_gc_events`, `collect_activities`, `collect_event_source`, ETW NativeAOT CPU sampling) works fine from
 the Scheduled Task — they use EventPipe or user-mode ETW providers that do not need a
 kernel logger session. **Switch to the Service only when you need off-CPU.**
 

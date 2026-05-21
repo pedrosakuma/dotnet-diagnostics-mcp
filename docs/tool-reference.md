@@ -78,6 +78,10 @@ Explicit `topN` always wins over the depth default — if you pass
 `topN=10, depth=Summary` you get up to 10 hotspots inline (the LLM knows what
 it asked for).
 
+`collect_activities` does **not** currently expose `depth`; it always returns the
+retained `Activities[]` inline (bounded by `maxActivities`) and relies on
+`query_collection(handle, view=...)` for narrower drilldown views.
+
 ### Long-running collects: MCP Tasks vs `runAsJob`
 
 As of the `2025-11-25` protocol bump, the server registers an
@@ -131,8 +135,8 @@ The LLM may always ignore a prompt and drive ad-hoc.
 
 ### Handle chaining nos coletores (`query_collection`)
 
-Os 4 coletores windowed — `snapshot_counters`, `collect_exceptions`,
-`collect_gc_events`, `collect_event_source` — devolvem, junto do summary +
+Os 5 coletores windowed — `snapshot_counters`, `collect_exceptions`,
+`collect_gc_events`, `collect_activities`, `collect_event_source` — devolvem, junto do summary +
 top-N inline, um `handle` opaco (Crockford-base32, TTL ~10 min) registrado num
 store em memória. A LLM pode então re-projetar o mesmo artefato sob outra
 visão **sem rodar o EventPipe de novo** chamando `query_collection`:
@@ -154,6 +158,7 @@ Visões disponíveis por `kind`:
 | `counters` | `snapshot_counters` | `summary` (default), `byProvider` |
 | `exception-snapshot` | `collect_exceptions` | `summary` (default = `byType.Take(topN)`), `byType`, `recent` |
 | `gc-events` | `collect_gc_events` | `summary` (default), `events`, `pauseHistogram` |
+| `activities` | `collect_activities` | `summary` (default), `bySource`, `byOperation`, `activities` |
 | `event-source` | `collect_event_source` | `summary` (default), `byEventName`, `events` |
 
 > **Nota — truncação em `event-source`:** o coletor para de armazenar eventos
@@ -263,6 +268,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`collect_allocation_sample`](#collect_allocation_sample) | window-bound | no | ⚠️ TypeName empty | EventPipe session |
 | [`collect_exceptions`](#collect_exceptions) | window-bound | no | ✅ | EventPipe session |
 | [`collect_gc_events`](#collect_gc_events) | window-bound | no | ✅ | EventPipe session |
+| [`collect_activities`](#collect_activities) | window-bound | no | ✅ | EventPipe session |
 | [`collect_event_source`](#collect_event_source) | window-bound | no | ⚠️ provider must be embedded at publish | EventPipe session |
 | `collect_thread_snapshot` / `query_thread_snapshot` | seconds | no | ✅ via `linux-native-stack` / `etw-native-stack` | ptrace attach (Linux) / kernel logger (Windows) |
 | `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap |
@@ -274,7 +280,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 
 ### Linux runtime requirements
 
-EventPipe-based tools (the ones listed in the index above) only need the
+EventPipe-based tools (including `collect_activities`, alongside the ones listed in the index above) only need the
 diagnostic IPC socket, which works as long as the MCP server runs as the
 **same UID** as the target process. ClrMD-backed tools added since the MVP —
 `collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live
@@ -784,6 +790,81 @@ clients can still read a task via `get_collection_status(taskId)` when needed.
 
 **Notes:** to capture a full gcdump (heap snapshot), use `collect_process_dump`
 with `dumpType = "WithHeap"` and analyze offline with `dotnet-dump`.
+
+---
+
+## `collect_activities`
+
+Captures `ActivitySource` spans through the `Microsoft-Diagnostics-DiagnosticSource`
+EventPipe bridge, keeping completed span records inline and grouped rollups behind
+`query_collection`.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int` | — | Target process id |
+| `sources` | `string[]?` | `null` | Optional `ActivitySource` filters (`*` / `?` wildcards supported) |
+| `durationSeconds` | `int` | `10` | Window length |
+| `maxActivities` | `int` | `200` | Cap on captured span records retained inline + in the handle artifact |
+
+**Returns:** `ActivityCapture`:
+
+```json
+{
+  "processId": 12345,
+  "sourceFilters": ["MyCompany.Checkout*"],
+  "startedAt": "2026-05-18T20:00:00Z",
+  "duration": "00:00:10",
+  "totalActivities": 12,
+  "completedActivities": 12,
+  "activities": [
+    {
+      "sourceName": "MyCompany.Checkout",
+      "operationName": "POST /checkout",
+      "id": "00-3b2dc9c6a0b7dc27ba8e290f198d98f4-9f10a33a49390375-01",
+      "parentId": null,
+      "traceId": "3b2dc9c6a0b7dc27ba8e290f198d98f4",
+      "spanId": "9f10a33a49390375",
+      "parentSpanId": null,
+      "startedAt": "2026-05-18T20:00:00.120Z",
+      "stoppedAt": "2026-05-18T20:00:00.188Z",
+      "duration": "00:00:00.0680000",
+      "tags": { "http.method": "POST", "db.system": "sqlserver" }
+    }
+  ],
+  "bySource": [
+    {
+      "sourceName": "MyCompany.Checkout",
+      "count": 12,
+      "completedCount": 12,
+      "averageDurationMs": 32.7,
+      "maxDurationMs": 68.0
+    }
+  ],
+  "byOperation": [
+    {
+      "sourceName": "MyCompany.Checkout",
+      "operationName": "POST /checkout",
+      "count": 12,
+      "completedCount": 12,
+      "averageDurationMs": 32.7,
+      "maxDurationMs": 68.0
+    }
+  ]
+}
+```
+
+**Drilldown:** `query_collection(handle, view="bySource" | "byOperation" | "activities")`
+re-projects the same capture window without reopening EventPipe.
+
+**Notes:**
+
+- The collector listens to `Activity/Stop` bridge events, so every returned row is a
+  completed span with duration + tags already populated.
+- `sources` matches `ActivitySource.Name`, not operation names.
+- The provider supports a single Activity listener per session; this tool claims it for
+  the duration of the capture window.
 
 ---
 

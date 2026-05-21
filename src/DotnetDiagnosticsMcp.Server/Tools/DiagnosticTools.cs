@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
 using DotnetDiagnosticsMcp.Core;
+using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Collection;
 using DotnetDiagnosticsMcp.Core.Container;
@@ -923,17 +924,18 @@ public sealed class DiagnosticTools
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Re-projects a previously-collected counter/exception/GC/EventSource artifact under a " +
+        "Re-projects a previously-collected counter/exception/GC/EventSource/Activity artifact under a " +
         "named view, without re-running the underlying EventPipe session. Use the `handle` " +
-        "returned by snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source. " +
+        "returned by snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source / collect_activities. " +
         "Supported views per kind: counters → summary|byProvider; exception-snapshot → " +
         "summary|byType|recent; gc-events → summary|events|pauseHistogram; event-source → " +
-        "summary|byEventName|events. Handles expire ~10 minutes after collection.")]
+        "summary|byEventName|events; activities → summary|bySource|byOperation|activities. " +
+        "Handles expire ~10 minutes after collection.")]
     public static DiagnosticResult<CollectionQueryResult> QueryCollection(
         IDiagnosticHandleStore handles,
-        [Description("Handle returned by a prior collection tool (snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source).")] string handle,
+        [Description("Handle returned by a prior collection tool (snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source / collect_activities). ")] string handle,
         [Description("View name (kind-dependent). Defaults to 'summary'.")] string? view = null,
-        [Description("Cap on inline items for paginated views (recent / events / byType / byEventName). Must be >= 1. Defaults to 50.")] int topN = 50)
+        [Description("Cap on inline items for paginated views (recent / events / byType / byEventName / bySource / byOperation / activities). Must be >= 1. Defaults to 50.")] int topN = 50)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CollectionQueryResult>(nameof(handle), "is required");
         if (topN < 1) return InvalidArg<CollectionQueryResult>(nameof(topN), "must be >= 1");
@@ -958,7 +960,7 @@ public sealed class DiagnosticTools
                 $"Handle '{handle}' is of kind '{outcome.UnknownKind}' which query_collection does not support.",
                 new DiagnosticError(
                     "UnsupportedHandleKind",
-                    $"query_collection dispatches over kinds: {string.Join(", ", new[] { CollectionHandleKinds.Counters, CollectionHandleKinds.ExceptionSnapshot, CollectionHandleKinds.GcEvents, CollectionHandleKinds.EventSource })}.",
+                    $"query_collection dispatches over kinds: {string.Join(", ", new[] { CollectionHandleKinds.Counters, CollectionHandleKinds.ExceptionSnapshot, CollectionHandleKinds.GcEvents, CollectionHandleKinds.EventSource, CollectionHandleKinds.Activities })}.",
                     outcome.UnknownKind),
                 new NextActionHint("query_heap_snapshot", "Use the kind-specific drill-down tool for heap/thread/cpu handles.", null));
         }
@@ -1185,6 +1187,69 @@ public sealed class DiagnosticTools
             new NextActionHint("query_collection",
                 "Drill into these GC events without re-collecting (views: summary, events, pauseHistogram).",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "pauseHistogram" })),
+            resolved.Context);
+    }
+
+    [McpServerTool(
+        Name = "collect_activities",
+        Title = "Capture ActivitySource traces",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = false,
+        UseStructuredContent = true)]
+    [Description(
+        "Captures completed ActivitySource spans via the Microsoft-Diagnostics-DiagnosticSource EventPipe bridge. " +
+        "Enables the runtime provider with FilterAndPayloadSpecs, extracts operation/trace/span ids, parent linkage, tags, and duration from Activity stop events, aggregates them by source and operation, " +
+        "and returns a handle for query_collection drilldown.")]
+    public static async Task<DiagnosticResult<ActivityCapture>> CollectActivities(
+        IActivityCollector collector,
+        IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Optional ActivitySource name filters. Supports '*' and '?' wildcards. Null/empty captures all sources.")]
+        IReadOnlyList<string>? sources = null,
+        [Description("Duration of the capture window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Maximum number of captured activities to retain. Must be >= 1. Defaults to 200.")] int maxActivities = 200,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1) return InvalidArg<ActivityCapture>(nameof(durationSeconds), "must be >= 1");
+        if (maxActivities < 1) return InvalidArg<ActivityCapture>(nameof(maxActivities), "must be >= 1");
+
+        var resolved = await ResolveContextAsync<ActivityCapture>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
+        var capture = await collector
+            .CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), sources, maxActivities, cancellationToken)
+            .ConfigureAwait(false);
+
+        var truncated = capture.TotalActivities > capture.Activities.Count;
+        var topSource = capture.BySource.Count > 0 ? capture.BySource[0] : null;
+        var topOperation = capture.ByOperation.Count > 0 ? capture.ByOperation[0] : null;
+        var summary = capture.TotalActivities == 0
+            ? $"No ActivitySource spans in {durationSeconds}s. Verify the target emits ActivitySource instrumentation or widen the 'sources' filter."
+            : $"Captured {capture.Activities.Count} activity record(s) out of {capture.TotalActivities} observed over {durationSeconds}s across {capture.BySource.Count} source(s). " +
+              $"Top source: {topSource?.SourceName} ({topSource?.Count}). Top operation: {topOperation?.SourceName}/{topOperation?.OperationName} ({topOperation?.Count})." +
+              (truncated ? $" Truncated by maxActivities={maxActivities}; summaries reflect the stored subset." : string.Empty);
+
+        var primaryHint = topOperation is { MaxDurationMs: > 250 }
+            ? new NextActionHint("collect_cpu_sample",
+                $"Correlate the slowest captured operation ({topOperation.SourceName}/{topOperation.OperationName}, max {topOperation.MaxDurationMs:F1} ms) with CPU hotspots in the same process.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 })
+            : new NextActionHint("snapshot_counters",
+                "Cross-check ActivitySource timing with runtime counters for the same process.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds });
+
+        var handle = handles.Register(pid, CollectionHandleKinds.Activities, capture, CollectionHandleTtl);
+        return WithContext(DiagnosticResult.OkWithHandle(
+            capture,
+            summary,
+            handle.Id,
+            handle.ExpiresAt,
+            primaryHint,
+            new NextActionHint("query_collection",
+                "Drill into these activities without re-collecting (views: summary, bySource, byOperation, activities).",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byOperation" })),
             resolved.Context);
     }
 

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -66,6 +68,7 @@ app.MapGet("/validate", (string? email) =>
 
 // Memory leak: every call appends a 1 MiB byte[] to a static list.
 var cache = new List<byte[]>();
+var sampleActivitySource = new ActivitySource("CoreClrSample.Activities");
 app.MapGet("/leak", () =>
 {
     cache.Add(new byte[1_048_576]);
@@ -80,7 +83,7 @@ app.MapGet("/parse", () =>
     var ko = 0;
     for (var i = 0; i < 500; i++)
     {
-        try { _ = int.Parse(i % 3 == 0 ? "not-a-number" : i.ToString()); ok++; }
+        try { _ = int.Parse(i % 3 == 0 ? "not-a-number" : i.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture); ok++; }
         catch (FormatException) { ko++; }
     }
     return Results.Json(new { ok, ko });
@@ -113,6 +116,34 @@ app.MapGet("/generics", (int? iterations) =>
     return Results.Json(new { sumI, sumS });
 })
 .WithName("GenericInstantiations");
+
+app.MapGet("/activity", async (int? delayMs) =>
+{
+    var delay = Math.Clamp(delayMs ?? 50, 1, 2_000);
+
+    using var parent = sampleActivitySource.StartActivity("CoreClrSample.Outer");
+    parent?.SetTag("endpoint", "/activity");
+    parent?.SetTag("sample.delay_ms", delay);
+    parent?.SetTag("sample.kind", "demo");
+
+    await Task.Delay(delay);
+
+    using (var child = sampleActivitySource.StartActivity("CoreClrSample.Inner"))
+    {
+        child?.SetTag("child", "true");
+        child?.SetTag("db.system", "sample");
+        await Task.Delay(10);
+    }
+
+    return Results.Json(new
+    {
+        source = sampleActivitySource.Name,
+        traceId = parent?.TraceId.ToString(),
+        spanId = parent?.SpanId.ToString(),
+        id = parent?.Id,
+    });
+})
+.WithName("EmitActivityTrace");
 
 app.Run();
 
@@ -147,7 +178,7 @@ static class GenericFixture
     }
 }
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
+sealed record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {
     public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
 }

@@ -97,7 +97,7 @@ add `capabilities.add: ["SYS_PTRACE"]` to the sidecar container's
 `securityContext`, alongside the existing UID alignment.
 
 EventPipe-based tools (`snapshot_counters`, `collect_cpu_sample`,
-`collect_exceptions`, `collect_gc_events`, `collect_event_source`) do **not**
+`collect_exceptions`, `collect_gc_events`, `collect_activities`, `collect_event_source`) do **not**
 need `CAP_SYS_PTRACE` — they go through the diagnostic IPC socket only.
 
 ## Smoke-test the MCP endpoint

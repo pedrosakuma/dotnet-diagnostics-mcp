@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
@@ -152,6 +153,52 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
 
         snapshot.Counters.Should().NotBeEmpty();
         snapshot.Counters.Should().Contain(c => c.Provider == "System.Runtime" && c.Name == "cpu-usage");
+    }
+
+    [Fact]
+    public async Task CollectActivities_CapturesSampleActivitySourceEvents()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var collector = new EventPipeActivityCollector();
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/activity?delayMs=40");
+            response.EnsureSuccessStatusCode();
+        });
+
+        var capture = await collector.CollectAsync(
+            Pid,
+            TimeSpan.FromSeconds(4),
+            sources: new[] { "CoreClrSample.Activities" },
+            maxActivities: 20,
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        capture.TotalActivities.Should().BeGreaterThanOrEqualTo(2, "the /activity fixture emits a parent + child Activity");
+        capture.BySource.Should().Contain(summary => summary.SourceName == "CoreClrSample.Activities");
+        capture.ByOperation.Should().Contain(summary => summary.SourceName == "CoreClrSample.Activities" && summary.OperationName == "CoreClrSample.Outer");
+        capture.ByOperation.Should().Contain(summary => summary.SourceName == "CoreClrSample.Activities" && summary.OperationName == "CoreClrSample.Inner");
+
+        var outer = capture.Activities.Should().ContainSingle(activity =>
+            activity.SourceName == "CoreClrSample.Activities" && activity.OperationName == "CoreClrSample.Outer").Subject;
+        outer.Id.Should().NotBeNullOrWhiteSpace();
+        outer.TraceId.Should().NotBeNullOrWhiteSpace();
+        outer.SpanId.Should().NotBeNullOrWhiteSpace();
+        outer.Duration.Should().NotBeNull();
+        outer.Duration!.Value.Should().BeGreaterThan(TimeSpan.Zero);
+        outer.Tags.Should().ContainKey("endpoint");
+        outer.Tags["endpoint"].Should().Be("/activity");
+
+        capture.Activities.Should().Contain(activity =>
+            activity.SourceName == "CoreClrSample.Activities" &&
+            activity.OperationName == "CoreClrSample.Inner" &&
+            activity.ParentId == outer.Id);
     }
 
     [Fact]

@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using DotnetDiagnosticsMcp.Core;
+using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Collection;
 using DotnetDiagnosticsMcp.Core.Container;
@@ -22,6 +24,8 @@ namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
 [Collection(DiagnosticIntegrationGroup.Name)]
 public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
 {
+    private static readonly ActivitySource IntegrationActivitySource = new("DotnetDiagnosticsMcp.Server.IntegrationTests.Activities");
+
     private readonly AuthedFactory _factory;
 
     public McpToolsTests(AuthedFactory factory)
@@ -45,6 +49,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "collect_allocation_sample",
             "collect_exceptions",
             "collect_gc_events",
+            "collect_activities",
             "collect_event_source",
             "collect_process_dump",
             "inspect_dump",
@@ -80,6 +85,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["collect_allocation_sample"] = Array.Empty<string>(),
             ["collect_exceptions"] = Array.Empty<string>(),
             ["collect_gc_events"] = Array.Empty<string>(),
+            ["collect_activities"] = Array.Empty<string>(),
             ["collect_event_source"] = new[] { "providerName" },
             ["collect_process_dump"] = Array.Empty<string>(),
             ["inspect_dump"] = new[] { "dumpFilePath" },
@@ -112,9 +118,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         var mustNotBeRequired = new[]
         {
             "processId",
-            "durationSeconds", "topN", "maxRecent", "maxEvents", "eventLevel",
+            "durationSeconds", "topN", "maxRecent", "maxEvents", "maxActivities", "eventLevel",
             "dumpType", "outputDirectory", "rootMethodFilter", "maxDepth", "maxNodes",
-            "intervalSeconds", "sampleEverySeconds", "symptom", "hypothesis", "baseline", "maxToolCalls",
+            "intervalSeconds", "sampleEverySeconds", "sources", "symptom", "hypothesis", "baseline", "maxToolCalls",
             "dumpRequiresApproval", "format", "topHotspots", "buildAssemblyName",
             "previousInvestigationId", "fixCommitSha", "fixPullRequestUrl", "fixDescription", "notes",
             "resolveSourceLines", "symbolPath", "maxResolvedSources",
@@ -573,6 +579,45 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 GC.Collect(2, GCCollectionMode.Forced, blocking: true);
             }
         });
+    }
+
+    [Fact]
+    public async Task CollectActivities_CapturesGeneratedActivitySourceEvents()
+    {
+        await using var client = await ConnectAsync();
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var parent = IntegrationActivitySource.StartActivity("integration-parent");
+            parent?.SetTag("component", "tests");
+            await Task.Delay(30);
+            using var child = IntegrationActivitySource.StartActivity("integration-child");
+            child?.SetTag("db.system", "fake");
+            await Task.Delay(20);
+        });
+
+        var result = await client.CallToolAsync(
+            "collect_activities",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["sources"] = new[] { IntegrationActivitySource.Name },
+                ["durationSeconds"] = 3,
+                ["maxActivities"] = 20,
+            },
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        result.IsError.Should().NotBe(true);
+        var capture = DeserializeStructured<ActivityCapture>(result);
+        capture.Should().NotBeNull();
+        capture!.SourceFilters.Should().ContainSingle().Which.Should().Be(IntegrationActivitySource.Name);
+        capture.BySource.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name);
+        capture.ByOperation.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name && summary.OperationName == "integration-parent");
+        capture.ByOperation.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name && summary.OperationName == "integration-child");
+        capture.Activities.Should().Contain(activity => activity.SourceName == IntegrationActivitySource.Name && activity.OperationName == "integration-parent");
     }
 
     [Fact]

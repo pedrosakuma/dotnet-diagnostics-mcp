@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
@@ -48,6 +49,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<IExceptionCollector, EventPipeExceptionCollector>();
         services.AddSingleton<IGcCollector, EventPipeGcCollector>();
         services.AddSingleton<IEventSourceCollector, EventPipeEventSourceCollector>();
+        services.AddSingleton<IActivityCollector, EventPipeActivityCollector>();
         services.AddSingleton<IProcessDumper, DiagnosticsClientDumper>();
         services.AddSingleton<IDumpInspector, ClrMdDumpInspector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.ClrMdThreadSnapshotInspector>();
@@ -137,7 +139,8 @@ internal static class DiagnosticServiceRegistration
              server auto-selects it; `processId` is optional on every live-process tool.
           2. From the symptom narrow down: high CPU → `collect_cpu_sample`; allocations
              or GC pauses → `collect_gc_events`; errors → `collect_exceptions`;
-             framework-specific signals → `collect_event_source` with the right provider.
+             request/span traces → `collect_activities`; framework-specific signals →
+             `collect_event_source` with the right provider.
           3. `collect_process_dump` is the heavyweight last resort (Mini < Triage <
              WithHeap < Full). Use only when live collectors are insufficient.
 

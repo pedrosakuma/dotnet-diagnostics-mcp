@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
@@ -26,6 +27,7 @@ public static class CollectionQueryDispatcher
         CollectionHandleKinds.ExceptionSnapshot => new[] { "summary", "byType", "recent" },
         CollectionHandleKinds.GcEvents => new[] { "summary", "events", "pauseHistogram" },
         CollectionHandleKinds.EventSource => new[] { "summary", "byEventName", "events" },
+        CollectionHandleKinds.Activities => new[] { "summary", "bySource", "byOperation", "activities" },
         _ => Array.Empty<string>(),
     };
 
@@ -73,6 +75,8 @@ public static class CollectionQueryDispatcher
                 => Ok(Render(g, effectiveView, topN)),
             CollectionHandleKinds.EventSource when artifact is EventSourceCapture es
                 => Ok(Render(es, effectiveView, topN)),
+            CollectionHandleKinds.Activities when artifact is ActivityCapture a
+                => Ok(Render(a, effectiveView, topN)),
             _ => new DispatchOutcome(null, kind, null, null, null),
         };
     }
@@ -195,5 +199,43 @@ public static class CollectionQueryDispatcher
 
         return new CollectionQueryResult(
             CollectionHandleKinds.EventSource, view, es.ProcessId, es.StartedAt, es.Duration, payload);
+    }
+
+    private static CollectionQueryResult Render(ActivityCapture capture, string view, int topN)
+    {
+        var capturedCount = capture.Activities.Count;
+        var truncated = capture.TotalActivities > capturedCount;
+
+        object payload = view.ToLowerInvariant() switch
+        {
+            "bysource" => new ActivitiesBySourceView(
+                capture.SourceFilters,
+                capture.TotalActivities,
+                capturedCount,
+                truncated,
+                capture.BySource.Take(topN).ToList()),
+            "byoperation" => new ActivitiesByOperationView(
+                capture.SourceFilters,
+                capture.TotalActivities,
+                capturedCount,
+                truncated,
+                capture.ByOperation.Take(topN).ToList()),
+            "activities" => new ActivitiesListView(
+                capture.SourceFilters,
+                capture.TotalActivities,
+                Math.Min(topN, capture.Activities.Count),
+                capture.Activities.Take(topN).ToList()),
+            _ /* summary */ => new ActivitiesSummaryView(
+                capture.SourceFilters,
+                capture.TotalActivities,
+                capture.CompletedActivities,
+                capturedCount,
+                truncated,
+                capture.BySource.Take(topN).ToList(),
+                capture.ByOperation.Take(topN).ToList()),
+        };
+
+        return new CollectionQueryResult(
+            CollectionHandleKinds.Activities, view, capture.ProcessId, capture.StartedAt, capture.Duration, payload);
     }
 }
