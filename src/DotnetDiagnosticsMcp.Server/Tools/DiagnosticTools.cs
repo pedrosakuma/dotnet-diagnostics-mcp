@@ -166,6 +166,8 @@ public sealed class DiagnosticTools
         IContainerSignalsCollector collector,
         IProcessContextResolver resolver,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' drops the verbose Notes (caveats about cgroup v1, missing PSI, etc.) and keeps only the actionable signals. 'detail' / 'raw' include all Notes.")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         var resolved = await ResolveContextAsync<ContainerSignals>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -175,7 +177,14 @@ public sealed class DiagnosticTools
 
         var hints = BuildContainerHints(signals);
         var summary = SummariseContainerSignals(signals);
-        var ok = DiagnosticResult.Ok(signals, summary, hints);
+
+        var inlinePayload = signals;
+        if (depth == SamplingDepth.Summary && signals.Notes.Count > 0)
+        {
+            inlinePayload = signals with { Notes = Array.Empty<string>() };
+        }
+
+        var ok = DiagnosticResult.Ok(inlinePayload, summary, hints);
         return WithContext(ok, resolved.Context);
     }
 
@@ -351,6 +360,12 @@ public sealed class DiagnosticTools
                      "If null/empty, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel.")]
         string[]? providers = null,
         [Description("Refresh interval (in seconds) requested from each provider. Defaults to 1.")] int intervalSeconds = 1,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' returns ~12 headline counters " +
+                     "(CPU, working set, GC heap, gen-2 collections, threadpool, exceptions, lock contention, " +
+                     "ASP.NET Core requests/sec). 'detail' returns the full counter list (pre-#41 default). " +
+                     "'raw' is equivalent to detail for this tool. The complete snapshot is always retained " +
+                     "behind the issued handle — drill in with query_collection(handle, view=byProvider).")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1)
@@ -381,10 +396,26 @@ public sealed class DiagnosticTools
             : new NextActionHint("collect_gc_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
+        // The handle always carries the FULL snapshot (query_collection drilldown stays cheap),
+        // but the inline payload is depth-gated to keep first-look responses small.
         var handle = handles.Register(pid, CollectionHandleKinds.Counters, snapshot, CollectionHandleTtl);
+
+        var inlinePayload = snapshot;
+        var dropped = 0;
+        if (depth == SamplingDepth.Summary)
+        {
+            var filtered = HeadlineCounters.Filter(snapshot.Counters);
+            dropped = snapshot.Counters.Count - filtered.Count;
+            inlinePayload = snapshot with { Counters = filtered };
+        }
+
+        var summaryText = depth == SamplingDepth.Summary
+            ? $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — showing {inlinePayload.Counters.Count} headline (dropped {dropped}; handle has all). cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}."
+            : $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.";
+
         var ok = DiagnosticResult.OkWithHandle(
-            snapshot,
-            $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.",
+            inlinePayload,
+            summaryText,
             handle.Id,
             handle.ExpiresAt,
             hint,
@@ -419,6 +450,8 @@ public sealed class DiagnosticTools
         [Description("Optional NT_SYMBOL_PATH-style search path forwarded to the symbol reader (e.g. '/symbols;srv*https://msdl.microsoft.com/download/symbols'). Ignored when resolveSourceLines=false.")] string? symbolPath = null,
         [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to the requested topN so every emitted MethodIdentity carries its resolved SourceLocation when available.")] int? maxResolvedSources = null,
         [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous).")] bool runAsJob = false,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 hotspots inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full sample is always retained behind the issued handle — drill in with get_call_tree.")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<CpuSample>(nameof(durationSeconds), "must be >= 1");
@@ -495,12 +528,23 @@ public sealed class DiagnosticTools
         var sample = result.Summary;
         var top = sample.TopHotspots.Count > 0 ? sample.TopHotspots[0] : null;
         var handle = handles.Register(pid, "cpu-sample", result.Artifact, CpuSampleHandleTtl);
+
+        var inlineSample = sample;
+        var droppedHotspots = 0;
+        if (depth == SamplingDepth.Summary && sample.TopHotspots.Count > 3)
+        {
+            droppedHotspots = sample.TopHotspots.Count - 3;
+            inlineSample = sample with { TopHotspots = sample.TopHotspots.Take(3).ToArray() };
+        }
+
         var summary = top is not null
-            ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\")."
+            ? (depth == SamplingDepth.Summary && droppedHotspots > 0
+                ? $"Captured {sample.TotalSamples} samples over {durationSeconds}s — showing top {inlineSample.TopHotspots.Count} of {sample.TopHotspots.Count} hotspot(s) (dropped {droppedHotspots}; handle has all). Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\")."
+                : $"Captured {sample.TotalSamples} samples over {durationSeconds}s. Top method: {top.Frame.Method} ({top.InclusiveSamples} inclusive / {top.ExclusiveSamples} exclusive). Drill into the full call tree with get_call_tree(handle=\"{handle.Id}\").")
             : $"Captured {sample.TotalSamples} samples but no method aggregation surfaced — increase durationSeconds or verify the target is under load.";
 
         var ok = DiagnosticResult.OkWithHandle(
-            sample,
+            inlineSample,
             summary,
             handle.Id,
             handle.ExpiresAt,
@@ -673,6 +717,8 @@ public sealed class DiagnosticTools
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of blocking stacks returned inline (the full set lives behind the handle). Defaults to 25.")] int topN = 25,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 blocking stacks inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full artifact is always retained behind the issued handle — drill in with query_off_cpu_snapshot.")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<OffCpuSnapshot>(nameof(durationSeconds), "must be >= 1");
@@ -712,17 +758,30 @@ public sealed class DiagnosticTools
         var summary = result.Summary;
         var handle = handles.Register(pid, OffCpuHandleKind, result.Artifact, CpuSampleHandleTtl);
 
+        var inlineSummary = summary;
+        var droppedStacks = 0;
+        if (depth == SamplingDepth.Summary && summary.TopBlockingStacks.Count > 3)
+        {
+            droppedStacks = summary.TopBlockingStacks.Count - 3;
+            inlineSummary = summary with { TopBlockingStacks = summary.TopBlockingStacks.Take(3).ToArray() };
+        }
+
         var topStack = summary.TopBlockingStacks.Count > 0 ? summary.TopBlockingStacks[0] : null;
         var summaryText = topStack is not null
-            ? $"Captured {summary.SchedSwitches} switches across {summary.DistinctThreads} threads over {durationSeconds}s. " +
-              $"Total off-CPU: {summary.TotalOffCpuMicros / 1000.0:F1} ms. " +
-              $"Top blocker: {topStack.LeafFrame} ({topStack.OffCpuMicros / 1000.0:F1} ms, state={topStack.DominantState}). " +
-              $"Drill with query_off_cpu_snapshot(handle=\"{handle.Id}\")."
+            ? (depth == SamplingDepth.Summary && droppedStacks > 0
+                ? $"Captured {summary.SchedSwitches} switches across {summary.DistinctThreads} threads over {durationSeconds}s — showing top {inlineSummary.TopBlockingStacks.Count} of {summary.TopBlockingStacks.Count} blocking stack(s) (dropped {droppedStacks}; handle has all). " +
+                  $"Total off-CPU: {summary.TotalOffCpuMicros / 1000.0:F1} ms. " +
+                  $"Top blocker: {topStack.LeafFrame} ({topStack.OffCpuMicros / 1000.0:F1} ms, state={topStack.DominantState}). " +
+                  $"Drill with query_off_cpu_snapshot(handle=\"{handle.Id}\")."
+                : $"Captured {summary.SchedSwitches} switches across {summary.DistinctThreads} threads over {durationSeconds}s. " +
+                  $"Total off-CPU: {summary.TotalOffCpuMicros / 1000.0:F1} ms. " +
+                  $"Top blocker: {topStack.LeafFrame} ({topStack.OffCpuMicros / 1000.0:F1} ms, state={topStack.DominantState}). " +
+                  $"Drill with query_off_cpu_snapshot(handle=\"{handle.Id}\").")
             : $"Captured {summary.SchedSwitches} switches but no off-CPU spans closed within the window. " +
               "Either no thread blocked, or wakeups landed outside the capture — try a longer durationSeconds.";
 
         var ok = DiagnosticResult.OkWithHandle(
-            summary,
+            inlineSummary,
             summaryText,
             handle.Id,
             handle.ExpiresAt,
@@ -974,6 +1033,8 @@ public sealed class DiagnosticTools
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of individual exception details to return. Must be >= 1. Defaults to 100.")] int maxRecent = 100,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' drops the Recent[] list inline (keeps Total + ByType, which is what most diagnoses need). 'detail' includes Recent up to maxRecent. 'raw' is equivalent to detail. The full snapshot is always retained behind the issued handle — drill in with query_collection(handle, view=recent).")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<ExceptionSnapshot>(nameof(durationSeconds), "must be >= 1");
@@ -985,9 +1046,20 @@ public sealed class DiagnosticTools
 
         var snap = await collector.CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), maxRecent, cancellationToken).ConfigureAwait(false);
         var topType = snap.ByType.OrderByDescending(c => c.Count).FirstOrDefault();
+
+        var inlineSnap = snap;
+        var droppedRecent = 0;
+        if (depth == SamplingDepth.Summary && snap.Recent.Count > 0)
+        {
+            droppedRecent = snap.Recent.Count;
+            inlineSnap = snap with { Recent = Array.Empty<ManagedExceptionEvent>() };
+        }
+
         var summary = snap.TotalExceptions == 0
             ? $"No managed exceptions thrown in {durationSeconds}s. If you expected some, ensure the collection started before the workload."
-            : $"{snap.TotalExceptions} exception(s) over {durationSeconds}s; most common: {topType?.ExceptionType} ({topType?.Count}).";
+            : (depth == SamplingDepth.Summary && droppedRecent > 0
+                ? $"{snap.TotalExceptions} exception(s) over {durationSeconds}s; most common: {topType?.ExceptionType} ({topType?.Count}). Dropped {droppedRecent} Recent entry(ies) from inline (handle has all)."
+                : $"{snap.TotalExceptions} exception(s) over {durationSeconds}s; most common: {topType?.ExceptionType} ({topType?.Count}).");
 
         var primaryHint = snap.TotalExceptions > 0
             ? new NextActionHint("collect_event_source", "Subscribe to a domain-specific EventSource to correlate with the exception spikes.",
@@ -997,7 +1069,7 @@ public sealed class DiagnosticTools
 
         var handle = handles.Register(pid, CollectionHandleKinds.ExceptionSnapshot, snap, CollectionHandleTtl);
         return WithContext(DiagnosticResult.OkWithHandle(
-            snap,
+            inlineSnap,
             summary,
             handle.Id,
             handle.ExpiresAt,
@@ -1026,6 +1098,8 @@ public sealed class DiagnosticTools
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of GC events to return. Must be >= 1. Defaults to 200.")] int maxEvents = 200,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' drops the Events[] list inline (keeps totals, max pause, per-gen counts). 'detail' includes Events up to maxEvents. 'raw' is equivalent to detail. The full GC summary is always retained behind the issued handle — drill in with query_collection(handle, view=events|pauseHistogram).")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<GcSummary>(nameof(durationSeconds), "must be >= 1");
@@ -1036,9 +1110,20 @@ public sealed class DiagnosticTools
         var pid = resolved.ProcessId;
 
         var gc = await collector.CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), maxEvents, cancellationToken).ConfigureAwait(false);
+
+        var inlineGc = gc;
+        var droppedEvents = 0;
+        if (depth == SamplingDepth.Summary && gc.Events.Count > 0)
+        {
+            droppedEvents = gc.Events.Count;
+            inlineGc = gc with { Events = Array.Empty<GcEvent>() };
+        }
+
         var summary = gc.TotalCollections == 0
             ? $"No GC activity in {durationSeconds}s — heap is quiet or the workload is idle."
-            : $"{gc.TotalCollections} collection(s), max pause {gc.MaxPauseTime.TotalMilliseconds:F1}ms, total pause {gc.TotalPauseTime.TotalMilliseconds:F1}ms.";
+            : (depth == SamplingDepth.Summary && droppedEvents > 0
+                ? $"{gc.TotalCollections} collection(s), max pause {gc.MaxPauseTime.TotalMilliseconds:F1}ms, total pause {gc.TotalPauseTime.TotalMilliseconds:F1}ms. Dropped {droppedEvents} Event(s) from inline (handle has all)."
+                : $"{gc.TotalCollections} collection(s), max pause {gc.MaxPauseTime.TotalMilliseconds:F1}ms, total pause {gc.TotalPauseTime.TotalMilliseconds:F1}ms.");
 
         var primaryHint = gc.MaxPauseTime.TotalMilliseconds > 100
             ? new NextActionHint("collect_process_dump",
@@ -1049,7 +1134,7 @@ public sealed class DiagnosticTools
 
         var handle = handles.Register(pid, CollectionHandleKinds.GcEvents, gc, CollectionHandleTtl);
         return WithContext(DiagnosticResult.OkWithHandle(
-            gc,
+            inlineGc,
             summary,
             handle.Id,
             handle.ExpiresAt,
@@ -1082,6 +1167,8 @@ public sealed class DiagnosticTools
         [Description("EventSource keyword mask. -1 (default) means all keywords.")] long keywords = -1,
         [Description("Event verbosity level (0=LogAlways, 1=Critical, 2=Error, 3=Warning, 4=Informational, 5=Verbose). Defaults to 5.")] int eventLevel = 5,
         [Description("Maximum number of captured events to return. Must be >= 1. Defaults to 200.")] int maxEvents = 200,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' drops the Events[] list inline (keeps the Total count and metadata). 'detail' includes Events up to maxEvents. 'raw' is equivalent to detail. The full capture is always retained behind the issued handle — drill in with query_collection(handle, view=byEventName|events).")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(providerName)) return InvalidArg<EventSourceCapture>(nameof(providerName), "is required");
@@ -1095,13 +1182,23 @@ public sealed class DiagnosticTools
         var capture = await collector.CaptureAsync(
             pid, providerName, TimeSpan.FromSeconds(durationSeconds), keywords, eventLevel, maxEvents, cancellationToken).ConfigureAwait(false);
 
+        var inlineCapture = capture;
+        var droppedCapEvents = 0;
+        if (depth == SamplingDepth.Summary && capture.Events.Count > 0)
+        {
+            droppedCapEvents = capture.Events.Count;
+            inlineCapture = capture with { Events = Array.Empty<CapturedEvent>() };
+        }
+
         var summary = capture.Events.Count == 0
             ? $"No events from '{providerName}' in {durationSeconds}s. Verify the provider name and that it's actually instrumented in the target."
-            : $"Captured {capture.Events.Count} event(s) from '{providerName}' over {durationSeconds}s.";
+            : (depth == SamplingDepth.Summary && droppedCapEvents > 0
+                ? $"Captured {capture.Events.Count} event(s) from '{providerName}' over {durationSeconds}s. Dropped {droppedCapEvents} Event(s) from inline (handle has all)."
+                : $"Captured {capture.Events.Count} event(s) from '{providerName}' over {durationSeconds}s.");
 
         var handle = handles.Register(pid, CollectionHandleKinds.EventSource, capture, CollectionHandleTtl);
         return WithContext(DiagnosticResult.OkWithHandle(
-            capture,
+            inlineCapture,
             summary,
             handle.Id,
             handle.ExpiresAt,
@@ -1570,6 +1667,8 @@ public sealed class DiagnosticTools
         [Description("Maximum stack frames captured per thread. Defaults to 64.")] int maxFramesPerThread = 64,
         [Description("Include runtime frames (PInvoke trampolines, etc.) without an associated managed method. Off by default.")] bool includeRuntimeFrames = false,
         [Description("Include pure native frames where ClrMD cannot resolve a method. Off by default.")] bool includeNativeFrames = false,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' returns only the top-3 blocked threads inline and drops the SyncBlock lock-graph (use query_thread_snapshot(view=lock-graph) for the full graph). 'detail' returns the historical top-25 threads + top-25 locks. 'raw' is equivalent to detail. The full snapshot is always retained behind the issued handle.")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         var hasExplicitPid = processId.HasValue && processId.Value != 0;
@@ -1612,7 +1711,33 @@ public sealed class DiagnosticTools
             var origin = snapshot.Origin.ToString().ToLowerInvariant();
             var blocked = snapshot.Threads.Count(t => t.IsLikelyBlocked);
             var contended = snapshot.Locks.Count(l => l.IsContended);
-            var summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
+            ThreadSnapshotQueryResult summaryView;
+            string summary;
+            if (depth == SamplingDepth.Summary)
+            {
+                var topBlocked = snapshot.Threads
+                    .OrderByDescending(t => t.IsLikelyBlocked)
+                    .ThenByDescending(t => t.LockCount)
+                    .Take(3)
+                    .ToArray();
+                summaryView = new ThreadSnapshotQueryResult(handle.Id, "top-blocked", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
+                {
+                    Threads = topBlocked,
+                    Locks = Array.Empty<MonitorLockState>(),
+                };
+                var droppedThreads = snapshot.Threads.Count - topBlocked.Length;
+                summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Showing top {topBlocked.Length} blocked inline (dropped {droppedThreads} thread(s) and {snapshot.Locks.Count} lock(s); handle has all). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
+            }
+            else
+            {
+                summaryView = new ThreadSnapshotQueryResult(handle.Id, "threads-summary", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
+                {
+                    Threads = snapshot.Threads.Take(25).ToArray(),
+                    Locks = snapshot.Locks.Take(25).ToArray(),
+                };
+                summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
+            }
+
             if (snapshot.SnapshotKind is not "exact")
             {
                 summary += $" SnapshotKind={snapshot.SnapshotKind}";
@@ -1626,11 +1751,6 @@ public sealed class DiagnosticTools
             {
                 summary += $" Caveats: {string.Join(" ", snapshot.Warnings.Take(3))}";
             }
-            var summaryView = new ThreadSnapshotQueryResult(handle.Id, "threads-summary", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
-            {
-                Threads = snapshot.Threads.Take(25).ToArray(),
-                Locks = snapshot.Locks.Take(25).ToArray(),
-            };
 
             var hint = blocked > 0 || contended > 0
                 ? new NextActionHint("query_thread_snapshot",

@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using DotnetDiagnosticsMcp.Core.CpuSampling;
+using DotnetDiagnosticsMcp.Core.Memory;
 using Microsoft.Diagnostics.Symbols;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Etlx;
@@ -49,10 +51,14 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
     // and overlapping sessions cause buffer starvation / start failures.
     private static readonly SemaphoreSlim s_etwGate = new(1, 1);
     private readonly ILogger<EtwOffCpuSampler> _logger;
+    private readonly MvidReader _mvidReader;
 
-    public EtwOffCpuSampler(ILogger<EtwOffCpuSampler>? logger = null)
+    public EtwOffCpuSampler(
+        ILogger<EtwOffCpuSampler>? logger = null,
+        MvidReader? mvidReader = null)
     {
         _logger = logger ?? NullLogger<EtwOffCpuSampler>.Instance;
+        _mvidReader = mvidReader ?? new MvidReader();
     }
 
     [System.Runtime.Versioning.SupportedOSPlatformGuard("windows")]
@@ -122,7 +128,7 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
         try
         {
             await CaptureEtwAsync(sessionName, etlPath, duration, cancellationToken).ConfigureAwait(false);
-            return ProcessEtl(etlPath, processId, startedAt, duration, topN, notes);
+            return ProcessEtl(etlPath, processId, startedAt, duration, topN, notes, _mvidReader);
         }
         finally
         {
@@ -190,7 +196,8 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
         DateTimeOffset startedAt,
         TimeSpan duration,
         int topN,
-        List<string> notes)
+        List<string> notes,
+        MvidReader mvidReader)
     {
         if (!File.Exists(etlPath))
         {
@@ -208,7 +215,7 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
         try
         {
             using var traceLog = TraceLog.OpenOrConvert(etlxPath);
-            return AggregateFromTraceLog(traceLog, processId, startedAt, duration, topN, symbolPath, notes);
+            return AggregateFromTraceLog(traceLog, processId, startedAt, duration, topN, symbolPath, notes, mvidReader);
         }
         finally
         {
@@ -223,7 +230,8 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
         TimeSpan duration,
         int topN,
         string? symbolPath,
-        List<string> notes)
+        List<string> notes,
+        MvidReader mvidReader)
     {
         if (symbolPath is not null)
         {
@@ -260,7 +268,7 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
             if (cs.OldProcessID == processId)
             {
                 switches++;
-                var stack = ExtractStack(cs.CallStack());
+                var stack = ExtractStack(cs.CallStack(), mvidReader);
                 pending[cs.OldThreadID] = (
                     Ts: ts,
                     State: cs.OldThreadWaitReason.ToString(),
@@ -317,7 +325,7 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
             notes: notes.Count > 0 ? notes : null);
     }
 
-    private static List<OffCpuFrame> ExtractStack(TraceCallStack? stack)
+    private static List<OffCpuFrame> ExtractStack(TraceCallStack? stack, MvidReader mvidReader)
     {
         // TraceLog stacks are leaf→root (Caller chains to parent). The aggregator reverses to
         // root→leaf so we keep TraceLog's order here to match perf's leaf-first convention.
@@ -329,7 +337,8 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
             var ca = current.CodeAddress;
             var module = ca?.ModuleFile?.Name ?? string.Empty;
             var method = ResolveMethodName(ca);
-            frames.Add(new OffCpuFrame(module, method));
+            var identity = TryBuildIdentity(ca, module, mvidReader);
+            frames.Add(new OffCpuFrame(module, method, identity));
             current = current.Caller;
             depth++;
         }
@@ -342,6 +351,49 @@ public sealed class EtwOffCpuSampler : IOffCpuSampler
         var name = ca.FullMethodName;
         if (!string.IsNullOrEmpty(name) && name != "?") return name;
         return $"0x{ca.Address:X}";
+    }
+
+    /// <summary>
+    /// Builds a <see cref="MethodIdentity"/> handoff payload from a TraceLog
+    /// <see cref="TraceCodeAddress"/> when it points to a managed method. Mirrors
+    /// <see cref="EventPipeCpuSampler"/>'s extraction so on-CPU and off-CPU hotspots
+    /// hand off identical shapes to <c>dotnet-assembly-mcp</c>. Returns <c>null</c> for
+    /// native / kernel frames and for managed frames missing both an MVID-readable
+    /// module path and a metadata token (nothing useful to hand off).
+    /// </summary>
+    private static MethodIdentity? TryBuildIdentity(TraceCodeAddress? ca, string moduleNameFallback, MvidReader mvidReader)
+    {
+        if (ca is null) return null;
+        var method = ca.Method;
+        if (method is null) return null;
+
+        var moduleFile = method.MethodModuleFile;
+        var modulePath = moduleFile?.FilePath;
+        var moduleName = !string.IsNullOrEmpty(modulePath)
+            ? Path.GetFileName(modulePath)
+            : (moduleFile?.Name is { Length: > 0 } n ? n : moduleNameFallback);
+
+        var token = method.MethodToken;
+        var mvid = mvidReader.TryRead(modulePath);
+
+        // Skip frames where we have nothing useful for the handoff (native / unresolved JIT).
+        if (mvid is null && token == 0 && string.IsNullOrEmpty(modulePath) && string.IsNullOrEmpty(moduleName))
+        {
+            return null;
+        }
+
+        var parsed = EventPipeCpuSampler.ParseFullMethodName(method.FullMethodName);
+        return new MethodIdentity(
+            ModuleName: moduleName,
+            ModulePath: modulePath,
+            ModuleVersionId: mvid,
+            MetadataToken: token > 0 ? token : null,
+            TypeFullName: parsed.TypeFullName,
+            MethodName: parsed.MethodName,
+            GenericArity: parsed.GenericArity)
+        {
+            GenericTypeArguments = parsed.GenericTypeArguments,
+        };
     }
 
     private static string SafeProcessName(string? name)

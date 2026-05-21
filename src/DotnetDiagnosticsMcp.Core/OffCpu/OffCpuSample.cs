@@ -37,8 +37,15 @@ public sealed record OffCpuStackHotspot(
     string DominantState,
     IReadOnlyList<OffCpuFrame> Stack);
 
-/// <summary>A single resolved stack frame (kernel or user, demangled when possible).</summary>
-public sealed record OffCpuFrame(string Module, string Method);
+/// <summary>A single resolved stack frame (kernel or user, demangled when possible).
+/// <para><see cref="Identity"/> is populated for managed frames where the backend could
+/// reconstruct the canonical <c>(ModuleVersionId, MetadataToken)</c> handoff key
+/// (Slice 2c managed↔kernel stack merge) — null for native/kernel frames and for managed
+/// frames whose module path or MVID could not be resolved on the diagnostics box.</para></summary>
+public sealed record OffCpuFrame(
+    string Module,
+    string Method,
+    DotnetDiagnosticsMcp.Core.Memory.MethodIdentity? Identity = null);
 
 /// <summary>
 /// Full off-CPU data set retained behind a handle for drill-down queries. Keeps the per-thread

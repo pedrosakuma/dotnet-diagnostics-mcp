@@ -26,6 +26,7 @@ namespace DotnetDiagnosticsMcp.Core.OffCpu;
 public sealed class PerfSchedOffCpuSampler : IOffCpuSampler
 {
     private readonly ILogger<PerfSchedOffCpuSampler> _logger;
+    private readonly JitMapEmitter _jitMapEmitter;
     private readonly string _configuredPath;
     private string? _resolvedPath;
     private bool _resolutionAttempted;
@@ -33,10 +34,12 @@ public sealed class PerfSchedOffCpuSampler : IOffCpuSampler
 
     public PerfSchedOffCpuSampler(
         ILogger<PerfSchedOffCpuSampler>? logger = null,
-        string perfPath = "perf")
+        string perfPath = "perf",
+        JitMapEmitter? jitMapEmitter = null)
     {
         _logger = logger ?? NullLogger<PerfSchedOffCpuSampler>.Instance;
         _configuredPath = perfPath;
+        _jitMapEmitter = jitMapEmitter ?? new JitMapEmitter();
     }
 
     private string? ResolvePerfPath()
@@ -94,9 +97,32 @@ public sealed class PerfSchedOffCpuSampler : IOffCpuSampler
             $"diagnosticsmcp-offcpu-{processId}-{Guid.NewGuid():N}.data");
         var startedAt = DateTimeOffset.UtcNow;
         var notes = new List<string>();
+        // Hoisted above the try so the finally block can clean up the perf-map even when
+        // emission succeeded but a later step (perf record / script / parse) threw. The
+        // emitter writes /tmp/perf-<pid>.map, so a stale map left behind for a recycled PID
+        // would contaminate a later capture's symbolization.
+        JitMapResult? jitMap = null;
 
         try
         {
+            // Emit /tmp/perf-<pid>.map BEFORE perf record so that the rundown method addresses
+            // are visible to the kernel-side stack collector via perf's standard JIT-map path.
+            // Best-effort: failure leaves us with native-only frames in managed code, but does
+            // not block the sampling window. NativeAOT targets simply have nothing to emit.
+            try
+            {
+                jitMap = await _jitMapEmitter.EmitAsync(processId, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (jitMap is { MethodCount: > 0 })
+                {
+                    _logger.LogDebug("JIT perf-map emitted for pid {Pid}: {Methods} methods → {Path}",
+                        processId, jitMap.MethodCount, jitMap.MapPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "JIT perf-map emission failed for pid {Pid} (continuing without managed names).", processId);
+            }
+
             await RecordAsync(perfDataPath, duration, cancellationToken).ConfigureAwait(false);
 
             // Re-snapshot TIDs post-record and union: catches threads that were created
@@ -125,12 +151,21 @@ public sealed class PerfSchedOffCpuSampler : IOffCpuSampler
             catch { /* best effort */ }
 
             var script = await RunScriptAsync(perfDataPath, cancellationToken).ConfigureAwait(false);
-            var (spans, switches) = PerfSchedScriptParser.Parse(script, targetTids, flushPending: true);
+            Func<ulong, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity?>? resolver = jitMap is null
+                ? null
+                : jitMap.Resolve;
+            var (spans, switches) = PerfSchedScriptParser.Parse(script, targetTids, flushPending: true, addressResolver: resolver);
             return OffCpuAggregator.Aggregate(processId, startedAt, duration, spans, switches, topN, symbolSource: "perf-sched-dwarf", notes);
         }
         finally
         {
             TryDelete(perfDataPath);
+            // Delete /tmp/perf-<pid>.map so a recycled PID can't pick up stale managed
+            // symbols on the next capture (the OS would otherwise leave it until reboot).
+            if (jitMap is not null)
+            {
+                TryDelete(jitMap.MapPath);
+            }
         }
     }
 

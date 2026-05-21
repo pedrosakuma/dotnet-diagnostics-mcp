@@ -43,6 +43,42 @@ a single `<tool>` call when there is only one .NET process visible to the
 sidecar. The capability digest is cached per pid for 60 seconds so back-to-back
 tool calls within an investigation pay the probe cost once.
 
+### Verbosidade (`depth`)
+
+Issue [#41 slice 2c](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/41)
+adds a uniform `depth` parameter to every windowed collector. Values:
+`Summary` (default), `Detail`, `Raw`. Contract:
+
+- `Summary` returns a small, decision-grade payload inline (the smallest piece
+  of evidence the LLM needs to choose the next tool). This is the default.
+- `Detail` returns the historical pre-#41 payload (top-N hotspots, full
+  `Events[]` lists, full `Notes`, etc.).
+- `Raw` is reserved for parity with the artifact handle; today equivalent to
+  `Detail` for every tool.
+
+**Key invariant — the handle store always carries the FULL artifact**, regardless
+of `depth`. The depth knob only filters the *inline* response. Drilldown tools
+(`query_collection`, `query_off_cpu_snapshot`, `query_thread_snapshot`,
+`get_call_tree`) keep returning everything the original collection captured.
+
+Per-tool `Summary` semantics:
+
+| Tool | What `Summary` drops inline |
+| --- | --- |
+| `snapshot_counters` | All non-headline counters (keeps ~12: cpu-usage, working-set, gc-heap-size, gen-2-gc-count, threadpool-thread-count, threadpool-queue-length, exception-count, monitor-lock-contention-count + ASP.NET Core requests/failed/current + Kestrel connections-per-sec). |
+| `get_container_signals` | The `Notes[]` (caveats about cgroup v1 / missing PSI). Cgroup values themselves remain. |
+| `collect_cpu_sample` | `TopHotspots` truncated to the top 3 (handle keeps `topN`, default 25). |
+| `collect_off_cpu_sample` | `TopBlockingStacks` truncated to the top 3 (handle keeps `topN`). |
+| `collect_exceptions` | The `Recent[]` list. `Total` and `ByType` remain exact (counts at every depth). |
+| `collect_gc_events` | The `Events[]` list. Totals, max pause, per-gen counts remain exact. |
+| `collect_event_source` | The `Events[]` list. Provider + total count remain. Drill in with `query_collection(handle, view=byEventName)`. |
+| `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_thread_snapshot(view=lock-graph)`. |
+
+Explicit `topN` always wins over the depth default — if you pass
+`topN=10, depth=Summary` you get up to 10 hotspots inline (the LLM knows what
+it asked for).
+
+
 ### Prompts (curated playbooks)
 
 In addition to tools, the server exposes 6 MCP **Prompts** that pre-package the

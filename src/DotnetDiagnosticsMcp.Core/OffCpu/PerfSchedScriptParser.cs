@@ -39,7 +39,19 @@ internal static class PerfSchedScriptParser
     /// which would otherwise vanish from the report. Default <c>false</c> preserves the strict
     /// closed-pair semantics for unit tests.
     /// </param>
-    public static (IReadOnlyList<OffCpuSpan> Spans, long SchedSwitches) Parse(string output, HashSet<int> targetTids, bool flushPending = false)
+    /// <param name="addressResolver">
+    /// Optional callback that maps a frame's raw program-counter address (the leading hex token
+    /// in each <c>perf script</c> stack line) to its canonical
+    /// <see cref="DotnetDiagnosticsMcp.Core.Memory.MethodIdentity"/> handoff payload. Resolution
+    /// is by address — not by symbol string — so overloaded methods that share a rendered
+    /// <c>Type.Method</c> name still get their own correct identity. Frames whose address
+    /// falls outside any JIT'd range keep <c>Identity = null</c> (native, kernel, unresolved JIT).
+    /// </param>
+    public static (IReadOnlyList<OffCpuSpan> Spans, long SchedSwitches) Parse(
+        string output,
+        HashSet<int> targetTids,
+        bool flushPending = false,
+        Func<ulong, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity?>? addressResolver = null)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(targetTids);
@@ -77,7 +89,7 @@ internal static class PerfSchedScriptParser
                 // A line containing the sched_switch marker is the next event — let outer loop handle it.
                 if (line.Contains(" sched:sched_switch:", StringComparison.Ordinal)) break;
                 if (!char.IsWhiteSpace(line[0])) break;
-                var frame = ParseFrame(line);
+                var frame = ParseFrame(line, addressResolver);
                 if (frame is not null) ev.Stack.Add(frame);
                 i++;
             }
@@ -296,7 +308,9 @@ internal static class PerfSchedScriptParser
         return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : 0;
     }
 
-    private static OffCpuFrame? ParseFrame(string line)
+    private static OffCpuFrame? ParseFrame(
+        string line,
+        Func<ulong, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity?>? addressResolver = null)
     {
         // Indented: "    <hex addr> <symbol+offset> (<module>)" — same shape as the on-CPU parser.
         var trimmed = line.TrimStart();
@@ -318,12 +332,36 @@ internal static class PerfSchedScriptParser
         }
 
         var firstSpace = symbolPart.IndexOf(' ');
-        var symbol = firstSpace > 0 ? symbolPart[(firstSpace + 1)..].TrimStart() : symbolPart;
+        ulong? address = null;
+        string symbol;
+        if (firstSpace > 0)
+        {
+            var addrToken = symbolPart[..firstSpace];
+            if (ulong.TryParse(addrToken, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var addr))
+            {
+                address = addr;
+            }
+            symbol = symbolPart[(firstSpace + 1)..].TrimStart();
+        }
+        else
+        {
+            symbol = symbolPart;
+        }
+
         var plus = symbol.LastIndexOf("+0x", StringComparison.Ordinal);
         if (plus > 0) symbol = symbol[..plus];
 
         if (symbol.Length == 0) return null;
-        return new OffCpuFrame(Module: module, Method: symbol);
+        DotnetDiagnosticsMcp.Core.Memory.MethodIdentity? identity = null;
+        // Address-based lookup is authoritative: two overloads share the rendered symbol
+        // string ("MyApp.OrderService.Checkout") but live at distinct addresses with distinct
+        // metadata tokens. Resolving by address picks the right overload; resolving by symbol
+        // name would silently pick whichever the rundown happened to write last.
+        if (address.HasValue && addressResolver is not null)
+        {
+            identity = addressResolver(address.Value);
+        }
+        return new OffCpuFrame(Module: module, Method: symbol, Identity: identity);
     }
 }
 

@@ -294,6 +294,68 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         snapshot.Locks.Should().NotBeNull();
     }
 
+    [Fact]
+    public async Task JitMapEmitter_EmitsPerfMap_WithManagedSymbols()
+    {
+        // Slice 2c Eixo B live coverage: against a real CoreClrSample process the emitter
+        // must (1) open a rundown session, (2) capture at least one MethodDCStop, (3) write
+        // /tmp/perf-<pid>.map in the perf format, (4) populate the symbol→identity dict.
+        // Linux-only: macOS does not have /tmp/perf-<pid>.map convention and Windows
+        // ETW already attaches managed names to user frames natively.
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+        EnsureSampleRunning();
+
+        var emitter = new DotnetDiagnosticsMcp.Core.OffCpu.JitMapEmitter();
+        var result = await emitter.EmitAsync(Pid, rundownTimeout: TimeSpan.FromSeconds(5));
+
+        result.Should().NotBeNull("EventPipe rundown session against a running CoreCLR app must succeed");
+        result!.MapPath.Should().Be(Path.Combine(Path.GetTempPath(), $"perf-{Pid}.map"));
+        File.Exists(result.MapPath).Should().BeTrue("perf-<pid>.map file must be on disk for perf to consume");
+
+        try
+        {
+            result.MethodCount.Should().BeGreaterThan(0,
+                "the CLR rundown must enumerate at least a handful of already-JITted framework methods");
+            result.Methods.Should().NotBeEmpty("the per-method range list must be populated for parser enrichment");
+
+            var lines = await File.ReadAllLinesAsync(result.MapPath);
+            lines.Should().NotBeEmpty();
+            // Format: "<hexStart> <hexSize> <symbol>" — assert at least one line parses cleanly.
+            var parsed = lines.Where(l => l.Length > 0)
+                              .Select(l => l.Split(' ', 3))
+                              .Where(p => p.Length == 3)
+                              .ToList();
+            parsed.Should().NotBeEmpty("at least one entry must follow the perf-map line format");
+            parsed[0][0].Should().MatchRegex("^[0-9a-fA-F]+$", "start address is a hex string");
+            parsed[0][1].Should().MatchRegex("^[0-9a-fA-F]+$", "size is a hex string");
+            parsed[0][2].Should().NotBeNullOrWhiteSpace();
+
+            // At least some methods in the range list should carry an MVID — modules backing
+            // System.Private.CoreLib etc. exist on disk so MvidReader will read them.
+            result.Methods.Should().Contain(r => r.Identity.ModuleVersionId.HasValue,
+                "at least one rundown method should resolve its module MVID on disk");
+
+            // Sanity-check Resolve on the live data: pick the first range, ask for an address
+            // inside it, assert we get the same identity back. Address-based lookup is the
+            // parser's authoritative path so a broken Resolve would silently drop all enrichment.
+            // The end-exclusive boundary case is covered deterministically in
+            // JitMapResultResolveTests (an adjacent JIT range starting at sample.StartAddress +
+            // sample.Size is legal here and would make a boundary assertion flaky).
+            var sample = result.Methods.First(r => r.Size > 0);
+            result.Resolve(sample.StartAddress).Should().BeSameAs(sample.Identity,
+                "Resolve must return the range's identity for an address at the method start");
+            result.Resolve(sample.StartAddress + (sample.Size / 2)).Should().BeSameAs(sample.Identity,
+                "Resolve must return the same identity for an address in the middle of the range");
+        }
+        finally
+        {
+            try { File.Delete(result.MapPath); } catch { /* best effort */ }
+        }
+    }
+
     [Fact(Timeout = 60_000)]
     public async Task JitCapture_DumpsHotspotBytesToDisk()
     {
