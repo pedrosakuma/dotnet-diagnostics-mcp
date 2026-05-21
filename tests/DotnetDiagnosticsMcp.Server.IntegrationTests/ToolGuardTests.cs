@@ -213,6 +213,15 @@ public sealed class ToolGuardTests
 
         public Task<HeapSnapshotArtifact> InspectLiveAsync(int processId, DumpInspectionOptions? options = null, CancellationToken cancellationToken = default)
             => throw _ex;
+
+        public Task<HeapObjectInspection> InspectObjectAsync(HeapSnapshotArtifact snapshot, ulong address, CancellationToken cancellationToken = default)
+            => throw _ex;
+
+        public Task<HeapGcRootInspection> InspectGcRootAsync(HeapSnapshotArtifact snapshot, ulong address, CancellationToken cancellationToken = default)
+            => throw _ex;
+
+        public Task<HeapObjectSizeInspection> InspectObjectSizeAsync(HeapSnapshotArtifact snapshot, ulong address, CancellationToken cancellationToken = default)
+            => throw _ex;
     }
 
     private sealed class ThrowingThreadSnapshotInspector : IThreadSnapshotInspector

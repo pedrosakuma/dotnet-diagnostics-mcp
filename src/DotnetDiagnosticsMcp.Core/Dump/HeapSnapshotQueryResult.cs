@@ -12,6 +12,8 @@ public sealed record HeapSnapshotQueryResult(
     int ProcessId,
     DateTimeOffset CapturedAt)
 {
+    /// <summary>Echoes the exact object address targeted by address-based heap queries.</summary>
+    public ulong? Address { get; init; }
     /// <summary>Populated when <see cref="View"/> is <c>"top-types"</c>.</summary>
     public IReadOnlyList<TypeStat>? TopTypes { get; init; }
     /// <summary>Echoes the ranking used for <c>top-types</c> queries: <c>"bytes"</c> or <c>"instances"</c>.</summary>
@@ -32,4 +34,10 @@ public sealed record HeapSnapshotQueryResult(
     public IReadOnlyList<DelegateTargetStat>? DelegateTargets { get; init; }
     /// <summary>Populated when <see cref="View"/> is <c>"duplicate-strings"</c>.</summary>
     public IReadOnlyList<DuplicateStringStat>? DuplicateStrings { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"object"</c>.</summary>
+    public HeapObjectInspection? ObjectDetails { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"gcroot"</c>.</summary>
+    public HeapGcRootInspection? GcRoot { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"objsize"</c>.</summary>
+    public HeapObjectSizeInspection? ObjectSize { get; init; }
 }

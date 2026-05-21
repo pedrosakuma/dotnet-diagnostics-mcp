@@ -1439,15 +1439,21 @@ public sealed class DiagnosticTools
         "`fragmentation` (per-segment Gen/Kind/Length/Committed/Free bytes — high FreePercent on Gen2/LOH signals fragmentation), " +
         "`static-fields` (top static reference fields by directly-referenced object size — requires the original inspect call to have set includeStaticFields=true), " +
         "`delegate-targets` (delegate / event-handler subscribers grouped by (target type, method) — requires includeDelegateTargets=true), " +
-        "`duplicate-strings` (duplicate System.String contents ranked by aggregate retained bytes — requires includeDuplicateStrings=true). " +
+        "`duplicate-strings` (duplicate System.String contents ranked by aggregate retained bytes — requires includeDuplicateStrings=true), " +
+        "`object` (dump one managed object by address — SOS !do equivalent), " +
+        "`gcroot` (find a shortest GC-root chain for one object address — SOS !gcroot equivalent), " +
+        "`objsize` (compute the transitive retained size rooted at one object address — SOS !objsize equivalent). " +
         "Handles expire ~10 minutes after the capture and are invalidated when the target process exits (live origin only).")]
-    public static DiagnosticResult<HeapSnapshotQueryResult> QueryHeapSnapshot(
+    public static async Task<DiagnosticResult<HeapSnapshotQueryResult>> QueryHeapSnapshot(
         IDiagnosticHandleStore handles,
+        IDumpInspector inspector,
         [Description("Snapshot handle returned by inspect_dump or inspect_live_heap.")] string handle,
-        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets' or 'duplicate-strings'.")] string view = "top-types",
-        [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings'). Ignored by 'roots-by-kind' and 'retention-paths'.")] int topN = 50,
+        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot' or 'objsize'.")] string view = "top-types",
+        [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings'). Ignored by 'roots-by-kind', 'retention-paths', 'object', 'gcroot' and 'objsize'.")] int topN = 50,
         [Description("For view='top-types': ranking — 'bytes' (default) or 'instances'.")] string rankBy = "bytes",
-        [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null)
+        [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null,
+        [Description("For view='object', 'gcroot' and 'objsize': managed object address (decimal or 0x-prefixed hex).")] string? address = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<HeapSnapshotQueryResult>(nameof(handle), "is required");
         if (topN < 1) return InvalidArg<HeapSnapshotQueryResult>(nameof(topN), "must be >= 1");
@@ -1463,18 +1469,100 @@ public sealed class DiagnosticTools
         }
 
         var normalizedView = view.Trim().ToLowerInvariant();
-        return normalizedView switch
+        switch (normalizedView)
         {
-            "top-types" => QueryTopTypes(snapshot, handle, topN, rankBy),
-            "retention-paths" => QueryRetentionPaths(snapshot, handle, typeFullName, topN),
-            "roots-by-kind" => QueryRootsByKind(snapshot, handle),
-            "finalizer-queue" => QueryFinalizerQueue(snapshot, handle, topN),
-            "fragmentation" => QueryFragmentation(snapshot, handle, topN),
-            "static-fields" => QueryStaticFields(snapshot, handle, topN),
-            "delegate-targets" => QueryDelegateTargets(snapshot, handle, topN),
-            "duplicate-strings" => QueryDuplicateStrings(snapshot, handle, topN),
-            _ => InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets' or 'duplicate-strings' (got '{view}')"),
+            case "top-types":
+                return QueryTopTypes(snapshot, handle, topN, rankBy);
+            case "retention-paths":
+                return QueryRetentionPaths(snapshot, handle, typeFullName, topN);
+            case "roots-by-kind":
+                return QueryRootsByKind(snapshot, handle);
+            case "finalizer-queue":
+                return QueryFinalizerQueue(snapshot, handle, topN);
+            case "fragmentation":
+                return QueryFragmentation(snapshot, handle, topN);
+            case "static-fields":
+                return QueryStaticFields(snapshot, handle, topN);
+            case "delegate-targets":
+                return QueryDelegateTargets(snapshot, handle, topN);
+            case "duplicate-strings":
+                return QueryDuplicateStrings(snapshot, handle, topN);
+            case "object":
+            case "gcroot":
+            case "objsize":
+                if (string.IsNullOrWhiteSpace(address)) return InvalidArg<HeapSnapshotQueryResult>(nameof(address), $"is required for view='{normalizedView}'");
+                if (!TryParseUnsignedHexOrInt(address, out var parsedAddress) || parsedAddress == 0)
+                {
+                    return InvalidArg<HeapSnapshotQueryResult>(nameof(address), "must be a non-zero address (decimal or 0x-prefixed hex)");
+                }
+
+                return await GuardAttachAsync(
+                    "query_heap_snapshot",
+                    snapshot.Origin == HeapSnapshotOrigin.Live ? snapshot.ProcessId : null,
+                    async () => normalizedView switch
+                    {
+                        "object" => QueryObject(snapshot, handle, await inspector.InspectObjectAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false)),
+                        "gcroot" => QueryGcRoot(snapshot, handle, await inspector.InspectGcRootAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false)),
+                        _ => QueryObjectSize(snapshot, handle, await inspector.InspectObjectSizeAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false)),
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            default:
+                return InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot' or 'objsize' (got '{view}')");
+        }
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryObject(
+        HeapSnapshotArtifact snapshot, string handle, HeapObjectInspection inspection)
+    {
+        var origin = snapshot.Origin.ToString();
+        var summary = $"Returning object 0x{inspection.Address:x} from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}) — `{inspection.TypeFullName}` ({inspection.Size:N0} bytes, {inspection.Generation}/{inspection.SegmentKind}).";
+        if (snapshot.Origin == HeapSnapshotOrigin.Live)
+        {
+            summary += " Live-object addresses can move after a GC; re-run inspect_live_heap if this address stops resolving.";
+        }
+
+        var result = new HeapSnapshotQueryResult(handle, "object", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            Address = inspection.Address,
+            ObjectDetails = inspection,
         };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryGcRoot(
+        HeapSnapshotArtifact snapshot, string handle, HeapGcRootInspection inspection)
+    {
+        var origin = snapshot.Origin.ToString();
+        var summary = $"Returning GC-root chain for 0x{inspection.Address:x} from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}) — `{inspection.TypeFullName}` with {inspection.Chain.Count:N0} frame(s).";
+        if (inspection.Truncated)
+        {
+            summary += " Chain is truncated by the BFS/depth safety caps.";
+        }
+
+        var result = new HeapSnapshotQueryResult(handle, "gcroot", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            Address = inspection.Address,
+            GcRoot = inspection,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryObjectSize(
+        HeapSnapshotArtifact snapshot, string handle, HeapObjectSizeInspection inspection)
+    {
+        var origin = snapshot.Origin.ToString();
+        var summary = $"Returning object graph size for 0x{inspection.Address:x} from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}) — `{inspection.TypeFullName}` retains {inspection.RetainedBytes:N0} bytes across {inspection.ObjectCount:N0} object(s).";
+        if (inspection.Truncated)
+        {
+            summary += " Result is truncated by the safety cap and is therefore a lower bound.";
+        }
+
+        var result = new HeapSnapshotQueryResult(handle, "objsize", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            Address = inspection.Address,
+            ObjectSize = inspection,
+        };
+        return DiagnosticResult.Ok(result, summary);
     }
 
     private static DiagnosticResult<HeapSnapshotQueryResult> QueryTopTypes(

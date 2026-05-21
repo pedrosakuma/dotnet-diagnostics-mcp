@@ -274,6 +274,51 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task DumpInspector_InspectsObjectGcRootAndObjectSize_FromLiveHeapSnapshot()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+
+        for (var i = 0; i < 4; i++)
+        {
+            var response = await http.GetAsync("/leak");
+            response.EnsureSuccessStatusCode();
+        }
+
+        var inspector = new ClrMdDumpInspector();
+        var snapshot = await inspector.InspectLiveAsync(
+            Pid,
+            new DumpInspectionOptions(TopTypes: 25, IncludeRetentionPaths: true),
+            CancellationToken.None);
+
+        var leakedBufferPath = snapshot.RetentionPaths?
+            .FirstOrDefault(path => string.Equals(path.TargetTypeFullName, "System.Byte[]", StringComparison.Ordinal));
+        leakedBufferPath.Should().NotBeNull(
+            "the /leak workload retains 1 MiB byte[] objects that should surface in the live heap snapshot's retention paths");
+
+        var leakedBufferAddress = leakedBufferPath!.TargetObjectAddress;
+        var objectView = await inspector.InspectObjectAsync(snapshot, leakedBufferAddress, CancellationToken.None);
+        objectView.TypeFullName.Should().Be("System.Byte[]");
+        objectView.IsArray.Should().BeTrue();
+        objectView.ArrayLength.Should().Be(1_048_576);
+        objectView.ArraySample.Should().NotBeNull();
+        objectView.ArraySample!.Should().NotBeEmpty();
+        objectView.ArraySample.Should().OnlyContain(e => e.Value == "0",
+            "freshly-allocated byte[] entries are zero-initialized");
+
+        var gcrootView = await inspector.InspectGcRootAsync(snapshot, leakedBufferAddress, CancellationToken.None);
+        gcrootView.Chain.Should().NotBeEmpty();
+        gcrootView.Chain[0].RootKind.Should().NotBeNullOrWhiteSpace(
+            "the leaked byte[] must remain reachable from some GC root through the endpoint's retained list");
+        gcrootView.Chain[^1].ObjectAddress.Should().Be(leakedBufferAddress);
+
+        var objectSize = await inspector.InspectObjectSizeAsync(snapshot, leakedBufferAddress, CancellationToken.None);
+        objectSize.ObjectCount.Should().Be(1, "a byte[] retains only itself in the object graph walk");
+        objectSize.RetainedBytes.Should().Be(objectView.Size);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task ThreadSnapshot_InspectLive_EnumeratesManagedThreads()
     {
         EnsureSampleRunning();
