@@ -1,7 +1,9 @@
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Capabilities;
+using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Dump;
+using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Threads;
 using DotnetDiagnosticsMcp.Server.Tools;
@@ -115,6 +117,44 @@ public sealed class ToolGuardTests
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
+    }
+
+    [Fact]
+    public void GetCallTree_ProjectsMethodIdentityOntoReturnedFrames()
+    {
+        var child = new CallTreeNode(
+            new SampledFrame("MyApp.dll", "MyApp.Services.OrderService.Process"),
+            10,
+            4,
+            Array.Empty<CallTreeNode>());
+        var artifact = new CpuSampleTraceArtifact(
+            123,
+            DateTimeOffset.UtcNow,
+            TimeSpan.FromSeconds(5),
+            10,
+            new CallTreeNode(new SampledFrame(string.Empty, "<root>"), 10, 0, new[] { child }),
+            MethodIdentities: new Dictionary<SymbolRef, MethodIdentity>
+            {
+                [new SymbolRef("MyApp.dll", "MyApp.Services.OrderService.Process")] = new MethodIdentity(
+                    ModuleName: "MyApp.dll",
+                    ModulePath: "/app/MyApp.dll",
+                    ModuleVersionId: Guid.Parse("44444444-4444-4444-4444-444444444444"),
+                    MetadataToken: 0x06000456,
+                    TypeFullName: "MyApp.Services.OrderService",
+                    MethodName: "Process",
+                    GenericArity: 0),
+            });
+        var handles = new MemoryDiagnosticHandleStore();
+        var handle = handles.Register(artifact.ProcessId, "cpu-sample", artifact, TimeSpan.FromMinutes(10));
+
+        var result = DiagnosticTools.GetCallTree(handles, handle.Id, maxDepth: 4, maxNodes: 10);
+
+        result.IsError.Should().BeFalse();
+        var view = result.Data;
+        view.Should().NotBeNull();
+        view!.Root.Children.Single().Identity.Should().NotBeNull();
+        view.Root.Children.Single().Identity!.MetadataToken.Should().Be(0x06000456);
+        view.Root.Children.Single().Identity.ModuleVersionId.Should().Be(Guid.Parse("44444444-4444-4444-4444-444444444444"));
     }
 
     [Fact]

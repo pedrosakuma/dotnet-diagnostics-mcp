@@ -557,6 +557,7 @@ public sealed class DiagnosticTools
         "On NativeAOT, GCAllocationTick events fire but TypeName is empty — all events roll up under '<unknown>' " +
         "and only the total event count and bytes are meaningful; use collect_cpu_sample for per-site attribution on AOT. " +
         "Returns two ranked lists (TopByBytes, TopByCount) and a handle for call-site drill-down via get_call_tree. " +
+        "When managed symbols are available, get_call_tree projects MethodIdentity (MVID + token) onto the returned frames for dotnet-assembly-mcp handoff. " +
         "Run after snapshot_counters shows elevated GC pressure or growing gen0/gen1 heap sizes.")]
     public static async Task<DiagnosticResult<AllocationSample>> CollectAllocationSample(
         EventPipeAllocationSampler sampler,
@@ -628,7 +629,7 @@ public sealed class DiagnosticTools
         UseStructuredContent = true)]
     [Description(
         "Returns a pruned caller→callee tree from a prior collect_cpu_sample or collect_allocation_sample run, " +
-        "addressed by its handle. " +
+        "addressed by its handle. Frames are enriched with MethodIdentity (MVID + metadata token) when the producer captured one. " +
         "Use `rootMethodFilter` to anchor the walk at a method substring (case-insensitive). " +
         "`maxDepth` and `maxNodes` bound the response size so the LLM stays under its token budget. " +
         "Handles expire ~10 minutes after collection.")]
@@ -653,7 +654,7 @@ public sealed class DiagnosticTools
                     new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
         }
 
-        var root = artifact.Root;
+        var root = CallTreeIdentityProjector.Stamp(artifact.Root, artifact.MethodIdentities);
         if (!string.IsNullOrWhiteSpace(rootMethodFilter))
         {
             var match = FindHighestRankedDescendant(root, rootMethodFilter);

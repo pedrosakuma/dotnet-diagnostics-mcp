@@ -17,9 +17,14 @@ namespace DotnetDiagnosticsMcp.Core.CpuSampling;
 /// object plus a call stack.
 /// </summary>
 /// <remarks>
+/// <para>Empirical probe against .NET SDK 10.0.201 / CoreCLR: enabling
+/// <c>Microsoft-DotNETCore-SampleProfiler</c> with keyword <c>0x80000000</c> still emitted only
+/// <c>Thread/Sample</c> CPU samples, not any allocation-specific event. Until the runtime starts
+/// surfacing <c>AllocationSampled</c>, <c>GCAllocationTick</c> remains the supported allocation
+/// backend.</para>
 /// <para><b>CoreCLR</b>: <c>TypeName</c> is fully populated; call stacks resolve to managed
 /// method names via TraceEvent rundown. <c>MethodIdentity</c> (MVID + token) is emitted for
-/// top-N hotspot frames, enabling the assembly-mcp handoff.</para>
+/// call-tree frames, enabling the assembly-mcp handoff.</para>
 /// <para><b>NativeAOT</b>: the GC fires <c>GCAllocationTick</c> events, but the
 /// <c>TypeName</c> field is empty — NativeAOT strips managed type metadata at compile time and
 /// does not populate this field. All events will roll up under <c>&lt;unknown&gt;</c>. Call
@@ -231,7 +236,7 @@ public sealed class EventPipeAllocationSampler
                 .Select(a => a.ToRecord())
                 .ToList();
 
-            // Build MethodIdentity for the top-N frames in the call tree (CoreCLR only;
+            // Build MethodIdentity for every symbolized frame in the call tree (CoreCLR only;
             // NativeAOT frames won't have IL tokens but the frame names are still surfaced).
             var ranked = modules.Keys
                 .Where(k => traceCodeAddressByFrameKey.ContainsKey(k))
@@ -273,40 +278,32 @@ public sealed class EventPipeAllocationSampler
                 : (moduleFile?.Name is { Length: > 0 } n ? n : modules.GetValueOrDefault(key, string.Empty));
 
             var token = method.MethodToken;
+            var parsed = EventPipeCpuSampler.ParseFullMethodName(method.FullMethodName);
             var mvid = _mvidReader.TryRead(modulePath);
 
-            if (mvid is null && token == 0) continue;
+            if (mvid is null && token == 0 && string.IsNullOrEmpty(modulePath) && string.IsNullOrEmpty(moduleName))
+            {
+                continue;
+            }
 
-            var display = !string.IsNullOrEmpty(moduleName) && key.StartsWith(moduleName + "!", StringComparison.Ordinal)
-                ? key[(moduleName.Length + 1)..]
+            var module = modules.GetValueOrDefault(key, moduleName ?? string.Empty);
+            var display = !string.IsNullOrEmpty(module) && key.StartsWith(module + "!", StringComparison.Ordinal)
+                ? key[(module.Length + 1)..]
                 : key;
-            var symbol = new SymbolRef(moduleName, display);
-
-            if (result.ContainsKey(symbol)) continue;
-
-            // Extract method name from FullMethodName ('Namespace.Type.Method(params)' → 'Method').
-            var methodName = ExtractMethodName(method.FullMethodName);
+            var symbol = new SymbolRef(module, display);
             result[symbol] = new MethodIdentity(
-                MethodName: methodName,
-                GenericArity: 0,
                 ModuleName: moduleName,
                 ModulePath: modulePath,
                 ModuleVersionId: mvid,
-                MetadataToken: token != 0 ? token : null,
-                TypeFullName: null);
+                MetadataToken: token > 0 ? token : null,
+                TypeFullName: parsed.TypeFullName,
+                MethodName: parsed.MethodName,
+                GenericArity: parsed.GenericArity)
+            {
+                GenericTypeArguments = parsed.GenericTypeArguments,
+            };
         }
         return result;
-    }
-
-    /// <summary>
-    /// Extracts the simple method name from a TraceEvent <c>FullMethodName</c>.
-    /// The format is typically <c>Namespace.Type.Method(params)</c>; this returns <c>Method</c>.
-    /// </summary>
-    private static string ExtractMethodName(string fullMethodName)
-    {
-        // Strip trailing parameter signature first, then take the last dot-delimited segment.
-        var withoutParams = fullMethodName.Split('(')[0];
-        return withoutParams.Split('.').LastOrDefault() ?? string.Empty;
     }
 
     private static string FormatFrame(TraceCallStack frame)
