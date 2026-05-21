@@ -1613,6 +1613,19 @@ public sealed class DiagnosticTools
             var blocked = snapshot.Threads.Count(t => t.IsLikelyBlocked);
             var contended = snapshot.Locks.Count(l => l.IsContended);
             var summary = $"{origin} thread snapshot of pid {snapshot.ProcessId}: {snapshot.Threads.Count} thread(s) ({blocked} likely blocked), {snapshot.Locks.Count} SyncBlock(s) ({contended} contended). Walk {snapshot.WalkDuration.TotalMilliseconds:N0} ms. Handle `{handle.Id}` (~10 min). Use query_thread_snapshot(view=top-blocked|threads-summary|stack|lock-graph).";
+            if (snapshot.SnapshotKind is not "exact")
+            {
+                summary += $" SnapshotKind={snapshot.SnapshotKind}";
+                if (snapshot.WindowSeconds is int w)
+                {
+                    summary += $" over {w}s window";
+                }
+                summary += ".";
+            }
+            if (snapshot.Warnings is { Count: > 0 })
+            {
+                summary += $" Caveats: {string.Join(" ", snapshot.Warnings.Take(3))}";
+            }
             var summaryView = new ThreadSnapshotQueryResult(handle.Id, "threads-summary", origin, snapshot.ProcessId, snapshot.CapturedAt, snapshot.WalkDuration)
             {
                 Threads = snapshot.Threads.Take(25).ToArray(),

@@ -87,3 +87,32 @@ public sealed class LinuxNativeThreadSnapshotBackend : IThreadSnapshotBackend
         CancellationToken cancellationToken = default)
         => throw new NotSupportedException("Linux-native backend does not support dump snapshots.");
 }
+
+public sealed class PerfReplayThreadSnapshotBackend : IThreadSnapshotBackend
+{
+    private readonly PerfReplayThreadSnapshotInspector _inspector;
+
+    public PerfReplayThreadSnapshotBackend(PerfReplayThreadSnapshotInspector inspector) => _inspector = inspector;
+
+    public string BackendId => "perf-replay-approx";
+
+    public int Order => 200;
+
+    public string? Preconditions => "Requires Linux perf sched capture (perf in PATH plus CAP_PERFMON or perf_event_paranoid <= -1).";
+
+    public bool CanHandleLive(RuntimeFlavor runtime) => runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsLinux();
+
+    public bool CanHandleDump => false;
+
+    public Task<ThreadSnapshotArtifact> InspectLiveAsync(
+        int processId,
+        ThreadSnapshotOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => _inspector.InspectLiveAsync(processId, options, cancellationToken);
+
+    public Task<ThreadSnapshotArtifact> InspectDumpAsync(
+        string dumpFilePath,
+        ThreadSnapshotOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("Perf-replay backend does not support dump snapshots.");
+}

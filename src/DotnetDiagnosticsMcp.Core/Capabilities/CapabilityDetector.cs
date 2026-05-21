@@ -56,7 +56,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var ptrace = PtraceProbe.Detect();
         var euStackAvailable = IsEuStackAvailable();
         var (canCollectThreadSnapshot, threadSnapshotSource, threadSnapshotPreconditions) =
-            EvaluateThreadSnapshotSupport(runtime, ptrace, euStackAvailable);
+            EvaluateThreadSnapshotSupport(runtime, ptrace, euStackAvailable, canSampleOffCpu);
         // CoreCLR always supports SampleProfiler; whether the 2-second probe happened to
         // catch a Thread/Sample event is a function of workload, not capability. As long
         // as we classified the runtime as CoreCLR (preferably from module inspection,
@@ -348,10 +348,11 @@ public sealed class CapabilityDetector : ICapabilityDetector
         return primary;
     }
 
-    private static (bool CanCollect, string? Source, string? Preconditions) EvaluateThreadSnapshotSupport(
+    internal static (bool CanCollect, string? Source, string? Preconditions) EvaluateThreadSnapshotSupport(
         RuntimeFlavor runtime,
         PtraceProbeResult ptrace,
-        bool euStackAvailable)
+        bool euStackAvailable,
+        bool canSampleOffCpu)
     {
         if (runtime == RuntimeFlavor.CoreClr)
         {
@@ -363,26 +364,28 @@ public sealed class CapabilityDetector : ICapabilityDetector
 
         if (runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsLinux())
         {
-            if (!euStackAvailable)
+            if (euStackAvailable && ptrace.CanAttach)
             {
                 return (
-                    CanCollect: false,
-                    Source: null,
-                    Preconditions: "eu-stack (elfutils) is missing from PATH.");
+                    CanCollect: true,
+                    Source: "linux-native-stack",
+                    Preconditions: null);
             }
 
-            if (!ptrace.CanAttach)
+            if (canSampleOffCpu)
             {
                 return (
-                    CanCollect: false,
-                    Source: null,
-                    Preconditions: ptrace.Reason);
+                    CanCollect: true,
+                    Source: "perf-replay-approx",
+                    Preconditions: "Approximate last-seen stacks from a short perf sched_switch replay window (not point-in-time).");
             }
 
             return (
-                CanCollect: true,
-                Source: "linux-native-stack",
-                Preconditions: null);
+                CanCollect: false,
+                Source: null,
+                Preconditions: !euStackAvailable
+                    ? "eu-stack (elfutils) is missing from PATH and perf replay is unavailable (perf/CAP_PERFMON missing)."
+                    : ptrace.Reason);
         }
 
         if (runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsWindows())
