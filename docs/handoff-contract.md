@@ -44,6 +44,7 @@ JSON summary as `HotspotSummary.Identity`):
 | `MethodName`      | `string`  | display              | Bare method name (no signature)                                          |
 | `GenericArity`    | `int`     | sanity-check         | Number of generic method parameters; `0` for non-generic methods         |
 | `GenericTypeArguments` | `GenericInstantiation?` | closed-signature drilldown | Closed instantiation when the producer can extract it structurally from the trace — see below. `null` for non-generic methods AND for any frame where the producer couldn't recover the instantiation (consumer falls back to the open def) |
+| `ClosedSignature` | `string?` | display | Best-effort normalized closed-signature display string (for example `MyApp.Handler`1[System.Int32].Handle<System.String>`). Display-only; the canonical closed-signature handoff remains `GenericTypeArguments` + `(moduleVersionId, metadataToken)`. |
 | `Source`          | `SourceLocation?` | inline source jump  | `{ File, StartLine, SourceLink?, EndLine? }` resolved locally from the PDB embedded in (or sitting next to) the module on the diagnostics box. When non-null the LLM can open `File:StartLine` directly — the partner `dotnet-assembly-mcp.get_method_source` becomes optional. `null` when no PDB is reachable, the method has no non-hidden sequence points (compiler-generated bodies), or source resolution was explicitly disabled (issue #28) |
 
 ### `GenericInstantiation` (issue #21)
@@ -75,20 +76,19 @@ closed signature independently.
 > treat `System.__Canon` as "any reference type" for display purposes. This is a runtime
 > artefact, not a bug in the handoff.
 
-> **Linux EventPipe — method-level closed args are not recoverable.** Confirmed runtime
+> **Linux EventPipe — method-level closed args need opt-in enrichment.** Confirmed runtime
 > limitation: the `MethodLoadVerbose_V2` payload on Linux EventPipe carries the **open** IL
 > signature only (e.g. `generic !!0 (!!0)` for `Echo<T>(T)` — `!!N` is method-type-param N).
 > The closed type arguments (`int`, `string`, `__Canon`, …) are not in any EventPipe event
 > payload — multiple JIT'd bodies of the same generic method show up as distinct
 > `MethodStartAddress` entries with identical `(MethodToken, Namespace, Name, Signature)`
-> tuples. As a result, a static generic method like `GenericFixture.Echo<int>` arrives as
-> plain `GenericFixture.Echo` with `GenericArity = 0` and `GenericTypeArguments = null` on
-> Linux. Consumers should still resolve such methods to their open `MethodDef` via
-> `(mvid, token)`. Tracked as won't-fix in
-> [issue #85](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/85); an opt-in
-> ClrMD-backed enrichment path is being explored separately (see #85 closing comment).
-> Type-level instantiations (e.g. `Box<int>`) are unaffected — the runtime-canonical
-> `` `1[System.Int32] `` mangling is baked into the type name itself.
+> tuples. By default `collect_cpu_sample` therefore still emits the open method for such
+> frames. When the caller sets `resolveMethodInstantiations=true`, the producer performs a
+> second **ClrMD** attach after sampling, walks the hottest frames by instruction pointer,
+> and back-fills `GenericTypeArguments.Method` + `ClosedSignature` from the resolved closed
+> runtime signature. On Linux that path requires `CAP_SYS_PTRACE` (or `ptrace_scope=0`) and
+> briefly suspends the target. Type-level instantiations (e.g. `Box<int>`) are unaffected —
+> the runtime-canonical `` `1[System.Int32] `` mangling is baked into the type name itself.
 
 The `(mvid, token)` pair is the only field required by the consumer. Everything else is a
 sanity-check label so a human (or the LLM) can confirm "this is the right method" without

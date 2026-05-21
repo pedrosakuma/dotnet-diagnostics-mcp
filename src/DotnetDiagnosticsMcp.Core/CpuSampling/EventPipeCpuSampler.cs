@@ -19,12 +19,18 @@ public sealed class EventPipeCpuSampler : ICpuSampler
     private readonly ILogger<EventPipeCpuSampler> _logger;
     private readonly MvidReader _mvidReader;
     private readonly SymbolPathBuilder _symbolPathBuilder;
+    private readonly ClrMdMethodInstantiationEnricher _instantiationEnricher;
 
-    public EventPipeCpuSampler(ILogger<EventPipeCpuSampler>? logger = null, MvidReader? mvidReader = null, SymbolPathBuilder? symbolPathBuilder = null)
+    public EventPipeCpuSampler(
+        ILogger<EventPipeCpuSampler>? logger = null,
+        MvidReader? mvidReader = null,
+        SymbolPathBuilder? symbolPathBuilder = null,
+        ClrMdMethodInstantiationEnricher? instantiationEnricher = null)
     {
         _logger = logger ?? NullLogger<EventPipeCpuSampler>.Instance;
         _mvidReader = mvidReader ?? new MvidReader();
         _symbolPathBuilder = symbolPathBuilder ?? new SymbolPathBuilder();
+        _instantiationEnricher = instantiationEnricher ?? new ClrMdMethodInstantiationEnricher();
     }
 
     public async Task<CpuSampleResult> SampleAsync(
@@ -32,6 +38,7 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         TimeSpan duration,
         int topN = 25,
         SourceResolutionOptions? sourceResolution = null,
+        MethodInstantiationResolutionOptions? methodInstantiationResolution = null,
         CancellationToken cancellationToken = default)
     {
         if (duration <= TimeSpan.Zero || duration > TimeSpan.FromMinutes(5))
@@ -50,7 +57,13 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         try
         {
             await CollectTraceAsync(processId, tracePath, duration, cancellationToken).ConfigureAwait(false);
-            var (total, hotspots, root, sources, identities) = AggregateHotspots(tracePath, processId, topN, sourceResolution);
+            var (total, hotspots, root, sources, identities) = AggregateHotspots(
+                tracePath,
+                processId,
+                topN,
+                sourceResolution,
+                methodInstantiationResolution,
+                cancellationToken);
             var summary = new CpuSample(processId, startedAt, duration, total, hotspots);
             var artifact = new CpuSampleTraceArtifact(processId, startedAt, duration, total, root, sources, identities);
             return new CpuSampleResult(summary, artifact);
@@ -111,7 +124,13 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         }
     }
 
-    private (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? Sources, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>? Identities) AggregateHotspots(string tracePath, int pid, int topN, SourceResolutionOptions? sourceResolution)
+    private (long Total, IReadOnlyList<Hotspot> Hotspots, CallTreeNode Root, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? Sources, IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>? Identities) AggregateHotspots(
+        string tracePath,
+        int pid,
+        int topN,
+        SourceResolutionOptions? sourceResolution,
+        MethodInstantiationResolutionOptions? methodInstantiationResolution,
+        CancellationToken cancellationToken)
     {
         var etlxPath = TraceLog.CreateFromEventPipeDataFile(tracePath);
         try
@@ -126,6 +145,8 @@ public sealed class EventPipeCpuSampler : ICpuSampler
 
             var inclusive = new Dictionary<string, long>(StringComparer.Ordinal);
             var exclusive = new Dictionary<string, long>(StringComparer.Ordinal);
+            var inclusiveByCandidate = new Dictionary<MethodInstantiationCandidate, long>();
+            var exclusiveByCandidate = new Dictionary<MethodInstantiationCandidate, long>();
             var modules = new Dictionary<string, string>(StringComparer.Ordinal);
             var codeAddressByKey = new Dictionary<string, Microsoft.Diagnostics.Tracing.Etlx.TraceCodeAddress>(StringComparer.Ordinal);
             var rootBuilder = new CallTreeBuilder();
@@ -147,7 +168,10 @@ public sealed class EventPipeCpuSampler : ICpuSampler
 
                 total++;
                 var stackFrames = new List<(string Key, string Module, string Display)>();
+                var candidateFrames = new List<MethodInstantiationCandidate>();
+                MethodInstantiationCandidate? leafCandidate = null;
                 var frame = callStack;
+                var isLeaf = true;
                 while (frame is not null)
                 {
                     var display = FormatFrame(frame);
@@ -158,10 +182,20 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                     var key = string.IsNullOrEmpty(module) ? display : module + "!" + display;
                     stackFrames.Add((key, module, display));
                     modules.TryAdd(key, module);
-                    if (frame.CodeAddress is not null)
+                    if (frame.CodeAddress is { Address: not 0 } codeAddress)
                     {
-                        codeAddressByKey.TryAdd(key, frame.CodeAddress);
+                        codeAddressByKey.TryAdd(key, codeAddress);
+                        var candidate = new MethodInstantiationCandidate(
+                            new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, display),
+                            codeAddress.Address);
+                        candidateFrames.Add(candidate);
+                        if (isLeaf)
+                        {
+                            leafCandidate = candidate;
+                        }
                     }
+
+                    isLeaf = false;
                     frame = frame.Caller;
                 }
 
@@ -170,6 +204,10 @@ public sealed class EventPipeCpuSampler : ICpuSampler
 
                 var leafKey = stackFrames[^1].Key;
                 exclusive[leafKey] = exclusive.GetValueOrDefault(leafKey) + 1;
+                if (leafCandidate is not null)
+                {
+                    exclusiveByCandidate[leafCandidate] = exclusiveByCandidate.GetValueOrDefault(leafCandidate) + 1;
+                }
 
                 var seenInThisStack = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var (key, _, _) in stackFrames)
@@ -177,6 +215,15 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                     if (seenInThisStack.Add(key))
                     {
                         inclusive[key] = inclusive.GetValueOrDefault(key) + 1;
+                    }
+                }
+
+                var seenCandidates = new HashSet<MethodInstantiationCandidate>();
+                foreach (var candidate in candidateFrames)
+                {
+                    if (seenCandidates.Add(candidate))
+                    {
+                        inclusiveByCandidate[candidate] = inclusiveByCandidate.GetValueOrDefault(candidate) + 1;
                     }
                 }
 
@@ -198,24 +245,37 @@ public sealed class EventPipeCpuSampler : ICpuSampler
                 sources = ResolveSources(traceLog, ranked, modules, codeAddressByKey, sourceResolution);
             }
 
-            var identities = BuildMethodIdentities(ranked, modules, codeAddressByKey, sources);
+            var identityMap = BuildMethodIdentities(ranked, modules, codeAddressByKey, sources);
+            var openHotspots = BuildHotspots(ranked, modules, exclusive, identityMap);
+            IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> identities = identityMap;
+            var hotspots = openHotspots;
 
-            var hotspots = ranked
-                .Select(kv =>
+            if (methodInstantiationResolution is { Enabled: true, MaxResolved: > 0 })
+            {
+                var candidates = BuildMethodInstantiationCandidates(
+                    ranked,
+                    modules,
+                    inclusiveByCandidate,
+                    methodInstantiationResolution.MaxResolved);
+                var resolved = _instantiationEnricher.Resolve(pid, candidates, identityMap, cancellationToken);
+                if (resolved.Count > 0)
                 {
-                    var module = modules.GetValueOrDefault(kv.Key, string.Empty);
-                    var methodDisplay = !string.IsNullOrEmpty(module) && kv.Key.StartsWith(module + "!", StringComparison.Ordinal)
-                        ? kv.Key[(module.Length + 1)..]
-                        : kv.Key;
-                    var symbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, methodDisplay);
-                    identities.TryGetValue(symbol, out var identity);
-                    return new Hotspot(
-                        Frame: new SampledFrame(Module: module, Method: methodDisplay),
-                        InclusiveSamples: kv.Value,
-                        ExclusiveSamples: exclusive.GetValueOrDefault(kv.Key),
-                        Identity: identity);
-                })
-                .ToList();
+                    var enrichedIdentities = new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>(identityMap);
+                    Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? enrichedSources =
+                        sources is null ? null : new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>(sources);
+                    hotspots = BuildResolvedHotspots(
+                        openHotspots,
+                        sources,
+                        inclusiveByCandidate,
+                        exclusiveByCandidate,
+                        resolved,
+                        enrichedIdentities,
+                        enrichedSources,
+                        topN);
+                    identities = enrichedIdentities;
+                    sources = enrichedSources;
+                }
+            }
 
             return (total, hotspots, rootBuilder.Build(), sources, identities);
         }
@@ -223,6 +283,123 @@ public sealed class EventPipeCpuSampler : ICpuSampler
         {
             TryDelete(etlxPath);
         }
+    }
+
+    private static List<MethodInstantiationCandidate> BuildMethodInstantiationCandidates(
+        KeyValuePair<string, long>[] ranked,
+        Dictionary<string, string> modules,
+        Dictionary<MethodInstantiationCandidate, long> inclusiveByCandidate,
+        int maxResolved)
+    {
+        var topSymbols = ranked
+            .Select(kv => BuildSymbol(kv.Key, modules))
+            .ToHashSet();
+
+        return inclusiveByCandidate
+            .Where(kv => topSymbols.Contains(kv.Key.Symbol))
+            .OrderByDescending(kv => kv.Value)
+            .Take(maxResolved)
+            .Select(kv => kv.Key)
+            .ToList();
+    }
+
+    private static List<Hotspot> BuildHotspots(
+        KeyValuePair<string, long>[] ranked,
+        Dictionary<string, string> modules,
+        Dictionary<string, long> exclusive,
+        Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> identities)
+    {
+        return ranked
+            .Select(kv =>
+            {
+                var symbol = BuildSymbol(kv.Key, modules);
+                identities.TryGetValue(symbol, out var identity);
+                return new Hotspot(
+                    Frame: new SampledFrame(Module: symbol.Module, Method: symbol.MethodFullName),
+                    InclusiveSamples: kv.Value,
+                    ExclusiveSamples: exclusive.GetValueOrDefault(kv.Key),
+                    Identity: identity);
+            })
+            .ToList();
+    }
+
+    private static List<Hotspot> BuildResolvedHotspots(
+        List<Hotspot> openHotspots,
+        IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? openSources,
+        IReadOnlyDictionary<MethodInstantiationCandidate, long> inclusiveByCandidate,
+        IReadOnlyDictionary<MethodInstantiationCandidate, long> exclusiveByCandidate,
+        IReadOnlyList<ResolvedMethodInstantiation> resolved,
+        Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> enrichedIdentities,
+        Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? enrichedSources,
+        int topN)
+    {
+        var resolvedByOpen = resolved
+            .GroupBy(item => item.Candidate.Symbol)
+            .ToDictionary(group => group.Key, group => group.ToArray());
+        var hotspots = new List<Hotspot>(openHotspots.Count);
+
+        foreach (var openHotspot in openHotspots)
+        {
+            var openSymbol = new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(openHotspot.Frame.Module, openHotspot.Frame.Method);
+            if (!resolvedByOpen.TryGetValue(openSymbol, out var concreteMatches))
+            {
+                hotspots.Add(openHotspot);
+                continue;
+            }
+
+            long resolvedInclusive = 0;
+            long resolvedExclusive = 0;
+            foreach (var closedGroup in concreteMatches.GroupBy(item => item.ClosedSymbol))
+            {
+                var inclusive = closedGroup.Sum(item => inclusiveByCandidate.GetValueOrDefault(item.Candidate));
+                var exclusive = closedGroup.Sum(item => exclusiveByCandidate.GetValueOrDefault(item.Candidate));
+                if (inclusive == 0)
+                {
+                    continue;
+                }
+
+                var identity = closedGroup.First().Identity;
+                resolvedInclusive += inclusive;
+                resolvedExclusive += exclusive;
+                enrichedIdentities[closedGroup.Key] = identity;
+                if (openSources is not null && enrichedSources is not null && openSources.TryGetValue(openSymbol, out var source))
+                {
+                    enrichedSources.TryAdd(closedGroup.Key, source);
+                }
+
+                hotspots.Add(new Hotspot(
+                    Frame: new SampledFrame(Module: closedGroup.Key.Module, Method: closedGroup.Key.MethodFullName),
+                    InclusiveSamples: inclusive,
+                    ExclusiveSamples: exclusive,
+                    Identity: identity));
+            }
+
+            var remainingInclusive = openHotspot.InclusiveSamples - resolvedInclusive;
+            var remainingExclusive = openHotspot.ExclusiveSamples - resolvedExclusive;
+            if (remainingInclusive > 0 || remainingExclusive > 0)
+            {
+                hotspots.Add(openHotspot with
+                {
+                    InclusiveSamples = remainingInclusive > 0 ? remainingInclusive : 0,
+                    ExclusiveSamples = remainingExclusive > 0 ? remainingExclusive : 0,
+                });
+            }
+        }
+
+        return hotspots
+            .OrderByDescending(h => h.InclusiveSamples)
+            .ThenByDescending(h => h.ExclusiveSamples)
+            .Take(topN)
+            .ToList();
+    }
+
+    private static DotnetDiagnosticsMcp.Core.Memory.SymbolRef BuildSymbol(string key, Dictionary<string, string> modules)
+    {
+        var module = modules.GetValueOrDefault(key, string.Empty);
+        var methodDisplay = !string.IsNullOrEmpty(module) && key.StartsWith(module + "!", StringComparison.Ordinal)
+            ? key[(module.Length + 1)..]
+            : key;
+        return new DotnetDiagnosticsMcp.Core.Memory.SymbolRef(module, methodDisplay);
     }
 
     private Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> BuildMethodIdentities(

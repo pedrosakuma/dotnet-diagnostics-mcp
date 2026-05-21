@@ -117,6 +117,16 @@ public sealed record MethodIdentity(
     public GenericInstantiation? GenericTypeArguments { get; init; }
 
     /// <summary>
+    /// Best-effort normalized closed-signature display string built from the recovered generic
+    /// instantiation (e.g. <c>MyApp.Handler`1[System.Int32].Handle&lt;System.String&gt;</c>).
+    /// Display-only: the canonical handoff remains <c>(ModuleVersionId, MetadataToken)</c>
+    /// plus <see cref="GenericTypeArguments"/> for §3.5-style closed-signature rendering.
+    /// Null for non-generic methods and for frames where the producer could not recover a
+    /// closed instantiation.
+    /// </summary>
+    public string? ClosedSignature { get; init; }
+
+    /// <summary>
     /// Best-effort source-level resolution attached at producer time (issue #28). When
     /// non-null the LLM can open <c>File:StartLine</c> directly without delegating to
     /// <c>dotnet-assembly-mcp.get_method_source</c> — that partner becomes useful only for

@@ -17,6 +17,7 @@ public interface ICpuSampler
         TimeSpan duration,
         int topN = 25,
         SourceResolutionOptions? sourceResolution = null,
+        MethodInstantiationResolutionOptions? methodInstantiationResolution = null,
         CancellationToken cancellationToken = default);
 }
 
@@ -27,6 +28,13 @@ public interface ICpuSampler
 /// search (NT_SYMBOL_PATH env var + sidecar working directory).
 /// </summary>
 public sealed record SourceResolutionOptions(bool Enabled, string? SymbolPath = null, int MaxResolved = 10);
+
+/// <summary>
+/// Optional post-sample ClrMD enrichment that resolves the hottest managed frames to their closed
+/// generic instantiations. <see cref="MaxResolved"/> bounds the attach-time work and defaults to
+/// the same N as the hotspot list at the tool layer.
+/// </summary>
+public sealed record MethodInstantiationResolutionOptions(bool Enabled, int MaxResolved = 10);
 
 /// <summary>
 /// Combined result of a CPU sampling pass: the compact <see cref="CpuSample"/> summary returned

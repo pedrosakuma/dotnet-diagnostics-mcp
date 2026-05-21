@@ -3,9 +3,10 @@ using System.Globalization;
 namespace DotnetDiagnosticsMcp.Core.Capabilities;
 
 /// <summary>
-/// Static probe that decides whether the four ClrMD-backed tools
+/// Static probe that decides whether the four ClrMD-backed live-attach tools
 /// (<c>collect_thread_snapshot</c>, <c>inspect_live_heap</c>, <c>inspect_dump</c>
-/// against a live PID, <c>collect_process_dump</c>) can attach to a peer process
+/// against a live PID, <c>collect_process_dump</c>) — plus the opt-in
+/// <c>collect_cpu_sample(resolveMethodInstantiations=true)</c> enrichment path — can attach to a peer process
 /// on the host the diagnostics MCP server is running on. The check is a property
 /// of the sidecar / host, not of the target runtime — same shape as
 /// <c>CanSampleOffCpu</c>.
@@ -52,7 +53,8 @@ public static class PtraceProbe
     public const string YamaPtraceScopePath = "/proc/sys/kernel/yama/ptrace_scope";
 
     /// <summary>
-    /// Detects whether the four ClrMD-backed tools can attach to a same-UID peer
+    /// Detects whether the four ClrMD-backed live-attach tools (and the opt-in CPU-sample
+    /// generic-instantiation enrichment path) can attach to a same-UID peer
     /// process on the host. Cheap (two file reads on Linux, OS check elsewhere) and
     /// safe to call repeatedly.
     /// </summary>

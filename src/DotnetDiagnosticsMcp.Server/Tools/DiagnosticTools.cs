@@ -440,6 +440,7 @@ public sealed class DiagnosticTools
     [Description(
         "Captures a CPU sample from the target process and returns the top-N hotspots aggregated by method. " +
         "On CoreCLR uses EventPipe SampleProfiler (managed frames with mvid+token handoff). " +
+        "Optionally, resolveMethodInstantiations=true performs a second ClrMD attach after sampling to recover closed generic method signatures for the hottest managed frames; on Linux that requires CAP_SYS_PTRACE (or ptrace_scope=0) and briefly suspends the target while the attach runs. " +
         "On NativeAOT (Linux) falls back to 'perf record' when available — frames are native symbols only, MethodIdentity is null. " +
         "Each hotspot reports both inclusive and exclusive sample counts. Run after snapshot_counters shows elevated cpu-usage. " +
         "Spec-compliant clients can call this tool as an MCP Task (tools/call with params.task) and poll via tasks/get + tasks/result. " +
@@ -455,6 +456,8 @@ public sealed class DiagnosticTools
         [Description("If true, attempts to resolve top hotspots to file:line via PDB / SourceLink and stamps the resolved SourceLocation onto each MethodIdentity payload (issue #28 — makes dotnet-assembly-mcp.get_method_source optional when PDBs are reachable). Defaults to true; set to false to skip PDB I/O when symbols are known to be unreachable.")] bool resolveSourceLines = true,
         [Description("Optional NT_SYMBOL_PATH-style search path forwarded to the symbol reader (e.g. '/symbols;srv*https://msdl.microsoft.com/download/symbols'). Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule/module directory. Ignored when resolveSourceLines=false.")] string? symbolPath = null,
         [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to the requested topN so every emitted MethodIdentity carries its resolved SourceLocation when available.")] int? maxResolvedSources = null,
+        [Description("If true, performs an opt-in ClrMD attach after sampling to recover closed generic instantiations for the hottest managed frames (displayed on MethodIdentity as ClosedSignature + GenericTypeArguments.Method). CoreCLR only. On Linux this requires CAP_SYS_PTRACE (or ptrace_scope=0) and briefly suspends the target during the attach. Defaults to false to keep the EventPipe-only path lightweight.")] bool resolveMethodInstantiations = false,
+        [Description("Cap on how many top hotspots get ClrMD generic-instantiation enrichment. Must be >= 1. Defaults to the requested topN so the enrichment work stays bounded to the hottest frames.")] int? maxResolvedMethodInstantiations = null,
         [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous).")] bool runAsJob = false,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 hotspots inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full sample is always retained behind the issued handle — drill in with get_call_tree.")]
         SamplingDepth depth = SamplingDepth.Summary,
@@ -464,6 +467,8 @@ public sealed class DiagnosticTools
         if (topN < 1) return InvalidArg<CpuSample>(nameof(topN), "must be >= 1");
         var effectiveMaxResolved = maxResolvedSources ?? topN;
         if (effectiveMaxResolved < 1) return InvalidArg<CpuSample>(nameof(maxResolvedSources), "must be >= 1");
+        var effectiveMaxResolvedInstantiations = maxResolvedMethodInstantiations ?? topN;
+        if (effectiveMaxResolvedInstantiations < 1) return InvalidArg<CpuSample>(nameof(maxResolvedMethodInstantiations), "must be >= 1");
 
         var resolved = await ResolveContextAsync<CpuSample>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
@@ -472,6 +477,9 @@ public sealed class DiagnosticTools
 
         var srcOpts = resolveSourceLines
             ? new SourceResolutionOptions(Enabled: true, SymbolPath: symbolPath, MaxResolved: effectiveMaxResolved)
+            : null;
+        var instantiationOpts = resolveMethodInstantiations
+            ? new MethodInstantiationResolutionOptions(Enabled: true, MaxResolved: effectiveMaxResolvedInstantiations)
             : null;
 
         if (runAsJob)
@@ -485,7 +493,7 @@ public sealed class DiagnosticTools
                 jobTtl,
                 async ct =>
                 {
-                    var jobResult = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, ct).ConfigureAwait(false);
+                    var jobResult = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, instantiationOpts, ct).ConfigureAwait(false);
                     var dataHandle = handles.Register(pid, "cpu-sample", jobResult.Artifact, CpuSampleHandleTtl);
                     var jobOk = BuildCpuSampleResult(
                         jobResult.Summary,
@@ -513,7 +521,7 @@ public sealed class DiagnosticTools
         CpuSampleResult result;
         try
         {
-            result = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, cancellationToken).ConfigureAwait(false);
+            result = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, instantiationOpts, cancellationToken).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("elevation", StringComparison.OrdinalIgnoreCase) ||
                                                     ex.Message.Contains("privilege", StringComparison.OrdinalIgnoreCase) ||
@@ -525,6 +533,10 @@ public sealed class DiagnosticTools
                 new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
                 new NextActionHint("get_diagnostic_capabilities", "Check capability matrix to confirm what's available for this process.",
                     new Dictionary<string, object?> { ["processId"] = pid }));
+        }
+        catch (Exception ex) when (resolveMethodInstantiations && ex is not OperationCanceledException)
+        {
+            return WithContext(ClassifyAttachFailure<CpuSample>("collect_cpu_sample", pid, ex), ctx);
         }
 
         var handle = handles.Register(pid, "cpu-sample", result.Artifact, CpuSampleHandleTtl);

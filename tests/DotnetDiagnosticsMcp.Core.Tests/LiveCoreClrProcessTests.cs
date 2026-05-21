@@ -571,6 +571,83 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
+    [Fact(Timeout = 90_000)]
+    public async Task CpuSampler_ResolvesMethodLevelClosedGenerics_OnlyWhenOptInEnabled()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        var sampleDll = LocateSampleDll()
+            ?? throw new InvalidOperationException("CoreClrSample.dll not found.");
+        var expectedMvid = new MvidReader().TryRead(sampleDll);
+        expectedMvid.Should().NotBeNull();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var driver = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                try { _ = await http.GetAsync("/generics?iterations=200000", cts.Token); }
+                catch (OperationCanceledException) { break; }
+                catch { /* tolerate transient races */ }
+            }
+        }, cts.Token);
+
+        try
+        {
+            var sampler = new EventPipeCpuSampler();
+            var baseline = await sampler.SampleAsync(
+                Pid,
+                TimeSpan.FromSeconds(6),
+                topN: 100,
+                cancellationToken: CancellationToken.None);
+            var enriched = await sampler.SampleAsync(
+                Pid,
+                TimeSpan.FromSeconds(6),
+                topN: 100,
+                methodInstantiationResolution: new MethodInstantiationResolutionOptions(Enabled: true, MaxResolved: 100),
+                cancellationToken: CancellationToken.None);
+
+            var withoutMethodArgs = baseline.Artifact.MethodIdentities.Values
+                .Where(id => id.ModuleVersionId == expectedMvid)
+                .Where(id => string.Equals(id.MethodName, "Echo", StringComparison.Ordinal))
+                .Where(id => id.GenericTypeArguments is { Method.Count: > 0 })
+                .ToList();
+            var withMethodArgs = enriched.Artifact.MethodIdentities.Values
+                .Where(id => id.ModuleVersionId == expectedMvid)
+                .Where(id => string.Equals(id.MethodName, "Echo", StringComparison.Ordinal))
+                .Where(id => id.GenericTypeArguments is { Method.Count: > 0 })
+                .ToList();
+
+            if (OperatingSystem.IsLinux())
+            {
+                withoutMethodArgs.Should().BeEmpty(
+                    "Linux EventPipe alone only knows the open MethodDef for Echo<T>; closed method args arrive via the opt-in ClrMD enrichment (issue #86)");
+            }
+
+            withMethodArgs.Should().NotBeEmpty(
+                "resolveMethodInstantiations=true must recover closed method args for Echo<T> from the hottest sampled frames");
+            withMethodArgs.Should().OnlyContain(id => !string.IsNullOrWhiteSpace(id.ClosedSignature),
+                "resolved method-level instantiations must also stamp ClosedSignature for operator-facing display");
+
+            var methodArgs = withMethodArgs
+                .SelectMany(id => id.GenericTypeArguments!.Method)
+                .ToHashSet(StringComparer.Ordinal);
+            methodArgs.Should().Contain(a => a.Contains("System.Int32", StringComparison.Ordinal),
+                "Echo<int> must round-trip its closed method-arg as System.Int32");
+            methodArgs.Should().Contain(
+                a => a.Contains("System.String", StringComparison.Ordinal)
+                  || a.Contains("System.__Canon", StringComparison.Ordinal),
+                "Echo<string> must round-trip as System.String or the runtime's shared System.__Canon");
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await driver; } catch { /* expected on cancel */ }
+        }
+    }
+
     [Fact(Timeout = 60_000)]
     public async Task AllocationSampler_ProducesTopTypes_WhenWorkloadAllocates()
     {

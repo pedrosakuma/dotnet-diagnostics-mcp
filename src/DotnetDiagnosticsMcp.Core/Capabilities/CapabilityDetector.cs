@@ -353,12 +353,13 @@ public sealed class CapabilityDetector : ICapabilityDetector
         }
 
         // ClrMD live attach (collect_thread_snapshot, inspect_live_heap, inspect_dump on live
-        // PID, collect_process_dump) is also a host-side capability. Tell the LLM up front
-        // when the four tools will hard-fail with PermissionDenied so it can either route
+        // PID, collect_process_dump, plus collect_cpu_sample(resolveMethodInstantiations=true))
+        // is also a host-side capability. Tell the LLM up front when the live-attach path
+        // will hard-fail with PermissionDenied so it can either route
         // around them (dump-based workflow) or relay a concrete mitigation to the user.
         if (!ptrace.CanAttach)
         {
-            primary += $" ClrMD live attach tools (collect_thread_snapshot, inspect_live_heap, inspect_dump on live PID, collect_process_dump) are NOT available: {ptrace.Reason}";
+            primary += $" ClrMD live attach tools (collect_thread_snapshot, inspect_live_heap, inspect_dump on live PID, collect_process_dump, collect_cpu_sample(resolveMethodInstantiations=true)) are NOT available: {ptrace.Reason}";
         }
 
         if (canCollectThreadSnapshot && !string.IsNullOrWhiteSpace(threadSnapshotSource))
