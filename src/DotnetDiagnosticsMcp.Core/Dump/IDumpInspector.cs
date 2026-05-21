@@ -34,6 +34,33 @@ public interface IDumpInspector
         int processId,
         DumpInspectionOptions? options = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resolves one managed object by exact address against the process or dump behind
+    /// <paramref name="snapshot"/> and returns a field/array/string view similar to SOS <c>!do</c>.
+    /// </summary>
+    Task<HeapObjectInspection> InspectObjectAsync(
+        HeapSnapshotArtifact snapshot,
+        ulong address,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resolves the shortest GC-root chain currently found for the managed object at
+    /// <paramref name="address"/> against the process or dump behind <paramref name="snapshot"/>.
+    /// </summary>
+    Task<HeapGcRootInspection> InspectGcRootAsync(
+        HeapSnapshotArtifact snapshot,
+        ulong address,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Walks the transitive closure rooted at <paramref name="address"/> and returns its retained
+    /// bytes + object count, similar to SOS <c>!objsize</c>.
+    /// </summary>
+    Task<HeapObjectSizeInspection> InspectObjectSizeAsync(
+        HeapSnapshotArtifact snapshot,
+        ulong address,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Caller-tunable knobs for <see cref="IDumpInspector.InspectAsync"/>.</summary>
