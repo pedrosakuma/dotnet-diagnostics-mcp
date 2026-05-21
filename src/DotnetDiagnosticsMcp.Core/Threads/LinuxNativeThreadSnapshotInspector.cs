@@ -95,26 +95,8 @@ public sealed class LinuxNativeThreadSnapshotInspector : IThreadSnapshotInspecto
                     StackPointer: 0,
                     Identity: null))
                 .ToList();
-            var top = frames.Count > 0 ? frames[0] : null;
 
-            threads.Add(new ManagedThread(
-                ManagedThreadId: -1,
-                OSThreadId: unchecked((uint)t.Tid),
-                Address: 0,
-                State: state,
-                IsAlive: isAlive,
-                IsBackground: false,
-                IsFinalizer: false,
-                IsGc: false,
-                IsThreadpoolWorker: false,
-                LockCount: 0,
-                CurrentExceptionType: null,
-                TopFrameMethod: top?.DisplayName,
-                Frames: frames)
-            {
-                IsLikelyBlocked = likelyBlocked,
-                InferredWaitReason = reason,
-            });
+            threads.Add(BuildManagedThread(t, frames, state, isAlive, likelyBlocked, reason));
         }
 
         stopwatch.Stop();
@@ -130,6 +112,42 @@ public sealed class LinuxNativeThreadSnapshotInspector : IThreadSnapshotInspecto
         {
             Source = "linux-native-stack",
             Warnings = warnings.Count > 0 ? warnings : null,
+        };
+    }
+
+    /// <summary>
+    /// Builds the <see cref="ManagedThread"/> view for one parsed native thread. The Linux TID is
+    /// used both as <see cref="ManagedThread.OSThreadId"/> and as <see cref="ManagedThread.ManagedThreadId"/>
+    /// so <c>query_thread_snapshot(view="stack")</c> can address each native thread by its TID — without
+    /// it every native thread would collide on <c>ManagedThreadId = -1</c> and only the first would be
+    /// reachable through the drilldown API.
+    /// </summary>
+    internal static ManagedThread BuildManagedThread(
+        ParsedNativeThread parsed,
+        IReadOnlyList<ManagedStackFrame> frames,
+        string state,
+        bool isAlive,
+        bool isLikelyBlocked,
+        string? inferredWaitReason)
+    {
+        var top = frames.Count > 0 ? frames[0] : null;
+        return new ManagedThread(
+            ManagedThreadId: parsed.Tid,
+            OSThreadId: unchecked((uint)parsed.Tid),
+            Address: 0,
+            State: state,
+            IsAlive: isAlive,
+            IsBackground: false,
+            IsFinalizer: false,
+            IsGc: false,
+            IsThreadpoolWorker: false,
+            LockCount: 0,
+            CurrentExceptionType: null,
+            TopFrameMethod: top?.DisplayName,
+            Frames: frames)
+        {
+            IsLikelyBlocked = isLikelyBlocked,
+            InferredWaitReason = inferredWaitReason,
         };
     }
 

@@ -44,4 +44,31 @@ public sealed class LinuxNativeThreadSnapshotInspectorTests
         parsed[0].Frames.Should().HaveCount(2);
         parsed[0].Frames.Select(f => f.DisplayName).Should().ContainInOrder("a+0x1", "b+0x2");
     }
+
+    [Fact]
+    public void BuildManagedThread_UsesTidAsManagedThreadIdSoDrilldownCanAddressEachThread()
+    {
+        var parsed1 = new ParsedNativeThread(
+            Tid: 4242,
+            Frames: new[] { new ParsedNativeFrame(0xDEADBEEF, "Foo", "libc.so.6") });
+        var parsed2 = new ParsedNativeThread(
+            Tid: 4243,
+            Frames: Array.Empty<ParsedNativeFrame>());
+
+        var frames1 = parsed1.Frames
+            .Select(f => new ManagedStackFrame("Native", f.DisplayName, null, f.ModuleName, f.InstructionPointer, 0))
+            .ToArray();
+        var frames2 = Array.Empty<ManagedStackFrame>();
+
+        var t1 = LinuxNativeThreadSnapshotInspector.BuildManagedThread(parsed1, frames1, "S", true, true, "BlockedOnLock");
+        var t2 = LinuxNativeThreadSnapshotInspector.BuildManagedThread(parsed2, frames2, "R", true, false, "Running");
+
+        t1.ManagedThreadId.Should().Be(4242, "TID must back ManagedThreadId so query_thread_snapshot(view=\"stack\", threadId=tid) reaches each native thread");
+        t2.ManagedThreadId.Should().Be(4243);
+        t1.OSThreadId.Should().Be(4242U);
+        t2.OSThreadId.Should().Be(4243U);
+        new[] { t1.ManagedThreadId, t2.ManagedThreadId }.Should().OnlyHaveUniqueItems();
+        t1.TopFrameMethod.Should().Be("Foo");
+        t2.TopFrameMethod.Should().BeNull();
+    }
 }
