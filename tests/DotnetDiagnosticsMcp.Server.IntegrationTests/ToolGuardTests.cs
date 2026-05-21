@@ -289,7 +289,7 @@ public sealed class ToolGuardTests
 
         public bool IsAvailable() => true;
 
-        public Task<OffCpuSampleResult> SampleAsync(int processId, TimeSpan duration, int topN = 25, CancellationToken cancellationToken = default)
+        public Task<OffCpuSampleResult> SampleAsync(int processId, TimeSpan duration, int topN = 25, string? symbolPath = null, CancellationToken cancellationToken = default)
             => throw _ex;
     }
 }
