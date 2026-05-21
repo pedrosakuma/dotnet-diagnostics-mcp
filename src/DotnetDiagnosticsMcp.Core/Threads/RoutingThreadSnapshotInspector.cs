@@ -7,7 +7,8 @@ namespace DotnetDiagnosticsMcp.Core.Threads;
 
 /// <summary>
 /// Runtime-aware dispatcher for thread snapshots. CoreCLR uses ClrMD; NativeAOT on Linux uses
-/// <see cref="LinuxNativeThreadSnapshotInspector"/>; NativeAOT on Windows is tracked in #93.
+/// <see cref="LinuxNativeThreadSnapshotInspector"/>; NativeAOT on Windows uses
+/// <see cref="EtwNativeThreadSnapshotInspector"/>.
 /// </summary>
 public sealed class RoutingThreadSnapshotInspector : IThreadSnapshotInspector
 {

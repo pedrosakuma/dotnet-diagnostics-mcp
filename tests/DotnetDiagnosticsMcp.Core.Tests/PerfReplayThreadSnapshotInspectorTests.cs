@@ -67,6 +67,7 @@ public sealed class PerfReplayThreadSnapshotInspectorTests
             runtime: RuntimeFlavor.NativeAot,
             ptrace: new PtraceProbeResult(CanAttach: false, Reason: "ptrace denied"),
             euStackAvailable: true,
+            etwAvailable: false,
             canSampleOffCpu: true);
 
         support.CanCollect.Should().BeTrue();

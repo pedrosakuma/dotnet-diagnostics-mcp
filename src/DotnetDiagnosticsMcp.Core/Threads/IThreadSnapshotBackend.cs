@@ -88,6 +88,35 @@ public sealed class LinuxNativeThreadSnapshotBackend : IThreadSnapshotBackend
         => throw new NotSupportedException("Linux-native backend does not support dump snapshots.");
 }
 
+public sealed class EtwNativeThreadSnapshotBackend : IThreadSnapshotBackend
+{
+    private readonly EtwNativeThreadSnapshotInspector _inspector;
+
+    public EtwNativeThreadSnapshotBackend(EtwNativeThreadSnapshotInspector inspector) => _inspector = inspector;
+
+    public string BackendId => "etw-native-stack";
+
+    public int Order => 110;
+
+    public string? Preconditions => "Requires Windows with administrative elevation (or SeSystemProfilePrivilege).";
+
+    public bool CanHandleLive(RuntimeFlavor runtime) => runtime == RuntimeFlavor.NativeAot && OperatingSystem.IsWindows();
+
+    public bool CanHandleDump => false;
+
+    public Task<ThreadSnapshotArtifact> InspectLiveAsync(
+        int processId,
+        ThreadSnapshotOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => _inspector.InspectLiveAsync(processId, options, cancellationToken);
+
+    public Task<ThreadSnapshotArtifact> InspectDumpAsync(
+        string dumpFilePath,
+        ThreadSnapshotOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException("ETW-native backend does not support dump snapshots.");
+}
+
 public sealed class PerfReplayThreadSnapshotBackend : IThreadSnapshotBackend
 {
     private readonly PerfReplayThreadSnapshotInspector _inspector;

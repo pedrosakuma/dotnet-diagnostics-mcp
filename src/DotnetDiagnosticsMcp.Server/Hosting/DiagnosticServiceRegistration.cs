@@ -50,8 +50,10 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.ClrMdThreadSnapshotInspector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.LinuxNativeThreadSnapshotInspector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.PerfReplayThreadSnapshotInspector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.EtwNativeThreadSnapshotInspector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.ClrMdThreadSnapshotBackend>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.LinuxNativeThreadSnapshotBackend>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.EtwNativeThreadSnapshotBackend>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotBackend, DotnetDiagnosticsMcp.Core.Threads.PerfReplayThreadSnapshotBackend>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Threads.IThreadSnapshotInspector, DotnetDiagnosticsMcp.Core.Threads.RoutingThreadSnapshotInspector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.JitCapture.IJitMethodCapturer, DotnetDiagnosticsMcp.Core.JitCapture.ClrMdJitMethodCapturer>();
