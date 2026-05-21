@@ -38,10 +38,10 @@ internal static class PerfScriptParser
         // therefore dropped every threadpool/GC/network worker sample and only kept frames that
         // happened to be running on the thread whose TID equals the PID (typically just the
         // main thread). To preserve correctness when the caller passes a non-zero processId
-        // we now compare against the set of TIDs currently belonging to that process — read
-        // once at parse start from /proc/<pid>/task. When unavailable (non-Linux, or process
-        // already exited) we honor any TID that perf reports (effectively trusting the upstream
-        // -p filter), which is still tighter than "no filter".
+        // we compare against the set of TIDs currently belonging to that process — read once
+        // at parse start from /proc/<pid>/task. When that lookup is unavailable (non-Linux,
+        // or the process already exited), fall back to exact PID matching so replayed fixtures
+        // behave consistently across OSes.
         HashSet<int>? acceptedTids = null;
         if (processId != 0)
         {
@@ -76,11 +76,17 @@ internal static class PerfScriptParser
             }
 
             var samplePid = TryExtractPid(header);
-            if (acceptedTids is { } tids && samplePid != 0 && !tids.Contains(samplePid))
+            if (samplePid != 0)
             {
-                // Skip this sample's frames.
-                i = SkipToBlank(lines, i + 1);
-                continue;
+                var shouldSkip = acceptedTids is { } tids
+                    ? !tids.Contains(samplePid)
+                    : processId != 0 && samplePid != processId;
+                if (shouldSkip)
+                {
+                    // Skip this sample's frames.
+                    i = SkipToBlank(lines, i + 1);
+                    continue;
+                }
             }
 
             var frames = new List<PerfFrame>();
