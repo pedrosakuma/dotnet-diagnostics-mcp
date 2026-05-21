@@ -84,9 +84,10 @@ public sealed record DiagnosticCapabilities(
     public int? PtraceScope { get; init; }
 
     /// <summary>
-    /// True when the four ClrMD-backed tools (<c>collect_thread_snapshot</c>,
+    /// True when the four ClrMD-backed live-attach tools (<c>collect_thread_snapshot</c>,
     /// <c>inspect_live_heap</c>, <c>inspect_dump</c> against a live PID,
-    /// <c>collect_process_dump</c>) are expected to succeed on this sidecar host
+    /// <c>collect_process_dump</c>) — plus <c>collect_cpu_sample(resolveMethodInstantiations=true)</c>
+    /// when the opt-in closed-generic enrichment is requested — are expected to succeed on this sidecar host
     /// without surfacing a <c>PermissionDenied</c> error. On Linux this requires
     /// either <c>CAP_SYS_PTRACE</c> on the sidecar or <c>kernel.yama.ptrace_scope=0</c>
     /// on the host; on Windows ClrMD attaches via <c>DebugActiveProcess</c> and is

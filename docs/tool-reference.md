@@ -516,6 +516,13 @@ top-N hotspots by inclusive and exclusive sample counts.
 | `processId` | `int` | — | Target process id |
 | `durationSeconds` | `int` | `10` | Sampling window. ≥ 1. |
 | `topN` | `int` | `25` | Maximum hotspots returned. ≥ 1. |
+| `resolveSourceLines` | `bool` | `true` | Resolve top hotspots to source file:line via PDB / SourceLink. |
+| `symbolPath` | `string?` | `null` | Optional symbol search path used when `resolveSourceLines=true`. |
+| `maxResolvedSources` | `int?` | `topN` | Cap on how many hotspots get source resolution. |
+| `resolveMethodInstantiations` | `bool` | `false` | Opt-in ClrMD attach after sampling to recover closed generic method signatures for the hottest managed frames. CoreCLR only; on Linux requires `CAP_SYS_PTRACE` (or `ptrace_scope=0`) and briefly suspends the target. |
+| `maxResolvedMethodInstantiations` | `int?` | `topN` | Cap on how many hotspots get ClrMD generic-instantiation enrichment. |
+| `runAsJob` | `bool` | `false` | Run in the background and poll with `get_collection_status(handle)`. |
+| `depth` | `SamplingDepth` | `Summary` | `Summary` returns the top 3 hotspots inline; `Detail` / `Raw` return the requested `topN`. |
 
 **Returns:** `CpuSample`:
 
@@ -604,6 +611,14 @@ Common examples:
 
 The same override shape is exposed by `collect_cpu_sample`, `collect_off_cpu_sample`,
 `collect_thread_snapshot`, `inspect_dump`, and `inspect_live_heap`.
+
+**Opt-in closed generics (`resolveMethodInstantiations`).** On Linux, EventPipe alone only knows the
+open `MethodDef` for generic methods like `Echo<T>`. When you enable this flag, the server performs
+an additional ClrMD attach after the trace ends, resolves the hottest instruction pointers back to
+closed runtime methods, and stamps `MethodIdentity.ClosedSignature` plus
+`MethodIdentity.GenericTypeArguments.Method`. This keeps the default EventPipe path lightweight while
+making LINQ / MediatR / serializer hotspots far more operator-friendly when you explicitly need the
+closed form.
 
 ---
 

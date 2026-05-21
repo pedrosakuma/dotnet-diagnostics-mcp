@@ -308,6 +308,36 @@ public class MethodIdentityHandoffTests
     }
 
     [Fact]
+    public void ClrMdParser_MethodLevelGeneric_NormalizesAssemblyQualifiedArgs()
+    {
+        var parsed = ClrMdMethodInstantiationEnricher.ParseClosedSignature(
+            "GenericFixture.Echo[[System.Int32, System.Private.CoreLib]](Int32)");
+
+        parsed.TypeFullName.Should().Be("GenericFixture");
+        parsed.MethodName.Should().Be("Echo");
+        parsed.GenericArity.Should().Be(1);
+        parsed.GenericTypeArguments.Should().NotBeNull();
+        parsed.GenericTypeArguments!.Type.Should().BeEmpty();
+        parsed.GenericTypeArguments.Method.Should().Equal("System.Int32");
+        parsed.ClosedSignature.Should().Be("GenericFixture.Echo<System.Int32>");
+    }
+
+    [Fact]
+    public void ClrMdParser_TypeLevelGeneric_NormalizesNestedAssemblyQualifiedArgs()
+    {
+        var parsed = ClrMdMethodInstantiationEnricher.ParseClosedSignature(
+            "MyApp.Cache`1[[System.Collections.Generic.Dictionary`2[[System.Int32, System.Private.CoreLib],[System.String, System.Private.CoreLib]], System.Private.CoreLib]].Get()");
+
+        parsed.TypeFullName.Should().Be("MyApp.Cache`1");
+        parsed.MethodName.Should().Be("Get");
+        parsed.GenericArity.Should().Be(0);
+        parsed.GenericTypeArguments.Should().NotBeNull();
+        parsed.GenericTypeArguments!.Type.Should().Equal("System.Collections.Generic.Dictionary`2[System.Int32,System.String]");
+        parsed.GenericTypeArguments.Method.Should().BeEmpty();
+        parsed.ClosedSignature.Should().Be("MyApp.Cache`1[System.Collections.Generic.Dictionary`2[System.Int32,System.String]].Get");
+    }
+
+    [Fact]
     public void GenericInstantiation_RoundTripsThroughJsonContext()
     {
         var inst = new GenericInstantiation(new[] { "System.Int32" }, new[] { "System.String" });
@@ -318,11 +348,12 @@ public class MethodIdentityHandoffTests
             MetadataToken: 0x06000123,
             TypeFullName: "MyApp.Cache`1",
             MethodName: "Get",
-            GenericArity: 1) { GenericTypeArguments = inst };
+            GenericArity: 1) { GenericTypeArguments = inst, ClosedSignature = "MyApp.Cache`1[System.Int32].Get<System.String>" };
 
         var json = System.Text.Json.JsonSerializer.Serialize(
             id, InvestigationSummaryJsonContext.Default.MethodIdentity);
         json.Should().Contain("\"GenericTypeArguments\"");
+        json.Should().Contain("\"ClosedSignature\"");
         json.Should().Contain("\"System.Int32\"");
         json.Should().Contain("\"System.String\"");
 
@@ -331,6 +362,7 @@ public class MethodIdentityHandoffTests
         roundtripped!.GenericTypeArguments.Should().NotBeNull();
         roundtripped.GenericTypeArguments!.Type.Should().Equal("System.Int32");
         roundtripped.GenericTypeArguments.Method.Should().Equal("System.String");
+        roundtripped.ClosedSignature.Should().Be("MyApp.Cache`1[System.Int32].Get<System.String>");
     }
 
     [Fact]

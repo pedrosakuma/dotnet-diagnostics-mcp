@@ -85,6 +85,7 @@ public sealed class PerfNativeAotCpuSampler : ICpuSampler
         TimeSpan duration,
         int topN = 25,
         SourceResolutionOptions? sourceResolution = null,
+        MethodInstantiationResolutionOptions? methodInstantiationResolution = null,
         CancellationToken cancellationToken = default)
     {
         if (duration <= TimeSpan.Zero || duration > TimeSpan.FromMinutes(5))
