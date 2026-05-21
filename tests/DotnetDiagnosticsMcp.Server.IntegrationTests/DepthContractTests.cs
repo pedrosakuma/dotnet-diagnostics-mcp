@@ -21,13 +21,16 @@ namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
 /// payload at <c>Summary</c> (the new default) than at <c>Detail</c>, while the handle
 /// store retains the full artifact regardless. Drilldown tools are covered separately.
 /// </summary>
-public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFactory>
+[Collection(DiagnosticIntegrationGroup.Name)]
+public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFactory>, IClassFixture<LiveCoreClrSampleFixture>
 {
     private readonly McpToolsTests.AuthedFactory _factory;
+    private readonly LiveCoreClrSampleFixture _sample;
 
-    public DepthContractTests(McpToolsTests.AuthedFactory factory)
+    public DepthContractTests(McpToolsTests.AuthedFactory factory, LiveCoreClrSampleFixture sample)
     {
         _factory = factory;
+        _sample = sample;
     }
 
     [Fact]
@@ -295,17 +298,13 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
     [Fact]
     public async Task CollectThreadSnapshot_SummaryDropsLocksAndCapsThreads()
     {
-        // Skipped on Windows pending investigation of test-host hang in CI (see #120).
-        // Linux coverage is sufficient for the depth contract.
-        if (OperatingSystem.IsWindows()) return;
-
         await using var client = await ConnectAsync();
 
         var summaryRaw = await client.CallToolAsync(
             "collect_thread_snapshot",
             new Dictionary<string, object?>
             {
-                ["processId"] = Environment.ProcessId,
+                ["processId"] = _sample.ProcessId,
                 ["maxFramesPerThread"] = 16,
                 ["depth"] = "Summary",
             },
@@ -314,16 +313,17 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             "collect_thread_snapshot",
             new Dictionary<string, object?>
             {
-                ["processId"] = Environment.ProcessId,
+                ["processId"] = _sample.ProcessId,
                 ["maxFramesPerThread"] = 16,
                 ["depth"] = "Detail",
             },
             cancellationToken: CancellationToken.None);
 
-        // ClrMD self-attach is unreliable inside the test host (no separate sample process,
-        // ptrace restrictions on Linux). Skip the assertion when the runtime refuses the
-        // attach — the depth wiring is exercised end-to-end by the other 6 collectors and
-        // the Core-layer ThreadSnapshot_InspectLive test covers the underlying mechanism.
+        // The depth contract is exercised against a separate live sample so the test does not
+        // attempt to suspend the xUnit/WebApplicationFactory process itself. Skip the assertion
+        // when the runtime refuses the attach — the depth wiring is exercised end-to-end by the
+        // other 6 collectors and the Core-layer ThreadSnapshot_InspectLive test covers the
+        // underlying mechanism.
         var summaryEnvelope = DeserializeEnvelope<ThreadSnapshotQueryResult>(summaryRaw);
         var detailEnvelope = DeserializeEnvelope<ThreadSnapshotQueryResult>(detailRaw);
         if (summaryEnvelope?.Error is not null || detailEnvelope?.Error is not null)
