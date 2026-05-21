@@ -87,34 +87,73 @@ public static class PtraceProbe
     {
         var hasCapSysPtrace = TryReadCapSysPtrace(readAllText);
         var scopeResult = TryReadPtraceScope(readAllText, fileExists);
+        int? scope = scopeResult.HasValue ? scopeResult.Value : null;
+
+        if (scopeResult is { HasValue: true, Value: 3 })
+        {
+            return new PtraceProbeResult(CanAttach: false,
+                Reason: "Linux: kernel.yama.ptrace_scope=3 (no attach permitted). CAP_SYS_PTRACE cannot override this — relax the host sysctl or use the dump-based workflow (collect_process_dump + inspect_dump).")
+            {
+                HasCapSysPtrace = hasCapSysPtrace,
+                PtraceScope = 3,
+            };
+        }
 
         if (hasCapSysPtrace)
         {
             return new PtraceProbeResult(CanAttach: true,
-                Reason: $"Linux: CAP_SYS_PTRACE held (ptrace_scope={FormatScope(scopeResult)}). Same-UID peer attach allowed unconditionally.");
+                Reason: $"Linux: CAP_SYS_PTRACE held (ptrace_scope={FormatScope(scopeResult)}). Same-UID peer attach allowed unconditionally.")
+            {
+                HasCapSysPtrace = true,
+                PtraceScope = scope,
+            };
         }
 
         return scopeResult switch
         {
             { HasValue: true, Value: 0 } => new PtraceProbeResult(CanAttach: true,
-                Reason: "Linux: kernel.yama.ptrace_scope=0; same-UID peer attach allowed without CAP_SYS_PTRACE."),
+                Reason: "Linux: kernel.yama.ptrace_scope=0; same-UID peer attach allowed without CAP_SYS_PTRACE.")
+            {
+                HasCapSysPtrace = false,
+                PtraceScope = 0,
+            },
 
             { HasValue: true, Value: 1 } => new PtraceProbeResult(CanAttach: false,
-                Reason: "Linux: kernel.yama.ptrace_scope=1 (Debian/Ubuntu/WSL/Codespaces default) and sidecar lacks CAP_SYS_PTRACE — same-UID peer attach is blocked. Grant the capability (container: --cap-add SYS_PTRACE / cap_add: [SYS_PTRACE] / capabilities.add: ['SYS_PTRACE']) or relax the host (sudo sysctl -w kernel.yama.ptrace_scope=0)."),
+                Reason: "Linux: kernel.yama.ptrace_scope=1 (Debian/Ubuntu/WSL/Codespaces default) and sidecar lacks CAP_SYS_PTRACE — same-UID peer attach is blocked. Grant the capability (container: --cap-add SYS_PTRACE / cap_add: [SYS_PTRACE] / capabilities.add: ['SYS_PTRACE']) or relax the host (sudo sysctl -w kernel.yama.ptrace_scope=0).")
+            {
+                HasCapSysPtrace = false,
+                PtraceScope = 1,
+            },
 
             { HasValue: true, Value: 2 } => new PtraceProbeResult(CanAttach: false,
-                Reason: "Linux: kernel.yama.ptrace_scope=2 (admin-only). Grant CAP_SYS_PTRACE to the sidecar or relax the host to ptrace_scope=0."),
+                Reason: "Linux: kernel.yama.ptrace_scope=2 (admin-only). Grant CAP_SYS_PTRACE to the sidecar or relax the host to ptrace_scope=0.")
+            {
+                HasCapSysPtrace = false,
+                PtraceScope = 2,
+            },
 
             { HasValue: true, Value: 3 } => new PtraceProbeResult(CanAttach: false,
-                Reason: "Linux: kernel.yama.ptrace_scope=3 (no attach permitted). CAP_SYS_PTRACE cannot override this — relax the host sysctl or use the dump-based workflow (collect_process_dump + inspect_dump)."),
+                Reason: "Linux: kernel.yama.ptrace_scope=3 (no attach permitted). CAP_SYS_PTRACE cannot override this — relax the host sysctl or use the dump-based workflow (collect_process_dump + inspect_dump).")
+            {
+                HasCapSysPtrace = false,
+                PtraceScope = 3,
+            },
 
             { HasValue: true } => new PtraceProbeResult(CanAttach: false,
-                Reason: $"Linux: kernel.yama.ptrace_scope={scopeResult.Value} (unknown value) and sidecar lacks CAP_SYS_PTRACE — assuming attach is blocked. Grant the capability or set ptrace_scope=0."),
+                Reason: $"Linux: kernel.yama.ptrace_scope={scopeResult.Value} (unknown value) and sidecar lacks CAP_SYS_PTRACE — assuming attach is blocked. Grant the capability or set ptrace_scope=0.")
+            {
+                HasCapSysPtrace = false,
+                PtraceScope = scopeResult.Value,
+            },
 
             // No Yama tunable (kernel built without Yama LSM). Without Yama the classic
             // same-UID rule applies, so unprivileged attach is allowed.
             _ => new PtraceProbeResult(CanAttach: true,
-                Reason: "Linux: Yama LSM not enabled; classic same-UID ptrace attach is allowed without CAP_SYS_PTRACE."),
+                Reason: "Linux: Yama LSM not enabled; classic same-UID ptrace attach is allowed without CAP_SYS_PTRACE.")
+            {
+                HasCapSysPtrace = false,
+                PtraceScope = null,
+            },
         };
     }
 
@@ -172,4 +211,13 @@ public static class PtraceProbe
 /// <param name="Reason">Short human-readable reason — surfaced verbatim in
 /// <c>DiagnosticCapabilities.Notes</c> and in the structured PermissionDenied envelope
 /// when a ClrMD attach fails. Never null.</param>
-public sealed record PtraceProbeResult(bool CanAttach, string Reason);
+public sealed record PtraceProbeResult(bool CanAttach, string Reason)
+{
+    /// <summary>True when the sidecar currently holds <c>CAP_SYS_PTRACE</c>. False on
+    /// non-Linux hosts and on Linux when the capability is absent.</summary>
+    public bool HasCapSysPtrace { get; init; }
+
+    /// <summary>Value of <c>kernel.yama.ptrace_scope</c> when readable; null when Yama is not
+    /// enabled or on non-Linux hosts.</summary>
+    public int? PtraceScope { get; init; }
+}

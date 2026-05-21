@@ -35,15 +35,36 @@ public sealed record DiagnosticCapabilities(
     /// can be called against this process). False on cgroup v1 hosts and Windows.</summary>
     public bool CgroupV2 { get; init; }
 
+    /// <summary>True when the diagnostics host can resolve a working <c>perf</c> binary from
+    /// PATH / linux-tools candidates. This answers the "is perf installed?" part of the
+    /// kernel capability matrix separately from the privilege check.</summary>
+    public bool PerfInstalled { get; init; }
+
+    /// <summary>True when the Linux sidecar currently holds <c>CAP_PERFMON</c>. False on
+    /// non-Linux hosts and when the capability is absent. Off-CPU sampling may still be
+    /// possible without it when <c>perf_event_paranoid &lt;= -1</c> (or on Windows via ETW).</summary>
+    public bool HasCapPerfmon { get; init; }
+
+    /// <summary>Value of <c>/proc/sys/kernel/perf_event_paranoid</c> when readable on Linux;
+    /// null elsewhere. Helpful to explain why perf-based off-CPU capture is blocked even when
+    /// <c>perf</c> is installed.</summary>
+    public int? PerfEventParanoid { get; init; }
+
     /// <summary>True when reading <c>cpu.stat</c> / <c>cpu.max</c> is expected to succeed AND a
     /// quota is configured — i.e. CPU throttling is observable. False when the cgroup has no
     /// CPU quota (no quota → no throttling possible) or on non-Linux hosts.</summary>
     public bool CanSeeThrottle { get; init; }
 
+    /// <summary>True when Pressure Stall Information files were readable for the target cgroup
+    /// during capability detection. False on old kernels, cgroup v1 hosts, Windows, and any
+    /// environment where <c>*.pressure</c> files are absent/unreadable.</summary>
+    public bool PsiAvailable { get; init; }
+
     /// <summary>
     /// True when <c>collect_off_cpu_sample</c> is expected to succeed against this sidecar
     /// before the LLM commits to the (system-wide, privileged) capture. On Linux it requires
-    /// <c>perf</c> in <c>PATH</c> plus <c>CAP_PERFMON</c> / <c>perf_event_paranoid &lt;= -1</c>;
+    /// <c>perf</c> in <c>PATH</c> plus <c>CAP_PERFMON</c> / <c>CAP_SYS_ADMIN</c> /
+    /// <c>perf_event_paranoid &lt;= -1</c>;
     /// on Windows it requires the diagnostics process to be elevated (or hold
     /// <c>SeSystemProfilePrivilege</c>) so the NT Kernel Logger ContextSwitch provider can be
     /// enabled. False on macOS / other and whenever the sidecar lacks the prerequisite.
@@ -51,6 +72,16 @@ public sealed record DiagnosticCapabilities(
     /// of the target runtime.
     /// </summary>
     public bool CanSampleOffCpu { get; init; }
+
+    /// <summary>True when the Linux sidecar currently holds <c>CAP_SYS_PTRACE</c>. False on
+    /// non-Linux hosts and when the capability is absent. Exposed separately from
+    /// <see cref="CanAttachClrMD"/> because <c>ptrace_scope=0</c> also enables attach without
+    /// granting the capability.</summary>
+    public bool HasCapSysPtrace { get; init; }
+
+    /// <summary>Value of <c>/proc/sys/kernel/yama/ptrace_scope</c> when readable on Linux;
+    /// null on non-Linux hosts or when Yama is not enabled.</summary>
+    public int? PtraceScope { get; init; }
 
     /// <summary>
     /// True when the four ClrMD-backed tools (<c>collect_thread_snapshot</c>,
@@ -90,4 +121,9 @@ public sealed record DiagnosticCapabilities(
     /// privileges, OS gates). Useful when <see cref="CanCollectThreadSnapshot"/> is false.
     /// </summary>
     public string? ThreadSnapshotPreconditions { get; init; }
+
+    /// <summary>True when Windows kernel ContextSwitch tracing is available to the diagnostics
+    /// host (administrative elevation / <c>SeSystemProfilePrivilege</c>). Mirrors the ETW half
+    /// of the kernel capability matrix; false on non-Windows hosts.</summary>
+    public bool EtwKernelOk { get; init; }
 }

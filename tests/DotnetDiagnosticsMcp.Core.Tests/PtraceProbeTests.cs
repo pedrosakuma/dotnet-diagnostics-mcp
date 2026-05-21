@@ -27,6 +27,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.True(result.CanAttach);
+        Assert.True(result.HasCapSysPtrace);
+        Assert.Equal(1, result.PtraceScope);
         Assert.Contains("CAP_SYS_PTRACE held", result.Reason);
     }
 
@@ -42,6 +44,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.True(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Equal(0, result.PtraceScope);
         Assert.Contains("ptrace_scope=0", result.Reason);
     }
 
@@ -57,6 +61,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.False(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Equal(1, result.PtraceScope);
         Assert.Contains("ptrace_scope=1", result.Reason);
         Assert.Contains("--cap-add SYS_PTRACE", result.Reason);
         Assert.Contains("ptrace_scope=0", result.Reason);
@@ -74,6 +80,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.False(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Equal(2, result.PtraceScope);
         Assert.Contains("ptrace_scope=2", result.Reason);
     }
 
@@ -89,7 +97,26 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.False(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Equal(3, result.PtraceScope);
         Assert.Contains("ptrace_scope=3", result.Reason);
+        Assert.Contains("cannot override", result.Reason);
+    }
+
+    [Fact]
+    public void Scope3_blocks_even_with_cap_sys_ptrace()
+    {
+        var files = new Dictionary<string, string>
+        {
+            [PtraceProbe.ProcSelfStatusPath] = StatusWithCap,
+            [PtraceProbe.YamaPtraceScopePath] = "3",
+        };
+
+        var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
+
+        Assert.False(result.CanAttach);
+        Assert.True(result.HasCapSysPtrace);
+        Assert.Equal(3, result.PtraceScope);
         Assert.Contains("cannot override", result.Reason);
     }
 
@@ -104,6 +131,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.True(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Null(result.PtraceScope);
         Assert.Contains("Yama LSM not enabled", result.Reason);
     }
 
@@ -119,6 +148,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.True(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Equal(0, result.PtraceScope);
         Assert.Contains("ptrace_scope=0", result.Reason);
     }
 
@@ -134,6 +165,8 @@ public sealed class PtraceProbeTests
         var result = PtraceProbe.DetectLinux(ReadAllText(files), FileExists(files));
 
         Assert.False(result.CanAttach);
+        Assert.False(result.HasCapSysPtrace);
+        Assert.Equal(42, result.PtraceScope);
         Assert.Contains("unknown value", result.Reason);
     }
 }

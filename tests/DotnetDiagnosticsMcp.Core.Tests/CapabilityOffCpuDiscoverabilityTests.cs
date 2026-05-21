@@ -33,9 +33,16 @@ public sealed class CapabilityOffCpuDiscoverabilityTests
 
         caps.CanSampleOffCpu.Should().BeFalse(
             "the flag is an init-only addition; existing positional callers must still compile and default to a conservative false.");
+        caps.PerfInstalled.Should().BeFalse();
+        caps.HasCapPerfmon.Should().BeFalse();
+        caps.PerfEventParanoid.Should().BeNull();
+        caps.PsiAvailable.Should().BeFalse();
+        caps.HasCapSysPtrace.Should().BeFalse();
+        caps.PtraceScope.Should().BeNull();
         caps.CanCollectThreadSnapshot.Should().BeFalse();
         caps.ThreadSnapshotSource.Should().BeNull();
         caps.ThreadSnapshotPreconditions.Should().BeNull();
+        caps.EtwKernelOk.Should().BeFalse();
     }
 
     [Fact]
@@ -54,16 +61,30 @@ public sealed class CapabilityOffCpuDiscoverabilityTests
             CanCollectProcessDump: true,
             Notes: "") with
         {
+            PerfInstalled = true,
+            HasCapPerfmon = true,
+            PerfEventParanoid = -1,
+            PsiAvailable = true,
             CanSampleOffCpu = true,
+            HasCapSysPtrace = true,
+            PtraceScope = 1,
             CanCollectThreadSnapshot = true,
             ThreadSnapshotSource = "linux-native-stack",
             ThreadSnapshotPreconditions = "requires eu-stack",
+            EtwKernelOk = true,
         };
 
+        caps.PerfInstalled.Should().BeTrue();
+        caps.HasCapPerfmon.Should().BeTrue();
+        caps.PerfEventParanoid.Should().Be(-1);
+        caps.PsiAvailable.Should().BeTrue();
         caps.CanSampleOffCpu.Should().BeTrue();
+        caps.HasCapSysPtrace.Should().BeTrue();
+        caps.PtraceScope.Should().Be(1);
         caps.CanCollectThreadSnapshot.Should().BeTrue();
         caps.ThreadSnapshotSource.Should().Be("linux-native-stack");
         caps.ThreadSnapshotPreconditions.Should().Be("requires eu-stack");
+        caps.EtwKernelOk.Should().BeTrue();
     }
 
     [Fact]
