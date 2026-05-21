@@ -5,11 +5,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace DotnetDiagnosticsMcp.Core.Jobs;
 
 /// <summary>
-/// Pragmatic workaround for long-running collectors while the MCP C# SDK lacks the
-/// experimental Tasks primitive (spec 2025-11-25). A tool can kick off the underlying
-/// collection in the background, return a job handle immediately, and the LLM polls
-/// <c>get_collection_status</c> until the job completes. Mirrors the eventual Tasks
-/// semantics closely enough that swapping to native Tasks later is a near-trivial port.
+/// Legacy compatibility layer for long-running collectors. MCP Tasks are now
+/// available via the SDK-backed <c>IMcpTaskStore</c>, but existing clients still use
+/// <c>runAsJob=true</c> plus <c>get_collection_status</c>/<c>cancel_collection</c>.
+/// This runner preserves that older polling flow without changing the underlying
+/// collector contracts.
 /// </summary>
 public interface ICollectionJobRunner
 {

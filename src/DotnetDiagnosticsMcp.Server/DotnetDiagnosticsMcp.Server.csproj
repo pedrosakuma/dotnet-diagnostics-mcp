@@ -6,6 +6,7 @@
     <Description>MCP server exposing dotnet-diagnostics-mcp Core tools via Streamable HTTP transport.</Description>
     <RootNamespace>DotnetDiagnosticsMcp.Server</RootNamespace>
     <AssemblyName>DotnetDiagnosticsMcp.Server</AssemblyName>
+    <NoWarn>$(NoWarn);MCPEXP001</NoWarn>
   </PropertyGroup>
 
   <!-- Packaging (issue #27): published to NuGet as a .NET global tool. Consumers install

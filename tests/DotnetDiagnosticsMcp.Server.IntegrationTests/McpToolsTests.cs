@@ -153,6 +153,128 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
     }
 
     [Fact]
+    public async Task TasksCapability_AndToolMetadata_AreAdvertised()
+    {
+        await using var client = await ConnectAsync();
+
+        client.ServerCapabilities.Tasks.Should().NotBeNull();
+        client.ServerCapabilities.Tasks!.List.Should().NotBeNull();
+        client.ServerCapabilities.Tasks.Cancel.Should().NotBeNull();
+        client.ServerCapabilities.Tasks.Requests.Should().NotBeNull();
+        client.ServerCapabilities.Tasks.Requests!.Tools.Should().NotBeNull();
+        client.ServerCapabilities.Tasks.Requests.Tools!.Call.Should().NotBeNull();
+
+        var tools = await client.ListToolsAsync(cancellationToken: CancellationToken.None);
+        foreach (var toolName in new[] { "collect_cpu_sample", "collect_exceptions", "collect_gc_events" })
+        {
+            var tool = tools.Single(t => t.Name == toolName);
+            tool.ProtocolTool.Execution.Should().NotBeNull($"{toolName} must advertise execution metadata for MCP Tasks");
+            tool.ProtocolTool.Execution!.TaskSupport.Should().Be(ModelContextProtocol.Protocol.ToolTaskSupport.Optional);
+        }
+    }
+
+    [Fact]
+    public async Task TaskAugmentedCollectCpuSample_RoundTripsThroughSpecTasks()
+    {
+        await using var client = await ConnectAsync();
+
+        var task = await client.CallToolAsTaskAsync(
+            "collect_cpu_sample",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 1,
+                ["topN"] = 5,
+                ["resolveSourceLines"] = false,
+            },
+            new ModelContextProtocol.Protocol.McpTaskMetadata { TimeToLive = TimeSpan.FromMinutes(1) },
+            cancellationToken: CancellationToken.None);
+
+        task.TaskId.Should().NotBeNullOrWhiteSpace();
+        task.Status.Should().Be(ModelContextProtocol.Protocol.McpTaskStatus.Working);
+        task.PollInterval.Should().NotBeNull();
+
+        var listed = await client.ListTasksAsync(cancellationToken: CancellationToken.None);
+        listed.Select(t => t.TaskId).Should().Contain(task.TaskId);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        ModelContextProtocol.Protocol.McpTask terminal = task;
+        while (DateTime.UtcNow < deadline)
+        {
+            terminal = await client.GetTaskAsync(task.TaskId, cancellationToken: CancellationToken.None);
+            if (terminal.Status is ModelContextProtocol.Protocol.McpTaskStatus.Completed or ModelContextProtocol.Protocol.McpTaskStatus.Failed or ModelContextProtocol.Protocol.McpTaskStatus.Cancelled)
+            {
+                break;
+            }
+
+            await Task.Delay(terminal.PollInterval ?? TimeSpan.FromMilliseconds(200));
+        }
+
+        terminal.Status.Should().Be(ModelContextProtocol.Protocol.McpTaskStatus.Completed);
+
+        var rawResult = await client.GetTaskResultAsync(task.TaskId, cancellationToken: CancellationToken.None);
+        var callToolResult = JsonSerializer.Deserialize<ModelContextProtocol.Protocol.CallToolResult>(rawResult.GetRawText(), DeserializeOptions);
+        callToolResult.Should().NotBeNull();
+        callToolResult!.IsError.Should().NotBe(true);
+
+        var envelope = DeserializeEnvelope(callToolResult);
+        envelope.Should().NotBeNull();
+        envelope!.Error.Should().BeNull();
+        envelope.Data.GetProperty("processId").GetInt32().Should().Be(Environment.ProcessId);
+        envelope.Data.GetProperty("totalSamples").GetInt32().Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task TaskAugmentedCollectExceptions_CanBeCancelledViaLegacyBridge()
+    {
+        await using var client = await ConnectAsync();
+
+        var task = await client.CallToolAsTaskAsync(
+            "collect_exceptions",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 10,
+                ["maxRecent"] = 10,
+            },
+            new ModelContextProtocol.Protocol.McpTaskMetadata { TimeToLive = TimeSpan.FromMinutes(1) },
+            cancellationToken: CancellationToken.None);
+
+        var cancelResult = await client.CallToolAsync(
+            "cancel_collection",
+            new Dictionary<string, object?> { ["handle"] = task.TaskId },
+            cancellationToken: CancellationToken.None);
+
+        cancelResult.IsError.Should().NotBe(true);
+        var cancelReport = DeserializeStructured<CancelCollectionReport>(cancelResult);
+        cancelReport.Should().NotBeNull();
+        cancelReport!.CancellationRequested.Should().BeTrue();
+
+        var bridgedStatus = await PollCollectionStatusAsync(client, task.TaskId);
+        bridgedStatus.Error.Should().BeNull();
+        bridgedStatus.Status.Should().BeOneOf("working", "cancelled");
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        ModelContextProtocol.Protocol.McpTask terminal = task;
+        while (DateTime.UtcNow < deadline)
+        {
+            terminal = await client.GetTaskAsync(task.TaskId, cancellationToken: CancellationToken.None);
+            if (terminal.Status == ModelContextProtocol.Protocol.McpTaskStatus.Cancelled)
+            {
+                break;
+            }
+
+            await Task.Delay(200);
+        }
+
+        terminal.Status.Should().Be(ModelContextProtocol.Protocol.McpTaskStatus.Cancelled);
+
+        var finalBridgeStatus = await PollCollectionStatusAsync(client, task.TaskId);
+        finalBridgeStatus.Error.Should().BeNull();
+        finalBridgeStatus.Status.Should().Be("cancelled");
+    }
+
+    [Fact]
     public async Task ListPrompts_ExposesDiagnosticPlaybooks()
     {
         await using var client = await ConnectAsync();

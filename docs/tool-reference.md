@@ -78,6 +78,32 @@ Explicit `topN` always wins over the depth default — if you pass
 `topN=10, depth=Summary` you get up to 10 hotspots inline (the LLM knows what
 it asked for).
 
+### Long-running collects: MCP Tasks vs `runAsJob`
+
+As of the `2025-11-25` protocol bump, the server registers an
+`IMcpTaskStore`, advertises `capabilities.tasks.{list,cancel,requests.tools.call}`
+and marks these tools with `execution.taskSupport: "optional"` in `tools/list`:
+
+- `collect_cpu_sample`
+- `collect_exceptions`
+- `collect_gc_events`
+
+**Spec-compliant clients should prefer MCP Tasks** for long windows:
+
+1. send `tools/call` with `params.task` (or use `McpClient.CallToolAsTaskAsync`)
+2. poll `tasks/get`
+3. fetch the terminal `CallToolResult` via `tasks/result`
+4. cancel via `tasks/cancel`
+
+The legacy fallback remains for clients that do not implement Tasks yet:
+
+- `collect_cpu_sample(..., runAsJob=true)`
+- `get_collection_status(handle)`
+- `cancel_collection(handle)`
+
+`get_collection_status` also accepts MCP `taskId`s so non-spec clients can read a
+Task's state through the legacy tool. Do **not** combine task augmentation with
+`runAsJob=true` on the same call.
 
 ### Prompts (curated playbooks)
 
@@ -552,6 +578,11 @@ sudo apt install linux-tools-$(uname -r) linux-tools-generic
 **Sampling rate** is the runtime default (~1 kHz). A 10-second window typically
 yields a few thousand samples; bump `durationSeconds` for sparse workloads.
 
+**Long-running pattern:** this tool supports MCP Tasks (`execution.taskSupport:
+"optional"`). Prefer task-augmented `tools/call` + `tasks/get`/`tasks/result`
+when your client supports the spec; otherwise use the legacy
+`runAsJob=true` + `get_collection_status(handle)` fallback.
+
 ---
 
 ## `collect_allocation_sample`
@@ -662,6 +693,11 @@ capped to `maxRecent` (default `100`, echoed back as `recentCap`); when
 observed, not a random sample. Raise `maxRecent` for storms where the tail
 matters; lower it when you only want a quick signal.
 
+**Long-running pattern:** this tool supports MCP Tasks (`execution.taskSupport:
+"optional"`). Spec clients should use task-augmented `tools/call`; legacy
+clients can still fall back to polling through `get_collection_status(taskId)`
+if they need a tool-shaped status check.
+
 ---
 
 ## `collect_gc_events`
@@ -676,6 +712,10 @@ returns aggregate + per-collection details.
 | `processId` | `int` | — | Target process id |
 | `durationSeconds` | `int` | `10` | Window length |
 | `maxEvents` | `int` | `200` | Cap on individual GC events returned |
+
+**Long-running pattern:** this tool supports MCP Tasks (`execution.taskSupport:
+"optional"`). Spec clients should use task-augmented `tools/call`; legacy
+clients can still read a task via `get_collection_status(taskId)` when needed.
 
 **Returns:** `GcSummary`:
 

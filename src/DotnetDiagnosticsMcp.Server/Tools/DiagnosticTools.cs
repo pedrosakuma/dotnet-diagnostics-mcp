@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Reflection;
+using System.Text.Json;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Collection;
@@ -17,6 +19,8 @@ using DotnetDiagnosticsMcp.Core.OffCpu;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Threads;
 using Microsoft.Diagnostics.NETCore.Client;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace DotnetDiagnosticsMcp.Server.Tools;
@@ -431,13 +435,15 @@ public sealed class DiagnosticTools
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
-        UseStructuredContent = true)]
+        UseStructuredContent = true,
+        TaskSupport = ToolTaskSupport.Optional)]
     [Description(
         "Captures a CPU sample from the target process and returns the top-N hotspots aggregated by method. " +
         "On CoreCLR uses EventPipe SampleProfiler (managed frames with mvid+token handoff). " +
         "On NativeAOT (Linux) falls back to 'perf record' when available — frames are native symbols only, MethodIdentity is null. " +
         "Each hotspot reports both inclusive and exclusive sample counts. Run after snapshot_counters shows elevated cpu-usage. " +
-        "Set runAsJob=true to schedule the collection on the server and poll with get_collection_status — useful for long durationSeconds windows that would otherwise hold the MCP request open.")]
+        "Spec-compliant clients can call this tool as an MCP Task (tools/call with params.task) and poll via tasks/get + tasks/result. " +
+        "Legacy clients can still set runAsJob=true and poll get_collection_status.")]
     public static async Task<DiagnosticResult<CpuSample>> CollectCpuSample(
         ICpuSampler sampler,
         IDiagnosticHandleStore handles,
@@ -1017,7 +1023,8 @@ public sealed class DiagnosticTools
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
-        UseStructuredContent = true)]
+        UseStructuredContent = true,
+        TaskSupport = ToolTaskSupport.Optional)]
     [Description(
         "Subscribes to the runtime Exception keyword on Microsoft-Windows-DotNETRuntime and " +
         "captures every managed exception thrown by the target process during the window. " +
@@ -1025,6 +1032,7 @@ public sealed class DiagnosticTools
         "the first maxRecent individual exception details — when TotalExceptions exceeds " +
         "maxRecent the Recent list is truncated to the head of the stream (the cap that was " +
         "applied is echoed back as ExceptionSnapshot.RecentCap). " +
+        "Spec-compliant clients can call this tool as an MCP Task and poll via tasks/get + tasks/result. " +
         "IMPORTANT: start this BEFORE the workload you want to observe — exceptions before the session opens are missed.")]
     public static async Task<DiagnosticResult<ExceptionSnapshot>> CollectExceptions(
         IExceptionCollector collector,
@@ -1086,11 +1094,13 @@ public sealed class DiagnosticTools
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
-        UseStructuredContent = true)]
+        UseStructuredContent = true,
+        TaskSupport = ToolTaskSupport.Optional)]
     [Description(
         "Subscribes to the runtime GC keyword and pairs GCStart/GCStop events to compute pause " +
         "durations per collection. Returns total collections, total/max pause time, counts per " +
-        "generation, and a bounded list of individual GC events.")]
+        "generation, and a bounded list of individual GC events. Spec-compliant clients can call " +
+        "this tool as an MCP Task and poll via tasks/get + tasks/result.")]
     public static async Task<DiagnosticResult<GcSummary>> CollectGcEvents(
         IGcCollector collector,
         IProcessContextResolver resolver,
@@ -2230,61 +2240,116 @@ public sealed class DiagnosticTools
         UseStructuredContent = true)]
     [Description(
         "Polls the status of a background collection started with runAsJob=true (e.g. collect_cpu_sample). " +
-        "Returns the current lifecycle phase (running, completed, failed, canceled), elapsed time, and the " +
-        "final DiagnosticResult once the job terminates. Until then poll periodically (the started job's " +
-        "response message contains the expected duration).")]
-    public static DiagnosticResult<CollectionStatusReport> GetCollectionStatus(
+        "When given an MCP Task id, also mirrors the task state from tasks/get so legacy clients can bridge " +
+        "into the spec-compliant long-running flow. Returns the current lifecycle phase, elapsed time, and " +
+        "the final DiagnosticResult once the job or task terminates.")]
+    public static async Task<DiagnosticResult<CollectionStatusReport>> GetCollectionStatus(
         IDiagnosticHandleStore handles,
-        [Description("Job handle returned by the original collect_* call with runAsJob=true.")] string handle)
+        IMcpTaskStore taskStore,
+        McpServer server,
+        [Description("Legacy job handle from runAsJob=true, or an MCP taskId returned by a task-augmented tools/call.")] string handle)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CollectionStatusReport>(nameof(handle), "is required");
 
         var job = handles.TryGet<DotnetDiagnosticsMcp.Core.Jobs.CollectionJob>(handle);
-        if (job is null)
+        if (job is not null)
+        {
+            var snap = job.Snapshot();
+            var report = new CollectionStatusReport(
+                Handle: snap.Handle,
+                Kind: snap.Kind,
+                ProcessId: snap.ProcessId,
+                Status: snap.Status.ToString().ToLowerInvariant(),
+                StartedAt: snap.StartedAt,
+                ElapsedSeconds: snap.ElapsedSeconds,
+                CompletedAt: snap.CompletedAt,
+                Result: snap.Result,
+                Error: snap.Error);
+
+            var summary = snap.Status switch
+            {
+                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Running =>
+                    $"Job '{snap.Kind}' still running ({snap.ElapsedSeconds:F1}s elapsed). Poll again shortly.",
+                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Completed =>
+                    $"Job '{snap.Kind}' completed in {snap.ElapsedSeconds:F1}s. The full DiagnosticResult is embedded in the result field.",
+                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Failed =>
+                    $"Job '{snap.Kind}' failed after {snap.ElapsedSeconds:F1}s: {snap.Error?.Message ?? "unknown error"}.",
+                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Canceled =>
+                    $"Job '{snap.Kind}' was canceled after {snap.ElapsedSeconds:F1}s.",
+                _ => $"Job '{snap.Kind}' status: {snap.Status}.",
+            };
+
+            var hints = snap.IsTerminal
+                ? Array.Empty<NextActionHint>()
+                : new[]
+                {
+                    new NextActionHint("get_collection_status", "Poll again — the job has not finished.",
+                        new Dictionary<string, object?> { ["handle"] = snap.Handle }),
+                    new NextActionHint("cancel_collection", "Abort the job if you no longer need the result.",
+                        new Dictionary<string, object?> { ["handle"] = snap.Handle }),
+                };
+
+            return DiagnosticResult.Ok(report, summary, hints);
+        }
+
+        var sessionId = TryGetServerSessionId(server);
+        var task = await taskStore.GetTaskAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
+        if (task is null)
         {
             return DiagnosticResult.Fail<CollectionStatusReport>(
-                $"No collection job found for handle '{handle}'. Either it expired (TTL elapsed), was invalidated when the target process exited, or never existed.",
+                $"No collection job or MCP task found for handle '{handle}'. It may have expired, been invalidated when the target process exited, or never existed.",
                 new DiagnosticError("HandleNotFound", $"Unknown or expired handle '{handle}'."),
-                new NextActionHint("collect_cpu_sample", "Restart the collection — pass runAsJob=true to get a fresh handle.",
+                new NextActionHint("collect_cpu_sample", "Restart the collection — pass runAsJob=true or use task-augmented tools/call to get a fresh handle.",
                     new Dictionary<string, object?> { ["runAsJob"] = true }));
         }
 
-        var snap = job.Snapshot();
-        var report = new CollectionStatusReport(
-            Handle: snap.Handle,
-            Kind: snap.Kind,
-            ProcessId: snap.ProcessId,
-            Status: snap.Status.ToString().ToLowerInvariant(),
-            StartedAt: snap.StartedAt,
-            ElapsedSeconds: snap.ElapsedSeconds,
-            CompletedAt: snap.CompletedAt,
-            Result: snap.Result,
-            Error: snap.Error);
-
-        var summary = snap.Status switch
+        JsonElement? taskResult = null;
+        if (task.Status is McpTaskStatus.Completed or McpTaskStatus.Failed or McpTaskStatus.Cancelled)
         {
-            DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Running =>
-                $"Job '{snap.Kind}' still running ({snap.ElapsedSeconds:F1}s elapsed). Poll again shortly.",
-            DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Completed =>
-                $"Job '{snap.Kind}' completed in {snap.ElapsedSeconds:F1}s. The full DiagnosticResult is embedded in the result field.",
-            DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Failed =>
-                $"Job '{snap.Kind}' failed after {snap.ElapsedSeconds:F1}s: {snap.Error?.Message ?? "unknown error"}.",
-            DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Canceled =>
-                $"Job '{snap.Kind}' was canceled after {snap.ElapsedSeconds:F1}s.",
-            _ => $"Job '{snap.Kind}' status: {snap.Status}.",
+            try
+            {
+                taskResult = await taskStore.GetTaskResultAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Cancelled tasks commonly have no stored payload; keep Result=null.
+            }
+        }
+
+        var elapsedSeconds = (task.LastUpdatedAt - task.CreatedAt).TotalSeconds;
+        var terminal = task.Status is McpTaskStatus.Completed or McpTaskStatus.Failed or McpTaskStatus.Cancelled;
+        var taskReport = new CollectionStatusReport(
+            Handle: task.TaskId,
+            Kind: "mcp-task",
+            ProcessId: 0,
+            Status: task.Status.ToString().ToLowerInvariant(),
+            StartedAt: task.CreatedAt,
+            ElapsedSeconds: elapsedSeconds,
+            CompletedAt: terminal ? task.LastUpdatedAt : null,
+            Result: taskResult,
+            Error: null);
+
+        var taskSummary = task.Status switch
+        {
+            McpTaskStatus.Working => $"Task '{task.TaskId}' is working ({elapsedSeconds:F1}s elapsed). Poll again shortly.",
+            McpTaskStatus.InputRequired => $"Task '{task.TaskId}' is waiting for additional input. A spec-compliant client should call tasks/result.",
+            McpTaskStatus.Completed => $"Task '{task.TaskId}' completed in {elapsedSeconds:F1}s. The stored CallToolResult is embedded in the result field when available.",
+            McpTaskStatus.Failed => $"Task '{task.TaskId}' failed after {elapsedSeconds:F1}s.",
+            McpTaskStatus.Cancelled => $"Task '{task.TaskId}' was cancelled after {elapsedSeconds:F1}s.",
+            _ => $"Task '{task.TaskId}' status: {task.Status}.",
         };
 
-        var hints = snap.IsTerminal
+        var taskHints = terminal
             ? Array.Empty<NextActionHint>()
             : new[]
             {
-                new NextActionHint("get_collection_status", "Poll again — the job has not finished.",
-                    new Dictionary<string, object?> { ["handle"] = snap.Handle }),
-                new NextActionHint("cancel_collection", "Abort the job if you no longer need the result.",
-                    new Dictionary<string, object?> { ["handle"] = snap.Handle }),
+                new NextActionHint("get_collection_status", "Poll again — the task has not finished.",
+                    new Dictionary<string, object?> { ["handle"] = task.TaskId }),
+                new NextActionHint("cancel_collection", "Abort the task if you no longer need the result.",
+                    new Dictionary<string, object?> { ["handle"] = task.TaskId }),
             };
 
-        return DiagnosticResult.Ok(report, summary, hints);
+        return DiagnosticResult.Ok(taskReport, taskSummary, taskHints);
     }
 
     [McpServerTool(
@@ -2295,24 +2360,61 @@ public sealed class DiagnosticTools
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Signals a background collection job (started with runAsJob=true) to stop. Cancellation is " +
-        "cooperative — the underlying collector may take a moment to unwind. The job's status will " +
-        "eventually transition to 'canceled'; poll get_collection_status to confirm.")]
-    public static DiagnosticResult<CancelCollectionReport> CancelCollection(
+        "Signals a background collection job (started with runAsJob=true) to stop. When given an MCP taskId, " +
+        "bridges to the SDK task-cancellation path so legacy clients can still abort a task-augmented collect. " +
+        "Cancellation is cooperative — the underlying collector may take a moment to unwind.")]
+    public static async Task<DiagnosticResult<CancelCollectionReport>> CancelCollection(
         DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
-        [Description("Job handle returned by the original collect_* call with runAsJob=true.")] string handle)
+        IMcpTaskStore taskStore,
+        McpServer server,
+        [Description("Legacy job handle from runAsJob=true, or an MCP taskId returned by a task-augmented tools/call.")] string handle)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CancelCollectionReport>(nameof(handle), "is required");
 
         var requested = jobs.Cancel(handle);
-        var report = new CancelCollectionReport(handle, requested);
-        var summary = requested
-            ? $"Cancellation requested for job '{handle}'. Poll get_collection_status to confirm the final state."
-            : $"No active job found for handle '{handle}'. It may have already completed or expired.";
+        string summary;
+        if (requested)
+        {
+            summary = $"Cancellation requested for job '{handle}'. Poll get_collection_status to confirm the final state.";
+        }
+        else
+        {
+            var sessionId = TryGetServerSessionId(server);
+            var task = await taskStore.GetTaskAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
+            if (task is not null)
+            {
+                TryCancelSdkTask(server, handle);
+                await taskStore.CancelTaskAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
+                requested = true;
+                summary = $"Cancellation requested for task '{handle}'. Spec-compliant clients may also call tasks/cancel directly.";
+            }
+            else
+            {
+                summary = $"No active job or MCP task found for handle '{handle}'. It may have already completed or expired.";
+            }
+        }
 
+        var report = new CancelCollectionReport(handle, requested);
         return DiagnosticResult.Ok(report, summary,
-            new NextActionHint("get_collection_status", "Confirm the job reached a terminal state.",
+            new NextActionHint("get_collection_status", "Confirm the handle reached a terminal state.",
                 new Dictionary<string, object?> { ["handle"] = handle }));
+    }
+
+    private static string? TryGetServerSessionId(McpServer server)
+        => server.GetType().GetProperty("SessionId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(server) as string;
+
+    private static bool TryCancelSdkTask(McpServer server, string taskId)
+    {
+        var providerField = server.GetType().GetField("_taskCancellationTokenProvider", BindingFlags.Instance | BindingFlags.NonPublic);
+        var provider = providerField?.GetValue(server);
+        var cancel = provider?.GetType().GetMethod("Cancel", BindingFlags.Instance | BindingFlags.Public);
+        if (cancel is null)
+        {
+            return false;
+        }
+
+        cancel.Invoke(provider, new object?[] { taskId });
+        return true;
     }
 
     private static DiagnosticResult<T> InvalidArg<T>(string parameterName, string requirement)
