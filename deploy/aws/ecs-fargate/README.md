@@ -101,16 +101,32 @@ underlying invariant.
 
 ## Deploy
 
+The example parameters file uses the `aws cloudformation create-stack
+--parameters file://...` JSON shape (an object with a `Parameters` array of
+`{ParameterKey, ParameterValue}` entries). That format does not work with
+`aws cloudformation deploy --parameter-overrides file://...`, so the
+commands below use `create-stack` / `update-stack`.
+
 ```bash
 cp deploy/aws/ecs-fargate/parameters.example.json /tmp/diag-params.json
 # Edit /tmp/diag-params.json with your cluster ARN, subnets, security group,
 # app image, and Secrets Manager ARN.
 
-aws cloudformation deploy \
+# First deploy:
+aws cloudformation create-stack \
   --stack-name dotnet-diagnostics-mcp \
-  --template-file deploy/aws/ecs-fargate/main.yaml \
+  --template-body file://deploy/aws/ecs-fargate/main.yaml \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides file:///tmp/diag-params.json
+  --parameters file:///tmp/diag-params.json
+
+aws cloudformation wait stack-create-complete --stack-name dotnet-diagnostics-mcp
+
+# Subsequent updates:
+aws cloudformation update-stack \
+  --stack-name dotnet-diagnostics-mcp \
+  --template-body file://deploy/aws/ecs-fargate/main.yaml \
+  --capabilities CAPABILITY_IAM \
+  --parameters file:///tmp/diag-params.json
 ```
 
 The stack creates:

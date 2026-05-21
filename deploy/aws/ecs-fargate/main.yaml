@@ -67,11 +67,22 @@ Parameters:
 
   BearerTokenSecretArn:
     Type: String
+    AllowedPattern: "^arn:aws[a-zA-Z-]*:secretsmanager:[^:]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
     Description: >
-      ARN of an AWS Secrets Manager secret holding the MCP bearer token. The
-      secret value is injected into the diag container as MCP_BEARER_TOKEN.
-      For a single-value secret, point at the secret ARN directly. For a
-      JSON secret use the "arn:...:secret:name-AbCdEf:KEY::" form.
+      Base ARN of an AWS Secrets Manager secret holding the MCP bearer token.
+      Must be the bare secret ARN (no JSON-key / version-stage / version-id
+      suffix) — that base ARN is what the execution role gets
+      secretsmanager:GetSecretValue on. To pull a single field out of a JSON
+      secret, set BearerTokenSecretJsonKey separately.
+
+  BearerTokenSecretJsonKey:
+    Type: String
+    Default: ""
+    Description: >
+      Optional JSON key inside the Secrets Manager secret. When non-empty,
+      the diag container's MCP_BEARER_TOKEN is sourced from
+      "<BearerTokenSecretArn>:<BearerTokenSecretJsonKey>::" while the IAM
+      policy stays on the base secret ARN. Leave empty for a plain-text secret.
 
   TaskCpu:
     Type: String
@@ -113,6 +124,7 @@ Parameters:
 Conditions:
   HasAppCommand: !Not [!Equals [!Join ["", !Ref AppCommand], ""]]
   EcsExecEnabled: !Equals [!Ref EnableEcsExec, "true"]
+  HasSecretJsonKey: !Not [!Equals [!Ref BearerTokenSecretJsonKey, ""]]
 
 Resources:
   LogGroup:
@@ -216,7 +228,10 @@ Resources:
               Value: !Sub http://0.0.0.0:${DiagPort}
           Secrets:
             - Name: MCP_BEARER_TOKEN
-              ValueFrom: !Ref BearerTokenSecretArn
+              ValueFrom: !If
+                - HasSecretJsonKey
+                - !Sub "${BearerTokenSecretArn}:${BearerTokenSecretJsonKey}::"
+                - !Ref BearerTokenSecretArn
           MountPoints:
             - SourceVolume: diag-tmp
               ContainerPath: /tmp
