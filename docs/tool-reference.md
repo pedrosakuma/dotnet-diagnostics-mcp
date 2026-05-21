@@ -166,13 +166,15 @@ erro fatal. Em Windows / cgroup v1 / sem cgroup, devolve `InContainer=false`
 + `CgroupVersion` correto e `Notes` explicativo (job-object metrics ainda não
 foram wired).
 
-O `get_diagnostic_capabilities` ganhou 3 flags pra você saber se chamar vale a
-pena antes: `InContainer`, `CgroupV2`, `CanSeeThrottle` (true sse há quota
-configurada → throttling é observável). Slice 2b adicionou
-**`CanSampleOffCpu`** — true quando o sidecar tem perf + `CAP_PERFMON` (Linux)
-ou está elevado (Windows). Quando false, `Notes` traz a hint concreta de
-elevação / capability antes da LLM tentar `collect_off_cpu_sample` num sidecar
-sem privilégio.
+O `get_diagnostic_capabilities` ganhou as flags do kernel-side para você saber
+se vale a pena tentar a coleta antes: `InContainer`, `CgroupV2`,
+`CanSeeThrottle` (true sse há quota configurada → throttling é observável),
+`PsiAvailable`, `PerfInstalled`, `HasCapPerfmon`, `PerfEventParanoid`,
+`HasCapSysPtrace`, `PtraceScope` e `EtwKernelOk`. Slice 2b também expõe
+**`CanSampleOffCpu`** — true quando o sidecar já cumpre os pré-requisitos do
+backend (Linux: perf + privilégio suficiente para `sched_switch`; Windows:
+processo elevado). Quando false, `Notes` traz a hint concreta do motivo antes
+da LLM tentar `collect_off_cpu_sample` num sidecar sem privilégio.
 
 NextActionHints: throttle > 5% sugere `collect_cpu_sample` direto; memória >
 85% do limite sugere `inspect_live_heap` antes do OOM-kill.

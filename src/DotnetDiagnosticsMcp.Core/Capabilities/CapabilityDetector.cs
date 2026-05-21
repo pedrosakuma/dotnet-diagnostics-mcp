@@ -50,9 +50,12 @@ public sealed class CapabilityDetector : ICapabilityDetector
         var loadedModules = LoadedModuleInspector.TryGetSignature(processId);
         var runtime = ClassifyRuntime(snapshot, probe, loadedModules);
 
+        var perfHost = PerfHostProbe.Detect();
         var perfAvailable = _perfSampler is not null && _perfSampler.IsAvailable();
         var etwAvailable = _etwSampler is not null && _etwSampler.IsAvailable();
-        var canSampleOffCpu = _offCpuSampler is not null && _offCpuSampler.IsAvailable();
+        var canSampleOffCpu = OperatingSystem.IsLinux()
+            ? _offCpuSampler is not null && _offCpuSampler.IsAvailable() && perfHost.CanTraceSchedSwitch
+            : _offCpuSampler is not null && _offCpuSampler.IsAvailable();
         var ptrace = PtraceProbe.Detect();
         var euStackAvailable = IsEuStackAvailable();
         var (canCollectThreadSnapshot, threadSnapshotSource, threadSnapshotPreconditions) =
@@ -77,12 +80,13 @@ public sealed class CapabilityDetector : ICapabilityDetector
             perfAvailable,
             etwAvailable,
             canSampleOffCpu,
+            perfHost,
             ptrace,
             canCollectThreadSnapshot,
             threadSnapshotSource,
             threadSnapshotPreconditions);
 
-        var (inContainer, cgroupV2, canSeeThrottle) = await DetectContainerFlagsAsync(processId, cancellationToken).ConfigureAwait(false);
+        var (inContainer, cgroupV2, canSeeThrottle, psiAvailable) = await DetectContainerFlagsAsync(processId, cancellationToken).ConfigureAwait(false);
 
         return new DiagnosticCapabilities(
             ProcessId: processId,
@@ -99,31 +103,39 @@ public sealed class CapabilityDetector : ICapabilityDetector
         {
             InContainer = inContainer,
             CgroupV2 = cgroupV2,
+            PerfInstalled = perfHost.PerfInstalled,
+            HasCapPerfmon = perfHost.HasCapPerfmon,
+            PerfEventParanoid = perfHost.PerfEventParanoid,
             CanSeeThrottle = canSeeThrottle,
+            PsiAvailable = psiAvailable,
             CanSampleOffCpu = canSampleOffCpu,
+            HasCapSysPtrace = ptrace.HasCapSysPtrace,
+            PtraceScope = ptrace.PtraceScope,
             CanAttachClrMD = ptrace.CanAttach,
             AttachClrMdReason = ptrace.Reason,
             CanCollectThreadSnapshot = canCollectThreadSnapshot,
             ThreadSnapshotSource = threadSnapshotSource,
             ThreadSnapshotPreconditions = threadSnapshotPreconditions,
+            EtwKernelOk = etwAvailable,
         };
     }
 
-    private async Task<(bool InContainer, bool CgroupV2, bool CanSeeThrottle)> DetectContainerFlagsAsync(int processId, CancellationToken ct)
+    private async Task<(bool InContainer, bool CgroupV2, bool CanSeeThrottle, bool PsiAvailable)> DetectContainerFlagsAsync(int processId, CancellationToken ct)
     {
-        if (_containerSignals is null) return (false, false, false);
+        if (_containerSignals is null) return (false, false, false, false);
         try
         {
             var signals = await _containerSignals.CollectAsync(processId, ct).ConfigureAwait(false);
             return (
                 InContainer: signals.InContainer,
                 CgroupV2: signals.CgroupVersion == CgroupVersion.V2,
-                CanSeeThrottle: signals.Cpu?.QuotaCores is > 0);
+                CanSeeThrottle: signals.Cpu?.QuotaCores is > 0,
+                PsiAvailable: signals.Pressure is not null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "Container signal probe failed for pid {Pid} during capability detection.", processId);
-            return (false, false, false);
+            return (false, false, false, false);
         }
     }
 
@@ -274,6 +286,7 @@ public sealed class CapabilityDetector : ICapabilityDetector
         bool perfAvailable,
         bool etwAvailable,
         bool canSampleOffCpu,
+        PerfHostProbeResult perfHost,
         PtraceProbeResult ptrace,
         bool canCollectThreadSnapshot,
         string? threadSnapshotSource,
@@ -318,9 +331,21 @@ public sealed class CapabilityDetector : ICapabilityDetector
         }
         else if (OperatingSystem.IsLinux())
         {
-            primary += " collect_off_cpu_sample is NOT available: 'perf' is missing from PATH or the " +
-                       "sidecar lacks CAP_PERFMON (or perf_event_paranoid > -1). Install linux-tools-common " +
-                       "/ linux-tools-generic and grant the capability.";
+            if (!perfHost.PerfInstalled)
+            {
+                primary += " collect_off_cpu_sample is NOT available: 'perf' is missing from PATH / linux-tools candidates. Install linux-perf (or linux-tools-$(uname -r) on Debian/Ubuntu).";
+            }
+            else if (perfHost.HasCapPerfmon || perfHost.HasCapSysAdmin)
+            {
+                primary += " collect_off_cpu_sample is NOT available despite perf being installed and the sidecar holding a profiling capability; inspect the runtime error for the remaining host restriction.";
+            }
+            else
+            {
+                var paranoid = perfHost.PerfEventParanoid is { } value
+                    ? value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : "<unknown>";
+                primary += $" collect_off_cpu_sample is NOT available: perf is installed but the sidecar lacks CAP_PERFMON and kernel.perf_event_paranoid={paranoid}. Grant CAP_PERFMON (or CAP_SYS_ADMIN) or lower the sysctl to -1 for sched_switch tracing.";
+            }
         }
         else
         {
