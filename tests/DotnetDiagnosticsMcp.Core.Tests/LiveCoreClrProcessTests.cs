@@ -572,11 +572,31 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
             // Call-tree artifact should have captured call stacks from GCAllocationTick events.
             result.Artifact.Root.Children.Should().NotBeEmpty(
                 "the allocation call-tree artifact must capture at least one stack when events were observed");
+
+            var stamped = CallTreeIdentityProjector.Stamp(result.Artifact.Root, result.Artifact.MethodIdentities);
+            Flatten(stamped)
+                .Any(node => node.Identity is { ModuleVersionId: not null, MetadataToken: not null })
+                .Should().BeTrue("allocation drill-down must surface at least one MethodIdentity-backed frame for assembly-mcp handoff");
         }
         finally
         {
             cts.Cancel();
             try { await driver; } catch { /* expected on cancel */ }
+        }
+    }
+
+    private static IEnumerable<CallTreeNode> Flatten(CallTreeNode root)
+    {
+        var stack = new Stack<CallTreeNode>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            yield return current;
+            foreach (var child in current.Children)
+            {
+                stack.Push(child);
+            }
         }
     }
 

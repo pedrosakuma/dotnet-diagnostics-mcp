@@ -85,6 +85,35 @@ public class MethodIdentityHandoffTests
         artifact.MethodIdentities.Should().BeEmpty();
     }
 
+    [Fact]
+    public void CallTreeIdentityProjector_StampsIdentityOntoMatchingFrame()
+    {
+        var child = new CallTreeNode(
+            new SampledFrame("MyApp.dll", "MyApp.Services.OrderService.Process"),
+            10,
+            4,
+            Array.Empty<CallTreeNode>());
+        var root = new CallTreeNode(new SampledFrame(string.Empty, "<root>"), 10, 0, new[] { child });
+        var identity = new MethodIdentity(
+            ModuleName: "MyApp.dll",
+            ModulePath: "/app/MyApp.dll",
+            ModuleVersionId: Guid.Parse("33333333-3333-3333-3333-333333333333"),
+            MetadataToken: 0x06000123,
+            TypeFullName: "MyApp.Services.OrderService",
+            MethodName: "Process",
+            GenericArity: 0);
+
+        var stamped = CallTreeIdentityProjector.Stamp(
+            root,
+            new Dictionary<SymbolRef, MethodIdentity>
+            {
+                [new SymbolRef("MyApp.dll", "MyApp.Services.OrderService.Process")] = identity,
+            });
+
+        stamped.Children.Single().Identity.Should().Be(identity);
+        stamped.Identity.Should().BeNull();
+    }
+
     private sealed class FixedClk : TimeProvider
     {
         private readonly DateTimeOffset _n;

@@ -25,4 +25,7 @@ internal sealed record UnknownSessionPayload(string Kind, string Error);
 [JsonSerializable(typeof(UnknownSessionPayload))]
 [JsonSerializable(typeof(CallTreeNode))]
 [JsonSerializable(typeof(SampledFrame))]
+[JsonSerializable(typeof(MethodIdentity))]
+[JsonSerializable(typeof(GenericInstantiation))]
+[JsonSerializable(typeof(SourceLocation))]
 internal sealed partial class TraceSessionJsonContext : JsonSerializerContext;

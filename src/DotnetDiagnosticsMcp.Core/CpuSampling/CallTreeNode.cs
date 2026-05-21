@@ -1,3 +1,5 @@
+using DotnetDiagnosticsMcp.Core.Memory;
+
 namespace DotnetDiagnosticsMcp.Core.CpuSampling;
 
 /// <summary>A node in a merged caller→callee tree built from CPU samples.</summary>
@@ -5,7 +7,36 @@ public sealed record CallTreeNode(
     SampledFrame Frame,
     long InclusiveSamples,
     long ExclusiveSamples,
-    IReadOnlyList<CallTreeNode> Children);
+    IReadOnlyList<CallTreeNode> Children,
+    MethodIdentity? Identity = null);
+
+/// <summary>Reprojects a call tree with per-frame <see cref="MethodIdentity"/> payloads.</summary>
+public static class CallTreeIdentityProjector
+{
+    public static CallTreeNode Stamp(
+        CallTreeNode root,
+        IReadOnlyDictionary<SymbolRef, MethodIdentity>? identities)
+    {
+        if (identities is null || identities.Count == 0)
+        {
+            return root;
+        }
+
+        return Walk(root);
+
+        CallTreeNode Walk(CallTreeNode node)
+        {
+            identities.TryGetValue(new SymbolRef(node.Frame.Module, node.Frame.Method), out var identity);
+            if (node.Children.Count == 0)
+            {
+                return node with { Identity = identity };
+            }
+
+            var children = node.Children.Select(Walk).ToList();
+            return node with { Identity = identity, Children = children };
+        }
+    }
+}
 
 /// <summary>Bounded view of a <see cref="CallTreeNode"/> returned by the drill-down tool.</summary>
 public sealed record CallTreeView(
@@ -29,19 +60,19 @@ public sealed record CpuSampleTraceArtifact(
     TimeSpan Duration,
     long TotalSamples,
     CallTreeNode Root,
-    IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>? ResolvedSources = null,
-    IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>? MethodIdentities = null,
+    IReadOnlyDictionary<SymbolRef, SourceLocation>? ResolvedSources = null,
+    IReadOnlyDictionary<SymbolRef, MethodIdentity>? MethodIdentities = null,
     NativeAotSymbolDemangler.SymbolSource SymbolSource = NativeAotSymbolDemangler.SymbolSource.Unknown)
 {
-    public IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation> ResolvedSources { get; init; }
+    public IReadOnlyDictionary<SymbolRef, SourceLocation> ResolvedSources { get; init; }
         = ResolvedSources ?? EmptyResolved;
 
-    public IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> MethodIdentities { get; init; }
+    public IReadOnlyDictionary<SymbolRef, MethodIdentity> MethodIdentities { get; init; }
         = MethodIdentities ?? EmptyIdentities;
 
-    private static readonly IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation> EmptyResolved
-        = new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.SourceLocation>();
+    private static readonly IReadOnlyDictionary<SymbolRef, SourceLocation> EmptyResolved
+        = new Dictionary<SymbolRef, SourceLocation>();
 
-    private static readonly IReadOnlyDictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity> EmptyIdentities
-        = new Dictionary<DotnetDiagnosticsMcp.Core.Memory.SymbolRef, DotnetDiagnosticsMcp.Core.Memory.MethodIdentity>();
+    private static readonly IReadOnlyDictionary<SymbolRef, MethodIdentity> EmptyIdentities
+        = new Dictionary<SymbolRef, MethodIdentity>();
 }

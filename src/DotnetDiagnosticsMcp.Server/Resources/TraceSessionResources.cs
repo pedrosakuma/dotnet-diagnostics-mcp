@@ -38,7 +38,7 @@ public sealed class TraceSessionResources
                     StartedAt: cpu.StartedAt,
                     Duration: cpu.Duration,
                     TotalSamples: cpu.TotalSamples,
-                    Root: cpu.Root),
+                    Root: CallTreeIdentityProjector.Stamp(cpu.Root, cpu.MethodIdentities)),
                 TraceSessionJsonContext.Default.CpuSampleSessionPayload);
         }
 
