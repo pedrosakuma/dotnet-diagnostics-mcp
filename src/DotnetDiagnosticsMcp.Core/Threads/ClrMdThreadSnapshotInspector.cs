@@ -126,11 +126,13 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
         ClrRuntime runtime, ThreadSnapshotOptions opts, List<string> warnings, CancellationToken ct)
     {
         var threads = new List<ManagedThread>(runtime.Threads.Length);
+        var clrThreads = new List<ClrThread>(runtime.Threads.Length);
         var threadByAddress = new Dictionary<ulong, ClrThread>();
 
         foreach (var t in runtime.Threads)
         {
             ct.ThrowIfCancellationRequested();
+            clrThreads.Add(t);
             threadByAddress[t.Address] = t;
 
             List<ManagedStackFrame> frames;
@@ -167,7 +169,10 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
             });
         }
 
-        var locks = WalkSyncBlocks(runtime, threadByAddress, warnings, ct);
+        var managedThreadsById = threads
+            .Where(thread => thread.ManagedThreadId > 0)
+            .ToDictionary(thread => thread.ManagedThreadId);
+        var locks = WalkSyncBlocks(runtime, clrThreads, threadByAddress, managedThreadsById, warnings, ct);
         return (threads, locks);
     }
 
@@ -249,7 +254,9 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
 
     private static MonitorLockState[] WalkSyncBlocks(
         ClrRuntime runtime,
+        IReadOnlyList<ClrThread> clrThreads,
         Dictionary<ulong, ClrThread> threadByAddress,
+        Dictionary<int, ManagedThread> managedThreadsById,
         List<string> warnings,
         CancellationToken ct)
     {
@@ -288,7 +295,77 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
         {
             warnings.Add($"SyncBlock enumeration aborted partway through: {ex.GetType().Name} ({ex.Message}).");
         }
-        return locks.OrderByDescending(l => l.WaitingThreadCount).ThenByDescending(l => l.RecursionCount).ToArray();
+
+        var waitersByObjectAddress = InferWaitingThreads(clrThreads, managedThreadsById, locks, warnings, ct);
+        return locks
+            .Select(lockState => lockState with
+            {
+                WaitingManagedThreadIds = waitersByObjectAddress.TryGetValue(lockState.ObjectAddress, out var waiters)
+                    ? waiters
+                    : Array.Empty<int>(),
+            })
+            .OrderByDescending(l => l.WaitingThreadCount)
+            .ThenByDescending(l => l.RecursionCount)
+            .ToArray();
+    }
+
+    private static Dictionary<ulong, IReadOnlyList<int>> InferWaitingThreads(
+        IReadOnlyList<ClrThread> clrThreads,
+        Dictionary<int, ManagedThread> managedThreadsById,
+        IReadOnlyList<MonitorLockState> locks,
+        List<string> warnings,
+        CancellationToken ct)
+    {
+        var contendedLocks = locks
+            .Where(lockState => lockState.IsContended && lockState.ObjectAddress != 0 && lockState.OwnerManagedThreadId > 0)
+            .ToDictionary(lockState => lockState.ObjectAddress);
+        if (contendedLocks.Count == 0)
+        {
+            return new Dictionary<ulong, IReadOnlyList<int>>();
+        }
+
+        var waitersByObjectAddress = new Dictionary<ulong, List<int>>();
+        foreach (var clrThread in clrThreads)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!managedThreadsById.TryGetValue(clrThread.ManagedThreadId, out var managedThread) ||
+                !string.Equals(managedThread.InferredWaitReason, "Monitor.Enter (contended)", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            try
+            {
+                var candidateLocks = clrThread.EnumerateStackRoots()
+                    .Select(root => root.Object.Address)
+                    .Where(address => address != 0 && contendedLocks.ContainsKey(address))
+                    .Distinct()
+                    .Where(address => contendedLocks[address].OwnerManagedThreadId != managedThread.ManagedThreadId)
+                    .Take(4)
+                    .ToArray();
+
+                if (candidateLocks.Length != 1)
+                {
+                    continue;
+                }
+
+                var waiters = waitersByObjectAddress.TryGetValue(candidateLocks[0], out var existing)
+                    ? existing
+                    : waitersByObjectAddress[candidateLocks[0]] = new List<int>();
+                if (!waiters.Contains(managedThread.ManagedThreadId))
+                {
+                    waiters.Add(managedThread.ManagedThreadId);
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Waiter inference for managed thread {managedThread.ManagedThreadId} (OS {managedThread.OSThreadId}) aborted: {ex.GetType().Name}.");
+            }
+        }
+
+        return waitersByObjectAddress.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<int>)pair.Value.OrderBy(id => id).ToArray());
     }
 
     private Guid? TryReadMvid(string? assemblyPath)

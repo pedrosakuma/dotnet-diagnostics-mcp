@@ -72,7 +72,7 @@ Per-tool `Summary` semantics:
 | `collect_exceptions` | The `Recent[]` list. `Total` and `ByType` remain exact (counts at every depth). |
 | `collect_gc_events` | The `Events[]` list. Totals, max pause, per-gen counts remain exact. |
 | `collect_event_source` | The `Events[]` list. Provider + total count remain. Drill in with `query_collection(handle, view=byEventName)`. |
-| `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_thread_snapshot(view=lock-graph|unique-stacks)`. |
+| `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_thread_snapshot(view=lock-graph|deadlocks|unique-stacks)`. |
 
 Explicit `topN` always wins over the depth default — if you pass
 `topN=10, depth=Summary` you get up to 10 hotspots inline (the LLM knows what
