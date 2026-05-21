@@ -41,17 +41,20 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
 RUN groupadd --system --gid 10001 diagnosticsmcp \
  && useradd --system --uid 10001 --gid diagnosticsmcp --create-home --shell /usr/sbin/nologin diagnosticsmcp
 
-# Install elfutils (eu-stack) for Linux NativeAOT thread snapshots.
-# Also optionally install Linux perf for NativeAOT CPU sampling fallback + off-CPU sched
-# capture. Ubuntu Noble (the .NET 10 base) does not ship the transitional
-# `linux-perf` meta-package, so we install `linux-tools-common` (the perf wrapper)
-# plus `linux-tools-generic` (which pulls a versioned linux-tools-<kernel>-generic
-# carrying the actual perf binary). Mismatch with the host kernel is benign for our
-# usage — PerfBinaryResolver iterates /usr/lib/linux-tools-* to locate the binary.
-# Pass --build-arg INSTALL_PERF=true to enable; default off to keep the image lean.
+# Install elfutils (eu-stack) for Linux NativeAOT thread snapshots, plus Linux perf
+# (linux-tools-common wrapper + linux-tools-generic kernel-versioned binary) for
+# NativeAOT CPU sampling fallback and off-CPU sched capture. Ubuntu Noble (the .NET 10
+# base) does not ship the transitional `linux-perf` meta-package; PerfBinaryResolver
+# iterates /usr/lib/linux-tools-* to locate the binary, so a host-kernel mismatch is
+# benign for our usage.
+#
 # At runtime the container additionally needs CAP_PERFMON (or perf_event_paranoid <= 1
-# on the host) — see deploy/k8s/ephemeral-attach.patch.json for the K8s recipe.
-ARG INSTALL_PERF=false
+# on the host) for perf to actually collect — see deploy/k8s/ephemeral-attach.patch.json
+# for the K8s recipe.
+#
+# Pass --build-arg INSTALL_PERF=false to opt OUT (keeps the image ~80MB smaller but
+# disables collect_off_cpu_sample and the perf-replay thread-snapshot fallback).
+ARG INSTALL_PERF=true
 RUN apt-get update \
  && apt-get install -y --no-install-recommends elfutils \
  && if [ "$INSTALL_PERF" = "true" ]; then \

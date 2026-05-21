@@ -2,13 +2,15 @@ name: Publish container image
 
 # Builds the MCP server container and publishes it to GitHub Container Registry
 # (ghcr.io/${owner}/${repo}). Two variants are published per tag:
-#   - <tag>         — lean image (no Linux perf tools)
-#   - <tag>-perf    — same image plus `linux-perf` for NativeAOT / off-CPU sampling
+#   - <tag>         — full image (includes Linux perf for off-CPU sampling / NativeAOT fallback)
+#   - <tag>-lean    — same image WITHOUT perf (~80 MB smaller; disables collect_off_cpu_sample
+#                     and the perf-replay thread-snapshot fallback on Linux)
 #
-# Tag taxonomy:
+# Tag taxonomy (note: docker/metadata-action's semver patterns strip the leading 'v'):
 #   - push to main             → :main, :edge, :sha-<shortsha>
-#   - push to tag vX.Y.Z       → :vX.Y.Z, :X.Y, :X, :latest
+#   - push to tag vX.Y.Z       → :X.Y.Z, :X.Y, :X, :latest
 #   - manual workflow_dispatch → :<input-tag>
+# Lean variant publishes the same tags with a '-lean' suffix appended.
 #
 # Multi-arch strategy:
 #   - Four parallel `build` jobs (one per {variant} × {linux/amd64, linux/arm64})
@@ -29,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag to publish (e.g. "preview-2026-05-19"). The "-perf" variant is appended automatically.'
+        description: 'Image tag to publish (e.g. "preview-2026-05-19"). The "-lean" variant is appended automatically.'
         required: true
         type: string
 
@@ -114,8 +116,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { variant: lean, suffix: '' }
-          - { variant: perf, suffix: '-perf' }
+          - { variant: lean, suffix: '-lean' }
+          - { variant: perf, suffix: '' }
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
