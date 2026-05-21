@@ -24,6 +24,8 @@ public sealed record ThreadSnapshotQueryResult(
     public IReadOnlyList<ThreadDeadlockCycle>? Deadlocks { get; init; }
     /// <summary>Populated for <c>unique-stacks</c>.</summary>
     public IReadOnlyList<UniqueThreadStackGroup>? UniqueStacks { get; init; }
+    /// <summary>Populated for <c>threadpool</c>.</summary>
+    public ThreadPoolSnapshot? ThreadPool { get; init; }
     /// <summary>Echoes the thread id used by the <c>stack</c> view.</summary>
     public int? ThreadId { get; init; }
 }

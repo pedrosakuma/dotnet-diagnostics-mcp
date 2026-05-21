@@ -70,6 +70,8 @@ public sealed record ThreadSnapshotArtifact(
     public long? DumpFileSizeBytes { get; init; }
     /// <summary>Diagnostic warnings emitted during the walk (degraded data, ClrMD limitations, …).</summary>
     public IReadOnlyList<string>? Warnings { get; init; }
+    /// <summary>Optional ThreadPool counters/queues captured during the walk when the backend can observe them.</summary>
+    public ThreadPoolSnapshot? ThreadPool { get; init; }
     /// <summary>
     /// Precision marker for the snapshot shape. Defaults to <c>exact</c>; fallback collectors can
     /// stamp a degraded mode (for example <c>perf-replay-approx</c>).
@@ -80,6 +82,90 @@ public sealed record ThreadSnapshotArtifact(
     /// snapshots captured by direct runtime/ptrace walks.
     /// </summary>
     public int? WindowSeconds { get; init; }
+}
+
+/// <summary>ThreadPool counters/queue state captured at the same instant as a thread snapshot.</summary>
+public sealed record ThreadPoolSnapshot(
+    bool Initialized,
+    bool UsingPortableThreadPool,
+    bool UsingWindowsThreadPool,
+    ThreadPoolWorkerState Workers,
+    ThreadPoolIocpState Iocp,
+    ThreadPoolQueueState Queues,
+    int PendingWorkItems)
+{
+    /// <summary>CPU utilization reported by the runtime for ThreadPool hill-climbing decisions (0-100) when available.</summary>
+    public int? CpuUtilization { get; init; }
+    /// <summary>The last hill-climbing log entry plus interval metadata when the runtime exposes it.</summary>
+    public ThreadPoolHillClimbingState? HillClimbing { get; init; }
+    /// <summary>Capture notes for degraded/partial fields.</summary>
+    public IReadOnlyList<string>? Notes { get; init; }
+}
+
+/// <summary>Worker-thread counters from ClrMD + portable ThreadPool internals.</summary>
+public sealed record ThreadPoolWorkerState(
+    int Current,
+    int Active,
+    int Idle,
+    int Retired,
+    int Min,
+    int Max);
+
+/// <summary>IOCP/completion-port counters when the runtime exposes them.</summary>
+public sealed record ThreadPoolIocpState(
+    int Current,
+    int Idle,
+    int Min,
+    int Max)
+{
+    /// <summary>Dynamic current limit on completion ports, when reported by ClrMD.</summary>
+    public int? CurrentLimit { get; init; }
+    /// <summary>Maximum free completion ports observed by the runtime, when reported by ClrMD.</summary>
+    public int? MaxIdle { get; init; }
+    /// <summary>Current Windows ThreadPool worker-thread count when the runtime delegates to the OS ThreadPool.</summary>
+    public int? WindowsThreadPoolThreadCount { get; init; }
+}
+
+/// <summary>Global + local queue lengths used to derive the pending-work-item count.</summary>
+public sealed record ThreadPoolQueueState(
+    int GlobalQueueLength,
+    IReadOnlyList<ThreadPoolNamedQueueLength> GlobalQueues,
+    IReadOnlyList<ThreadPoolLocalQueueLength> LocalQueues);
+
+/// <summary>One named global queue length.</summary>
+public sealed record ThreadPoolNamedQueueLength(
+    string Name,
+    int QueueLength)
+{
+    /// <summary>Optional queue index for sharded global queues.</summary>
+    public int? QueueIndex { get; init; }
+    /// <summary>Queue object address when surfaced from ClrMD heap objects.</summary>
+    public ulong? QueueAddress { get; init; }
+}
+
+/// <summary>One work-stealing queue length, optionally mapped back to the owning worker thread.</summary>
+public sealed record ThreadPoolLocalQueueLength(
+    ulong QueueAddress,
+    int QueueLength)
+{
+    /// <summary>Managed thread id of the owning worker when the queue could be mapped.</summary>
+    public int? ManagedThreadId { get; init; }
+    /// <summary>OS thread id of the owning worker when the queue could be mapped.</summary>
+    public uint? OSThreadId { get; init; }
+    /// <summary>Runtime queue index from ThreadPoolWorkQueueThreadLocals when available.</summary>
+    public int? QueueIndex { get; init; }
+}
+
+/// <summary>Last hill-climbing sample emitted by the runtime.</summary>
+public sealed record ThreadPoolHillClimbingState(
+    int TickCount,
+    int SampleCount,
+    int NewThreadCount,
+    float Throughput,
+    string StateOrTransition)
+{
+    /// <summary>Current adjustment interval in milliseconds from PortableThreadPool internals, when available.</summary>
+    public int? AdjustmentIntervalMs { get; init; }
 }
 
 /// <summary>One managed thread observed in the runtime.</summary>
