@@ -150,13 +150,13 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 required.Should().NotContain(forbidden,
                     $"tool {tool.Name}: parameter '{forbidden}' must keep its default so the LLM can call the tool without elicitation");
             }
-        }
 
             if (tool.Name is "collect_off_cpu_sample" or "inspect_dump" or "inspect_live_heap" or "collect_thread_snapshot")
             {
                 var properties = tool.JsonSchema.GetProperty("properties");
                 properties.TryGetProperty("symbolPath", out _).Should().BeTrue($"tool {tool.Name} must expose the symbolPath override");
             }
+        }
     }
 
     [Fact]
