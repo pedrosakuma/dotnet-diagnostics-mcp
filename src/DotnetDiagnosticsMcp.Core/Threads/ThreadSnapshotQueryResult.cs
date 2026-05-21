@@ -20,10 +20,15 @@ public sealed record ThreadSnapshotQueryResult(
     public ManagedThread? Thread { get; init; }
     /// <summary>Populated for <c>lock-graph</c>.</summary>
     public IReadOnlyList<MonitorLockState>? Locks { get; init; }
+<<<<<<< HEAD
     /// <summary>Populated for <c>deadlocks</c>.</summary>
     public IReadOnlyList<ThreadDeadlockCycle>? Deadlocks { get; init; }
     /// <summary>Populated for <c>unique-stacks</c>.</summary>
     public IReadOnlyList<UniqueThreadStackGroup>? UniqueStacks { get; init; }
+=======
+    /// <summary>Populated for <c>threadpool</c>.</summary>
+    public ThreadPoolSnapshot? ThreadPool { get; init; }
+>>>>>>> 8637000 (feat: add threadpool thread snapshot view)
     /// <summary>Echoes the thread id used by the <c>stack</c> view.</summary>
     public int? ThreadId { get; init; }
 }

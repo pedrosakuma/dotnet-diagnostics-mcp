@@ -727,6 +727,51 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task ThreadSnapshot_InspectLive_CapturesThreadPoolSnapshot()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        HttpResponseMessage? response = null;
+        for (var attempt = 0; attempt < 40 && response is null; attempt++)
+        {
+            try
+            {
+                response = await http.GetAsync(
+                    "/threadpool/queue?globalItems=256&localItems=256&blockMs=4000",
+                    CancellationToken.None);
+            }
+            catch (HttpRequestException) when (attempt < 39)
+            {
+                EnsureSampleRunning();
+                await Task.Delay(250);
+            }
+        }
+        response.Should().NotBeNull();
+        using (response!)
+        {
+            response.EnsureSuccessStatusCode();
+        }
+
+        await Task.Delay(250);
+
+        var inspector = new ClrMdThreadSnapshotInspector();
+        var snapshot = await inspector.InspectLiveAsync(
+            Pid,
+            new ThreadSnapshotOptions(MaxFramesPerThread: 32),
+            CancellationToken.None);
+
+        snapshot.ThreadPool.Should().NotBeNull("CoreCLR ClrMD snapshots should capture ThreadPool state for view='threadpool'");
+        snapshot.ThreadPool!.Initialized.Should().BeTrue();
+        snapshot.ThreadPool.Workers.Max.Should().BeGreaterThanOrEqualTo(snapshot.ThreadPool.Workers.Min);
+        snapshot.ThreadPool.PendingWorkItems.Should().BeGreaterThanOrEqualTo(0);
+        snapshot.ThreadPool.Notes.Should().NotBeNullOrEmpty(
+            "the live fallback should explain when it uses lightweight thread-snapshot + static ThreadPool root inspection instead of a heap walk");
+        snapshot.ThreadPool.Notes.Should().Contain(note => note.Contains("heap-wide walks", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task AllocationSampler_ProducesTopTypes_WhenWorkloadAllocates()
     {
         EnsureSampleRunning();
@@ -805,12 +850,39 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         using var cts = new CancellationTokenSource(timeout);
         try
         {
-            return await _listeningUrlTcs.Task.WaitAsync(cts.Token);
+            var url = await _listeningUrlTcs.Task.WaitAsync(cts.Token);
+            await WaitForHttpReadyAsync(url, timeout);
+            return url;
         }
         catch (OperationCanceledException)
         {
             throw SkipException.ForReason("CoreClrSample did not advertise an HTTP listening URL within the timeout.");
         }
+    }
+
+    private static async Task WaitForHttpReadyAsync(string baseUrl, TimeSpan timeout)
+    {
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var response = await http.GetAsync("/weatherforecast", CancellationToken.None);
+                if (response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+            }
+            catch (HttpRequestException)
+            {
+                // Kestrel sometimes logs the listening URL just before the socket is fully ready.
+            }
+
+            await Task.Delay(250);
+        }
+
+        throw SkipException.ForReason($"CoreClrSample did not accept HTTP requests on {baseUrl} within the timeout.");
     }
 
     private void EnsureSampleRunning()

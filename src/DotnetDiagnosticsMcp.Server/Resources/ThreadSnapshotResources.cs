@@ -21,9 +21,10 @@ public sealed class ThreadSnapshotResources
     [Description(
         "JSON snapshot of the ThreadSnapshotArtifact registered under a drilldown handle by " +
         "collect_thread_snapshot. Includes runtime info, every managed thread (state, stack frames " +
-        "with MethodIdentity handoff for dotnet-assembly-mcp, inferred wait reason), and the lock " +
-        "(SyncBlock) graph with owners + waiter counts. Returns an error contents block when the " +
-        "handle is unknown or expired.")]
+        "with MethodIdentity handoff for dotnet-assembly-mcp, inferred wait reason), the lock " +
+        "(SyncBlock) graph with owners + waiter counts, and optional ThreadPool counters/queues " +
+        "when captured by the backend. Returns an error contents block when the handle is unknown " +
+        "or expired.")]
     public static string ReadSnapshot(IDiagnosticHandleStore handles, string handle)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(handle);

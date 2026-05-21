@@ -1,6 +1,10 @@
+<<<<<<< HEAD
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+=======
+using System.Diagnostics;
+>>>>>>> 8637000 (feat: add threadpool thread snapshot view)
 using System.Runtime.CompilerServices;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -118,6 +122,7 @@ app.MapGet("/generics", (int? iterations) =>
 })
 .WithName("GenericInstantiations");
 
+<<<<<<< HEAD
 app.MapGet("/activity", async (int? delayMs) =>
 {
     var delay = Math.Clamp(delayMs ?? 50, 1, 2_000);
@@ -164,8 +169,55 @@ app.MapGet("/async-pending", (int? count) =>
     return Results.Json(new { started, active = pendingAsyncChains.Count });
 })
 .WithName("AsyncPending");
+=======
+// ThreadPool fixture for query_thread_snapshot(view="threadpool"). Queue a mix of
+// global and prefer-local work items that block behind a shared gate long enough for
+// a live snapshot to observe non-zero pending counts/queue depths.
+app.MapGet("/threadpool/queue", (int? globalItems, int? localItems, int? blockMs) =>
+{
+    var global = Math.Clamp(globalItems ?? 128, 0, 4_096);
+    var local = Math.Clamp(localItems ?? 128, 0, 4_096);
+    var delayMs = Math.Clamp(blockMs ?? 3_000, 100, 30_000);
+    var deadline = Stopwatch.GetTimestamp() + (long)delayMs * Stopwatch.Frequency / 1_000;
+
+    // Queue local work from inside a worker so preferLocal=true lands on an actual
+    // work-stealing queue without stalling the HTTP response path behind those items.
+    ThreadPool.UnsafeQueueUserWorkItem(static state =>
+    {
+        var (localCount, innerDeadline) = ((int LocalCount, long Deadline))state!;
+        for (var i = 0; i < localCount; i++)
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(static workDeadline => BusySpin((long)workDeadline!), innerDeadline, preferLocal: true);
+        }
+
+        BusySpin(innerDeadline);
+    }, (local, deadline), preferLocal: false);
+
+    for (var i = 0; i < global; i++)
+    {
+        ThreadPool.UnsafeQueueUserWorkItem(static workDeadline => BusySpin((long)workDeadline!), deadline, preferLocal: false);
+    }
+
+    return Results.Accepted($"/threadpool/queue?globalItems={global}&localItems={local}", new
+    {
+        globalQueued = global,
+        localQueued = local,
+        blockMs = delayMs,
+    });
+})
+.WithName("QueueThreadPoolWork");
+>>>>>>> 8637000 (feat: add threadpool thread snapshot view)
 
 app.Run();
+
+static void BusySpin(long deadline)
+{
+    var spinner = new SpinWait();
+    while (Stopwatch.GetTimestamp() < deadline)
+    {
+        spinner.SpinOnce();
+    }
+}
 
 sealed class Box<T>
 {
