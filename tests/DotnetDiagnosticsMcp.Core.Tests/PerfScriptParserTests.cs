@@ -12,21 +12,16 @@ namespace DotnetDiagnosticsMcp.Core.Tests;
 /// </summary>
 public class PerfScriptParserTests
 {
-    private const string TwoSamplesFromPid1 = """
-            sample-target  1 [001] 12345.678901: cpu-clock:
-                            ffffabcd12340000 NativeAotSample::HotPath+0x42 (/app/NativeAotSample)
-                            ffffabcd12340100 NativeAotSample::Main+0x10 (/app/NativeAotSample)
-                            7f1234560000 __libc_start_main+0x80 (/lib/libc.so.6)
+    private const string DefaultLineEnding = "\n";
+    private const string DefaultPidSpacing = "  ";
+    public static TheoryData<string, string> CrossOsFilterCases => new()
+    {
+        { "\n", "  " },
+        { "\r\n", "  " },
+        { "\r\n", "      " },
+    };
 
-            sample-target  1 [002] 12345.679001: cpu-clock:
-                            ffffabcd12340000 NativeAotSample::HotPath+0x42 (/app/NativeAotSample)
-                            ffffabcd12340200 NativeAotSample::ColdPath+0x10 (/app/NativeAotSample)
-                            7f1234560000 __libc_start_main+0x80 (/lib/libc.so.6)
-
-            other-proc  2 [000] 12345.679500: cpu-clock:
-                            ffffaaaa00000000 NoiseFunction+0x0 (/usr/lib/libfoo.so)
-
-            """;
+    private static string TwoSamplesFromPid1 => CreateTwoSamplesFromPid1(DefaultLineEnding, DefaultPidSpacing);
 
     [Fact]
     public void Parser_AcceptsStandardPerfScriptShape()
@@ -42,16 +37,11 @@ public class PerfScriptParserTests
         samples[0].Frames[2].Symbol.Should().Be("__libc_start_main");
     }
 
-    [Fact]
-    public void Parser_FiltersByProcessIdWhenRequested()
+    [Theory]
+    [MemberData(nameof(CrossOsFilterCases))]
+    public void Parser_FiltersByProcessIdWhenRequested(string lineEnding, string pidSpacing)
     {
-        // perf script is Linux-only at runtime; the parser's filter trips a pre-existing
-        // platform-specific behaviour on Windows CI (tracked separately). Early-return on
-        // non-Linux so the test still serves as a regression on the platform where it
-        // matters. The Aggregate test below has the same gating for the same reason.
-        if (!OperatingSystem.IsLinux()) return;
-
-        var samples = PerfScriptParser.Parse(TwoSamplesFromPid1, processId: 1);
+        var samples = PerfScriptParser.Parse(CreateTwoSamplesFromPid1(lineEnding, pidSpacing), processId: 1);
 
         samples.Should().HaveCount(2);
         samples.Should().OnlyContain(s => s.ProcessId == 1);
@@ -60,9 +50,10 @@ public class PerfScriptParserTests
     [Fact]
     public void Aggregate_RanksHotspots_AndProducesCallTree()
     {
-        if (!OperatingSystem.IsLinux()) return;
-
-        var (total, hotspots, root, _) = PerfNativeAotCpuSampler.Aggregate(TwoSamplesFromPid1, processId: 1, topN: 5);
+        var (total, hotspots, root, _) = PerfNativeAotCpuSampler.Aggregate(
+            CreateTwoSamplesFromPid1("\r\n", "      "),
+            processId: 1,
+            topN: 5);
 
         total.Should().Be(2);
         hotspots.Should().NotBeEmpty();
@@ -161,4 +152,22 @@ public class PerfScriptParserTests
         symbolSource.Should().NotBe(NativeAotSymbolDemangler.SymbolSource.Unknown,
             "the aggregator must surface a concrete provenance so CpuSample.SymbolSource is informative");
     }
+
+    private static string CreateTwoSamplesFromPid1(string lineEnding, string pidSpacing)
+        => string.Join(lineEnding,
+        [
+            $"sample-target{pidSpacing}1 [001] 12345.678901: cpu-clock:",
+            "                ffffabcd12340000 NativeAotSample::HotPath+0x42 (/app/NativeAotSample)",
+            "                ffffabcd12340100 NativeAotSample::Main+0x10 (/app/NativeAotSample)",
+            "                7f1234560000 __libc_start_main+0x80 (/lib/libc.so.6)",
+            string.Empty,
+            $"sample-target{pidSpacing}1 [002] 12345.679001: cpu-clock:",
+            "                ffffabcd12340000 NativeAotSample::HotPath+0x42 (/app/NativeAotSample)",
+            "                ffffabcd12340200 NativeAotSample::ColdPath+0x10 (/app/NativeAotSample)",
+            "                7f1234560000 __libc_start_main+0x80 (/lib/libc.so.6)",
+            string.Empty,
+            $"other-proc{pidSpacing}2 [000] 12345.679500: cpu-clock:",
+            "                ffffaaaa00000000 NoiseFunction+0x0 (/usr/lib/libfoo.so)",
+            string.Empty,
+        ]);
 }
