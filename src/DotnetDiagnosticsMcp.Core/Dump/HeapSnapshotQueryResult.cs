@@ -40,4 +40,8 @@ public sealed record HeapSnapshotQueryResult(
     public HeapGcRootInspection? GcRoot { get; init; }
     /// <summary>Populated when <see cref="View"/> is <c>"objsize"</c>.</summary>
     public HeapObjectSizeInspection? ObjectSize { get; init; }
+    /// <summary>Populated when <see cref="View"/> is <c>"async"</c>.</summary>
+    public IReadOnlyList<AsyncOperationStat>? AsyncOperations { get; init; }
+    /// <summary>Echoes the ranking used for <c>async</c> queries: <c>"heap-order"</c> or <c>"direct-size"</c>.</summary>
+    public string? SortedBy { get; init; }
 }

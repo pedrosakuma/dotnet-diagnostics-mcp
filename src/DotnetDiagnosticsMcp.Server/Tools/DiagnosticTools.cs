@@ -1536,14 +1536,16 @@ public sealed class DiagnosticTools
         "`duplicate-strings` (duplicate System.String contents ranked by aggregate retained bytes — requires includeDuplicateStrings=true), " +
         "`object` (dump one managed object by address — SOS !do equivalent), " +
         "`gcroot` (find a shortest GC-root chain for one object address — SOS !gcroot equivalent), " +
-        "`objsize` (compute the transitive retained size rooted at one object address — SOS !objsize equivalent). " +
+        "`objsize` (compute the transitive retained size rooted at one object address — SOS !objsize equivalent), " +
+        "`async` (pending async state machines reconstructed from the heap — state, awaiter type, and best-effort continuation chain à la SOS DumpAsync). " +
+
         "Handles expire ~10 minutes after the capture and are invalidated when the target process exits (live origin only).")]
     public static async Task<DiagnosticResult<HeapSnapshotQueryResult>> QueryHeapSnapshot(
         IDiagnosticHandleStore handles,
         IDumpInspector inspector,
         [Description("Snapshot handle returned by inspect_dump or inspect_live_heap.")] string handle,
-        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot' or 'objsize'.")] string view = "top-types",
-        [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings'). Ignored by 'roots-by-kind', 'retention-paths', 'object', 'gcroot' and 'objsize'.")] int topN = 50,
+        [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot', 'objsize' or 'async'.")] string view = "top-types",
+        [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'async'). Ignored by 'roots-by-kind', 'retention-paths', 'object', 'gcroot' and 'objsize'.")] int topN = 50,
         [Description("For view='top-types': ranking — 'bytes' (default) or 'instances'.")] string rankBy = "bytes",
         [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null,
         [Description("For view='object', 'gcroot' and 'objsize': managed object address (decimal or 0x-prefixed hex).")] string? address = null,
@@ -1581,6 +1583,8 @@ public sealed class DiagnosticTools
                 return QueryDelegateTargets(snapshot, handle, topN);
             case "duplicate-strings":
                 return QueryDuplicateStrings(snapshot, handle, topN);
+            case "async":
+                return QueryAsync(snapshot, handle, topN);
             case "object":
             case "gcroot":
             case "objsize":
@@ -1601,7 +1605,7 @@ public sealed class DiagnosticTools
                     },
                     cancellationToken).ConfigureAwait(false);
             default:
-                return InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot' or 'objsize' (got '{view}')");
+                return InvalidArg<HeapSnapshotQueryResult>(nameof(view), $"must be 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot', 'objsize' or 'async' (got '{view}')");
         }
     }
 
@@ -1835,6 +1839,27 @@ public sealed class DiagnosticTools
         var result = new HeapSnapshotQueryResult(handle, "duplicate-strings", origin, snapshot.ProcessId, snapshot.CapturedAt)
         {
             DuplicateStrings = slice,
+        };
+        return DiagnosticResult.Ok(result, summary);
+    }
+
+    private static DiagnosticResult<HeapSnapshotQueryResult> QueryAsync(
+        HeapSnapshotArtifact snapshot, string handle, int topN)
+    {
+        var origin = snapshot.Origin.ToString();
+        var asyncOperations = snapshot.AsyncOperations ?? Array.Empty<AsyncOperationStat>();
+        var ordered = asyncOperations
+            .OrderBy(op => op.ObservedOrder ?? long.MaxValue)
+            .ThenByDescending(op => op.DirectSizeBytes)
+            .Take(topN)
+            .ToArray();
+        var summary = ordered.Length == 0
+            ? $"Snapshot '{handle}' has no pending async state machines."
+            : $"Returning {ordered.Length} pending async operation(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). First pending state machine in heap-walk order: `{ordered[0].StateMachineTypeFullName}` (state {ordered[0].State}, awaiter `{ordered[0].AwaiterTypeFullName ?? "<unknown>"}`, async-stack depth {ordered[0].Stack?.Count ?? 0}).";
+        var result = new HeapSnapshotQueryResult(handle, "async", origin, snapshot.ProcessId, snapshot.CapturedAt)
+        {
+            AsyncOperations = ordered,
+            SortedBy = ordered.Any(op => op.ObservedOrder.HasValue) ? "heap-order" : "direct-size",
         };
         return DiagnosticResult.Ok(result, summary);
     }

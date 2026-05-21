@@ -184,6 +184,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             StaticFields = summary.StaticFields,
             DelegateTargets = summary.DelegateTargets,
             DuplicateStrings = summary.DuplicateStrings,
+            AsyncOperations = summary.AsyncOperations,
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
@@ -254,6 +255,7 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             StaticFields = summary.StaticFields,
             DelegateTargets = summary.DelegateTargets,
             DuplicateStrings = summary.DuplicateStrings,
+            AsyncOperations = summary.AsyncOperations,
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
@@ -307,7 +309,9 @@ public sealed class ClrMdDumpInspector : IDumpInspector
             duplicates = BuildDuplicateStringStats(stringAgg, opts.SnapshotDuplicateStringTopN, opts.DuplicateStringPreviewLength);
         }
 
-        return new RuntimeSummary(byBytes, byInstances, heapSummary, retention, roots, finalizable, segments, statics, delegates, duplicates);
+        var asyncOperations = ClrMdAsyncStateMachineWalker.WalkPendingAsyncOperations(runtime, warnings, ct);
+
+        return new RuntimeSummary(byBytes, byInstances, heapSummary, retention, roots, finalizable, segments, statics, delegates, duplicates, asyncOperations);
     }
 
     private readonly record struct RuntimeSummary(
@@ -320,7 +324,8 @@ public sealed class ClrMdDumpInspector : IDumpInspector
         IReadOnlyList<SegmentStat> Segments,
         IReadOnlyList<StaticFieldStat>? StaticFields,
         IReadOnlyList<DelegateTargetStat>? DelegateTargets,
-        IReadOnlyList<DuplicateStringStat>? DuplicateStrings);
+        IReadOnlyList<DuplicateStringStat>? DuplicateStrings,
+        IReadOnlyList<AsyncOperationStat> AsyncOperations);
 
     private static (Dictionary<TypeKey, RawTypeStat> Stats, long TotalBytes, IReadOnlyList<SegmentStat> Segments, Dictionary<DelegateKey, RawDelegateStat>? Delegates, Dictionary<string, RawStringStat>? Strings) WalkHeap(
         ClrRuntime runtime, DumpInspectionOptions opts, List<string> warnings, CancellationToken ct)

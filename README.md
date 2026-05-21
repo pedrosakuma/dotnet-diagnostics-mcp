@@ -54,7 +54,7 @@ tests/
 | `collect_activities` / `query_collection` | ActivitySource span capture (trace/span ids, parent linkage, tags, duration) + re-project artifacts |
 | `collect_event_source` / `query_collection` | Generic EventSource passthrough (HTTP, Kestrel, custom) + re-project artifacts |
 | `collect_thread_snapshot` / `query_thread_snapshot` | Managed thread states + SyncBlock lock graph + deadlock / unique-stack drilldown |
-| `inspect_live_heap` / `inspect_dump` / `query_heap_snapshot` | Top retained types + retention paths + roots, live or from a dump |
+| `inspect_live_heap` / `inspect_dump` / `query_heap_snapshot` | Top retained types + retention paths + roots + async state machines, live or from a dump |
 | `collect_process_dump` | Write a Mini / Triage / WithHeap / Full dump to disk |
 | `start_investigation` | Structured plan (cold / warm / hypothesis) before any collector runs |
 | `export_investigation_summary` / `compare_to_baseline` | Portable JSON memory; LLM persists, diffs across deploys |

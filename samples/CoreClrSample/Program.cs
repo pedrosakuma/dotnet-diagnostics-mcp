@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -145,6 +146,25 @@ app.MapGet("/activity", async (int? delayMs) =>
 })
 .WithName("EmitActivityTrace");
 
+// Async hang fixture (issue #117 — heap async-state inspection). Each request starts
+// a few nested async methods that await a never-completing task; the returned top-level
+// Task is retained in a dictionary so the state machines stay rooted for heap inspection.
+var pendingAsyncChains = new ConcurrentDictionary<int, Task<string>>();
+app.MapGet("/async-pending", (int? count) =>
+{
+    var n = Math.Clamp(count ?? 1, 1, 32);
+    var started = new List<int>(n);
+    for (var i = 0; i < n; i++)
+    {
+        var id = AsyncFixture.NextId();
+        pendingAsyncChains[id] = AsyncFixture.StartAsync(id);
+        started.Add(id);
+    }
+
+    return Results.Json(new { started, active = pendingAsyncChains.Count });
+})
+.WithName("AsyncPending");
+
 app.Run();
 
 sealed class Box<T>
@@ -175,6 +195,32 @@ static class GenericFixture
         for (var i = 0; i < s.Length; i++) h = unchecked(h * 31 + s[i]);
         if (h == int.MinValue) throw new InvalidOperationException();
         return value;
+    }
+}
+
+static class AsyncFixture
+{
+    private static readonly TaskCompletionSource<string> Never = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static int _nextId;
+
+    public static int NextId() => Interlocked.Increment(ref _nextId);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static Task<string> StartAsync(int id) => OuterAsync(id);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<string> OuterAsync(int id)
+        => await MiddleAsync(id);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<string> MiddleAsync(int id)
+        => await LeafAsync(id);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<string> LeafAsync(int id)
+    {
+        await Never.Task.ConfigureAwait(false);
+        return $"never-{id}";
     }
 }
 

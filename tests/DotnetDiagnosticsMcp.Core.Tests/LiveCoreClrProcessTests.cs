@@ -366,6 +366,37 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task DumpInspector_InspectLiveAsync_FindsPendingAsyncStateMachines()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        using var response = await http.GetAsync("/async-pending?count=3", CancellationToken.None);
+        response.EnsureSuccessStatusCode();
+        await Task.Delay(500);
+
+        var inspector = new ClrMdDumpInspector();
+        var snapshot = await inspector.InspectLiveAsync(Pid, cancellationToken: CancellationToken.None);
+
+        snapshot.AsyncOperations.Should().NotBeNullOrEmpty(
+            "the async fixture roots never-completing tasks so the heap walk can reconstruct their state machines");
+
+        var sampleOperations = snapshot.AsyncOperations!
+            .Where(op => op.StateMachineTypeFullName.Contains("AsyncFixture+<", StringComparison.Ordinal))
+            .ToList();
+
+        sampleOperations.Should().NotBeEmpty(
+            "the /async-pending endpoint launches nested async methods whose compiler-generated state machines must remain on the heap");
+        sampleOperations.Should().Contain(op => op.State >= 0,
+            "pending async methods should expose a non-completed state via <>1__state");
+        sampleOperations.Any(op => op.AwaiterTypeFullName is not null && op.AwaiterTypeFullName.Contains("TaskAwaiter", StringComparison.Ordinal))
+            .Should().BeTrue("the fixture awaits a TaskCompletionSource-backed Task so the awaiter must be visible");
+        sampleOperations.Any(op => op.Stack is not null && op.Stack.Count >= 2)
+            .Should().BeTrue("nested awaits should produce a best-effort continuation chain with at least one parent frame");
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task ThreadSnapshot_InspectLive_EnumeratesManagedThreads()
     {
         EnsureSampleRunning();
