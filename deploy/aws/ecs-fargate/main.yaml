@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  dotnet-diagnostics-mcp — AWS ECS / Fargate recipe.
+  Deploys an ECS service with two co-located containers (app + diag) sharing
+  /tmp via a task-scoped volume, so the diag container can attach to the .NET
+  diagnostic IPC socket created by the app. Fargate platform 1.4.0+ is
+  required for LinuxParameters.Capabilities to take effect.
+
+  Validate without deploying:
+    cfn-lint deploy/aws/ecs-fargate/main.yaml
+    aws cloudformation validate-template --template-body file://deploy/aws/ecs-fargate/main.yaml
+
+  Smoke after a real deploy (from any host with kubectl-style ECS Exec enabled):
+    aws ecs execute-command --cluster <cluster> --task <task-id> \
+      --container diag --interactive --command "/bin/sh"
+    # inside diag:
+    ls /tmp/dotnet-diagnostic-*   # should show the app's socket
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: dotnet-diagnostics-mcp
+    Description: Name used for the ECS service, task definition, log group, and security group.
+
+  ClusterArn:
+    Type: String
+    Description: ARN of an existing ECS cluster that supports Fargate launches.
+
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      Subnets in which to place the task ENIs. Prefer private subnets with a NAT
+      gateway for image pulls. Public subnets require AssignPublicIp=ENABLED.
+
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: >
+      Security groups attached to the task ENI. Should allow inbound TCP on
+      DiagPort only from operator networks or an internal ALB; outbound is
+      needed for ECR pulls, CloudWatch Logs, and Secrets Manager.
+
+  AppImage:
+    Type: String
+    Description: Container image URI for the application (typically ECR).
+
+  AppPort:
+    Type: Number
+    Default: 8080
+    Description: TCP port the application container listens on.
+
+  AppCommand:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Optional command override for the app container. Leave empty to use the
+      image's ENTRYPOINT/CMD.
+
+  DiagImage:
+    Type: String
+    Default: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
+    Description: Container image URI for the diagnostics MCP sidecar.
+
+  DiagPort:
+    Type: Number
+    Default: 18887
+    Description: TCP port the diagnostics MCP container listens on (matches ASPNETCORE_URLS).
+
+  BearerTokenSecretArn:
+    Type: String
+    Description: >
+      ARN of an AWS Secrets Manager secret holding the MCP bearer token. The
+      secret value is injected into the diag container as MCP_BEARER_TOKEN.
+      For a single-value secret, point at the secret ARN directly. For a
+      JSON secret use the "arn:...:secret:name-AbCdEf:KEY::" form.
+
+  TaskCpu:
+    Type: String
+    Default: "1024"
+    AllowedValues: ["256", "512", "1024", "2048", "4096"]
+    Description: CPU units for the whole task (app + diag combined).
+
+  TaskMemory:
+    Type: String
+    Default: "2048"
+    Description: Memory (MiB) for the whole task. Must be a valid Fargate combination with TaskCpu.
+
+  AssignPublicIp:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: Set ENABLED only when deploying into public subnets without a NAT gateway.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: CloudWatch Logs retention applied to the task log group.
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: Number of tasks the service should run. Diagnostic sidecars typically run 1:1 with the app.
+
+  EnableEcsExec:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Enable ECS Exec so operators can shell into the diag container with
+      `aws ecs execute-command`. The task role grants the matching permissions.
+
+Conditions:
+  HasAppCommand: !Not [!Equals [!Join ["", !Ref AppCommand], ""]]
+  EcsExecEnabled: !Equals [!Ref EnableEcsExec, "true"]
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${ServiceName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-bearer-token-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref BearerTokenSecretArn
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - !If
+          - EcsExecEnabled
+          - PolicyName: ecs-exec
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ssmmessages:CreateControlChannel
+                    - ssmmessages:CreateDataChannel
+                    - ssmmessages:OpenControlChannel
+                    - ssmmessages:OpenDataChannel
+                  Resource: "*"
+          - !Ref AWS::NoValue
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ServiceName
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      PidMode: task
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: diag-tmp
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          Command: !If [HasAppCommand, !Ref AppCommand, !Ref AWS::NoValue]
+          PortMappings:
+            - ContainerPort: !Ref AppPort
+              Protocol: tcp
+          Environment:
+            - Name: DOTNET_EnableDiagnostics
+              Value: "1"
+          MountPoints:
+            - SourceVolume: diag-tmp
+              ContainerPath: /tmp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+        - Name: diag
+          Image: !Ref DiagImage
+          Essential: false
+          User: "0"
+          PortMappings:
+            - ContainerPort: !Ref DiagPort
+              Protocol: tcp
+          Environment:
+            - Name: ASPNETCORE_URLS
+              Value: !Sub http://0.0.0.0:${DiagPort}
+          Secrets:
+            - Name: MCP_BEARER_TOKEN
+              ValueFrom: !Ref BearerTokenSecretArn
+          MountPoints:
+            - SourceVolume: diag-tmp
+              ContainerPath: /tmp
+          LinuxParameters:
+            Capabilities:
+              Add: [SYS_PTRACE]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: diag
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref ClusterArn
+      LaunchType: FARGATE
+      PlatformVersion: "1.4.0"
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      EnableExecuteCommand: !If [EcsExecEnabled, true, false]
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          Subnets: !Ref Subnets
+          SecurityGroups: !Ref SecurityGroupIds
+
+Outputs:
+  ServiceArn:
+    Description: ARN of the ECS service running the sidecar task.
+    Value: !Ref Service
+
+  TaskDefinitionArn:
+    Description: ARN of the latest task definition revision.
+    Value: !Ref TaskDefinition
+
+  LogGroupName:
+    Description: CloudWatch log group containing both app and diag streams.
+    Value: !Ref LogGroup

@@ -1,0 +1,24 @@
+{
+  "Parameters": [
+    {
+      "ParameterKey": "ClusterArn",
+      "ParameterValue": "arn:aws:ecs:us-east-1:123456789012:cluster/diag-cluster"
+    },
+    {
+      "ParameterKey": "Subnets",
+      "ParameterValue": "subnet-aaaaaaaaaaaaaaaaa,subnet-bbbbbbbbbbbbbbbbb"
+    },
+    {
+      "ParameterKey": "SecurityGroupIds",
+      "ParameterValue": "sg-cccccccccccccccccc"
+    },
+    {
+      "ParameterKey": "AppImage",
+      "ParameterValue": "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp:latest"
+    },
+    {
+      "ParameterKey": "BearerTokenSecretArn",
+      "ParameterValue": "arn:aws:secretsmanager:us-east-1:123456789012:secret:diag-mcp-bearer-token-XXXXXX"
+    }
+  ]
+}
