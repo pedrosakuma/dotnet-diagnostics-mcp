@@ -36,13 +36,14 @@ builder.Logging.AddSimpleConsole(o =>
 var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.McpSymbolPathEnvironmentVariable);
 builder.Services.AddDiagnosticCoreServices(configuredSymbolPath);
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.StaleBinaryWatcher>();
+var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Configuration);
 
 // Hold the resolved ILoggerFactory once the app is built so the CallTool filter (configured
 // before Build()) can obtain a logger lazily without sharing state with WebApplication.
 ILoggerFactory? loggerFactoryHolder = null;
 
 builder.Services
-    .AddDiagnosticMcpServer(() => loggerFactoryHolder)
+    .AddDiagnosticMcpServer(() => loggerFactoryHolder, enableOrchestratorTools: orchestratorEnabled)
     .WithHttpTransport();
 
 var app = builder.Build();
@@ -78,10 +79,11 @@ static async Task<int> RunStdioAsync(string[] args)
 
     var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.McpSymbolPathEnvironmentVariable);
     hostBuilder.Services.AddDiagnosticCoreServices(configuredSymbolPath);
+    var orchestratorEnabled = hostBuilder.Services.AddOrchestratorServices(hostBuilder.Configuration);
 
     ILoggerFactory? stdioLoggerFactoryHolder = null;
     hostBuilder.Services
-        .AddDiagnosticMcpServer(() => stdioLoggerFactoryHolder)
+        .AddDiagnosticMcpServer(() => stdioLoggerFactoryHolder, enableOrchestratorTools: orchestratorEnabled)
         .WithStdioServerTransport();
 
     var host = hostBuilder.Build();

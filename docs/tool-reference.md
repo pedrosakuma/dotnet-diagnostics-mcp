@@ -274,6 +274,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap |
 | [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | ✅ (native dump) | **writes a dump file to disk** |
 | [`capture_method_bytes`](#capture_method_bytes) | cheap | **yes** | ❌ (use `dotnet-native-mcp.disassemble`) | reads JIT code-heap |
+| `list_pods` (orchestrator) | cheap | n/a | n/a | Kubernetes `pods.list` only — **opt-in**, registered only when `Orchestrator:Enabled=true` |
 
 "Window-bound" means the duration is the dominant cost; the tool will block for
 ~`durationSeconds`.

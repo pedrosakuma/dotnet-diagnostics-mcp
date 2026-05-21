@@ -40,6 +40,7 @@
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
+    <PackageReference Include="KubernetesClient" />
   </ItemGroup>
 
   <ItemGroup>

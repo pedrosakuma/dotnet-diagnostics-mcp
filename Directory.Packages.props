@@ -27,6 +27,10 @@
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.5" />
   </ItemGroup>
 
+  <ItemGroup Label="Kubernetes">
+    <PackageVersion Include="KubernetesClient" Version="19.0.2" />
+  </ItemGroup>
+
   <ItemGroup Label="Testing">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />

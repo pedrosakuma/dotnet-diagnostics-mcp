@@ -533,6 +533,10 @@ Add the fleet-discovery and attach path:
 - kube API patching
 - ephemeral-container readiness wait
 - in-process port-forward proxying
+
+#### Status
+- **P3a — `list_pods` + Kubernetes client scaffolding: shipped.** New `OrchestratorOptions` config section (enabled flag, namespace allowlist, label-key allowlist, prepared-label key, RequirePreparedLabel toggle, MaxListLimit), `IKubernetesClientFactory` (in-cluster ServiceAccount projection with kubeconfig fallback), narrow `IKubernetesPodsApi` abstraction (so tests can stub without mocking the full k8s surface), `IPodInventory` + `KubernetesPodInventory` (namespace allowlist enforcement, label-selector key validation, preparedness verdict — label opt-in by default, heuristic when `RequirePreparedLabel=false`), and the `list_pods` MCP tool. Registered only when `Orchestrator:Enabled=true`; off by default so existing single-target deployments are unaffected. 17 unit tests cover policy + transport adaptation.
+- **P3b — `attach_to_pod` + ephemeral-container injection + in-process port-forward proxy + session-binding plumbing: pending.**
 #### Dependencies
 - P2 target-context abstraction.
 - Decision to use in-process kube client plus direct port-forward streams.

@@ -8,7 +8,9 @@ using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Symbols;
+using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
+using Microsoft.Extensions.Configuration;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -84,19 +86,48 @@ internal static class DiagnosticServiceRegistration
     }
 
     /// <summary>
+    /// Registers the central Kubernetes orchestrator services (issue #20). Idempotent;
+    /// callers must also call <see cref="AddDiagnosticMcpServer"/> with the same enable
+    /// flag so the MCP tool registration matches the DI graph.
+    /// </summary>
+    /// <param name="services">The DI container.</param>
+    /// <param name="configuration">Configuration root; binds the <c>Orchestrator</c> section onto <see cref="OrchestratorOptions"/>.</param>
+    /// <returns>True when <c>Orchestrator:Enabled</c> is true and services were registered; false otherwise.</returns>
+    public static bool AddOrchestratorServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        var options = new OrchestratorOptions();
+        configuration.GetSection(OrchestratorOptions.SectionName).Bind(options);
+        if (!options.Enabled) return false;
+
+        services.AddSingleton(options);
+        services.AddSingleton<IKubernetesClientFactory, DefaultKubernetesClientFactory>();
+        services.AddSingleton<IKubernetesPodsApi, KubernetesPodsApi>();
+        services.AddSingleton<IPodInventory, KubernetesPodInventory>();
+        return true;
+    }
+
+    /// <summary>
     /// Registers <c>AddMcpServer</c> with the tools/prompts/resources surface and the
     /// shared ToolErrorSurfaceFilter. <paramref name="loggerFactoryAccessor"/> is held by
     /// closure and read lazily after the host is built, mirroring the original Program.cs
     /// pattern (the filter cannot resolve services itself).
+    ///
+    /// <paramref name="enableOrchestratorTools"/> controls whether the
+    /// <see cref="OrchestratorTools"/> surface is exposed to clients. Must be true only
+    /// when <see cref="AddOrchestratorServices"/> returned true on the same container.
     /// </summary>
     public static IMcpServerBuilder AddDiagnosticMcpServer(
         this IServiceCollection services,
-        Func<ILoggerFactory?> loggerFactoryAccessor)
+        Func<ILoggerFactory?> loggerFactoryAccessor,
+        bool enableOrchestratorTools = false)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(loggerFactoryAccessor);
 
-        return services
+        var builder = services
             .AddMcpServer(options =>
             {
                 options.Filters.Request.CallToolFilters.Add(
@@ -125,6 +156,13 @@ internal static class DiagnosticServiceRegistration
             .WithResources<Resources.TraceSessionResources>()
             .WithResources<Resources.HeapSnapshotResources>()
             .WithResources<Resources.ThreadSnapshotResources>();
+
+        if (enableOrchestratorTools)
+        {
+            builder.WithTools<OrchestratorTools>();
+        }
+
+        return builder;
     }
 
     private const string ServerInstructionsText =
