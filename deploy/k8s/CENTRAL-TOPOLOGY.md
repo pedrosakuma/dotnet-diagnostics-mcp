@@ -169,14 +169,17 @@ PID namespace.
   traversal in the diag server (requires running the ephemeral container
   as root with `CAP_SYS_PTRACE`).
 
-## NativeAOT CPU sampling (opt-in)
+## NativeAOT CPU sampling (perf bundled by default)
 
 `collect_cpu_sample` against a NativeAOT target falls back to Linux `perf`
-since SampleProfiler is absent. To enable it inside the ephemeral diag
-container two changes are required:
+since SampleProfiler is absent. The default sidecar image now ships `perf`,
+so the only runtime change required is to grant the right capabilities:
 
-1. **Build the image with perf bundled** —
-   `docker build --build-arg INSTALL_PERF=true -t dotnet-diagnostics-mcp:dev-perf -f deploy/Dockerfile .`
+1. **Use the default image** — `dotnet-diagnostics-mcp:dev` (or the published
+   GHCR tag without a suffix). Pass `--build-arg INSTALL_PERF=false` and use
+   the `-lean` GHCR tag only when you explicitly want to skip the ~80 MB perf
+   payload — this disables `collect_off_cpu_sample` and the perf-replay
+   thread-snapshot fallback.
 2. **Patch `ephemeral-attach.patch.json`** to grant the relevant
    capabilities on the ephemeral container's `securityContext`:
 
