@@ -18,4 +18,7 @@ public static class CollectionHandleKinds
 
     /// <summary>Handle backing an <see cref="EventSources.EventSourceCapture"/> emitted by <c>collect_event_source</c>.</summary>
     public const string EventSource = "event-source";
+
+    /// <summary>Handle backing an <see cref="Activities.ActivityCapture"/> emitted by <c>collect_activities</c>.</summary>
+    public const string Activities = "activities";
 }

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/actions/workflows/ci.yml)
 
-> **Status:** MCP server functional with 20 diagnostic tools, two transports
+> **Status:** MCP server functional with 21 diagnostic tools, two transports
 > (HTTP + stdio), and 6 curated investigation prompts. End-to-end tests pass
 > on Linux + Windows. See [`docs/`](./docs) for the tool reference and
 > investigation playbooks.
@@ -51,6 +51,7 @@ tests/
 | `collect_off_cpu_sample` / `query_off_cpu_snapshot` | Where threads block (futex / IO / sleep) — Linux `perf` backend |
 | `collect_exceptions` | Managed exceptions thrown in a window, aggregated by type |
 | `collect_gc_events` | GC pauses + per-generation counts |
+| `collect_activities` / `query_collection` | ActivitySource span capture (trace/span ids, parent linkage, tags, duration) + re-project artifacts |
 | `collect_event_source` / `query_collection` | Generic EventSource passthrough (HTTP, Kestrel, custom) + re-project artifacts |
 | `collect_thread_snapshot` / `query_thread_snapshot` | Managed thread states + SyncBlock lock graph + unique stack aggregation drilldown |
 | `inspect_live_heap` / `inspect_dump` / `query_heap_snapshot` | Top retained types + retention paths + roots, live or from a dump |
@@ -117,7 +118,7 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
   when the on-disk image MVID drifts. See [`docs/client-setup.md`](./docs/client-setup.md)
   for the full `mcp-config.json` snippets per client.
 
-> 🐧 **Linux:** on Debian/Ubuntu/WSL/Codespaces the `kernel.yama.ptrace_scope=1` default blocks the four ClrMD-backed tools (`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live PID, `collect_process_dump`). See [Consumer install → § 1.5 Linux: enabling ClrMD-backed tools (ptrace)](./docs/consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace) for the one-line fix per distribution. EventPipe-only tools (counters, CPU sample, exceptions, GC, EventSources) work out of the box.
+> 🐧 **Linux:** on Debian/Ubuntu/WSL/Codespaces the `kernel.yama.ptrace_scope=1` default blocks the four ClrMD-backed tools (`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live PID, `collect_process_dump`). See [Consumer install → § 1.5 Linux: enabling ClrMD-backed tools (ptrace)](./docs/consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace) for the one-line fix per distribution. EventPipe-only tools (counters, CPU sample, exceptions, GC, ActivitySource spans, EventSources) work out of the box.
 
 ### Joint with `dotnet-assembly-mcp` (recommended for handoff resolution)
 

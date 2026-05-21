@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Collection;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.EventSources;
@@ -137,6 +138,75 @@ public class CollectionQueryDispatcherTests
         payload.TotalEvents.Should().Be(1000);
         payload.CapturedCount.Should().Be(200);
         payload.Truncated.Should().BeTrue("collector dropped tail events; the LLM must see that");
+    }
+
+    [Fact]
+    public void Activities_SummaryView_ReportsTruncation_AndTopGroups()
+    {
+        var capture = new ActivityCapture(
+            ProcessId: 42,
+            SourceFilters: new[] { "Demo.*" },
+            StartedAt: At,
+            Duration: TimeSpan.FromSeconds(5),
+            TotalActivities: 5,
+            CompletedActivities: 4,
+            Activities:
+            [
+                new CapturedActivity("Demo.Service", "GET /a", "1", null, "trace-1", "span-1", null, At, At.AddMilliseconds(12), TimeSpan.FromMilliseconds(12), new Dictionary<string, string>()),
+                new CapturedActivity("Demo.Service", "GET /a", "2", null, "trace-1", "span-2", null, At.AddMilliseconds(20), At.AddMilliseconds(40), TimeSpan.FromMilliseconds(20), new Dictionary<string, string>()),
+                new CapturedActivity("Demo.Service", "GET /b", "3", "1", "trace-1", "span-3", "span-1", At.AddMilliseconds(25), At.AddMilliseconds(55), TimeSpan.FromMilliseconds(30), new Dictionary<string, string>()),
+            ],
+            BySource:
+            [
+                new ActivitySourceSummary("Demo.Service", 3, 3, 20, 30),
+            ],
+            ByOperation:
+            [
+                new ActivityOperationSummary("Demo.Service", "GET /a", 2, 2, 16, 20),
+                new ActivityOperationSummary("Demo.Service", "GET /b", 1, 1, 30, 30),
+            ]);
+
+        var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Activities, "summary", capture, 1);
+
+        var payload = outcome.Result!.Payload.Should().BeOfType<ActivitiesSummaryView>().Subject;
+        payload.TotalActivities.Should().Be(5);
+        payload.CapturedCount.Should().Be(3);
+        payload.Truncated.Should().BeTrue();
+        payload.BySource.Should().ContainSingle();
+        payload.ByOperation.Should().ContainSingle();
+        payload.ByOperation[0].OperationName.Should().Be("GET /a");
+    }
+
+    [Fact]
+    public void Activities_ActivitiesView_TruncatesRawList()
+    {
+        var capture = new ActivityCapture(
+            ProcessId: 42,
+            SourceFilters: null,
+            StartedAt: At,
+            Duration: TimeSpan.FromSeconds(5),
+            TotalActivities: 2,
+            CompletedActivities: 2,
+            Activities:
+            [
+                new CapturedActivity("Demo.Service", "outer", "1", null, "trace-1", "span-1", null, At, At.AddMilliseconds(12), TimeSpan.FromMilliseconds(12), new Dictionary<string, string>()),
+                new CapturedActivity("Demo.Service", "inner", "2", "1", "trace-1", "span-2", "span-1", At.AddMilliseconds(2), At.AddMilliseconds(6), TimeSpan.FromMilliseconds(4), new Dictionary<string, string>()),
+            ],
+            BySource:
+            [
+                new ActivitySourceSummary("Demo.Service", 2, 2, 8, 12),
+            ],
+            ByOperation:
+            [
+                new ActivityOperationSummary("Demo.Service", "outer", 1, 1, 12, 12),
+                new ActivityOperationSummary("Demo.Service", "inner", 1, 1, 4, 4),
+            ]);
+
+        var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Activities, "activities", capture, 1);
+
+        var payload = outcome.Result!.Payload.Should().BeOfType<ActivitiesListView>().Subject;
+        payload.Returned.Should().Be(1);
+        payload.Activities[0].OperationName.Should().Be("outer");
     }
 
     [Fact]

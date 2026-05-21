@@ -102,3 +102,38 @@ public sealed record EventSourceEventsView(
     int TotalEvents,
     int Returned,
     IReadOnlyList<EventSources.CapturedEvent> Events);
+
+// --- Activity views ---------------------------------------------------------------------------
+
+/// <summary>Headline view for captured activities; grouping aggregates reflect only the stored subset when truncated.</summary>
+public sealed record ActivitiesSummaryView(
+    IReadOnlyList<string>? SourceFilters,
+    int TotalActivities,
+    int CompletedActivities,
+    int CapturedCount,
+    bool Truncated,
+    IReadOnlyList<Activities.ActivitySourceSummary> BySource,
+    IReadOnlyList<Activities.ActivityOperationSummary> ByOperation);
+
+/// <summary>Activities grouped by source name.</summary>
+public sealed record ActivitiesBySourceView(
+    IReadOnlyList<string>? SourceFilters,
+    int TotalActivities,
+    int CapturedCount,
+    bool Truncated,
+    IReadOnlyList<Activities.ActivitySourceSummary> Sources);
+
+/// <summary>Activities grouped by source+operation.</summary>
+public sealed record ActivitiesByOperationView(
+    IReadOnlyList<string>? SourceFilters,
+    int TotalActivities,
+    int CapturedCount,
+    bool Truncated,
+    IReadOnlyList<Activities.ActivityOperationSummary> Operations);
+
+/// <summary>Raw captured activities (capped by <c>topN</c>).</summary>
+public sealed record ActivitiesListView(
+    IReadOnlyList<string>? SourceFilters,
+    int TotalActivities,
+    int Returned,
+    IReadOnlyList<Activities.CapturedActivity> Activities);
