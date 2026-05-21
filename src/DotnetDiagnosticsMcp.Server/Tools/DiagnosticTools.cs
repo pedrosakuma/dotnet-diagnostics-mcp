@@ -2241,17 +2241,42 @@ public sealed class DiagnosticTools
                 ? $"{tool} could not attach{pidHint}: ptrace was denied even though the sidecar's static capability probe expected attach to succeed ({ptrace.Reason}). Likely cause: target process exited, or it runs under a different UID."
                 : $"{tool} could not attach{pidHint}: ptrace was denied — {ptrace.Reason}";
 
+            var hints = new List<NextActionHint>
+            {
+                new("get_diagnostic_capabilities",
+                    "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
+                    processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null),
+                new("inspect_dump",
+                    "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
+                    processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null),
+            };
+
+            if (string.Equals(tool, "collect_thread_snapshot", StringComparison.Ordinal))
+            {
+                hints.Add(new NextActionHint(
+                    "collect_off_cpu_sample",
+                    "If ptrace cannot be granted, use the perf-replay fallback path tracked in issue #92 (short capture + thread-state inference).",
+                    processId is int pidForReplay && pidForReplay > 0 ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 } : null));
+            }
+
             return DiagnosticResult.Fail<T>(
                 headline,
                 new DiagnosticError("PermissionDenied", message, typeName),
-                new NextActionHint("get_diagnostic_capabilities", "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
-                    processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null),
-                new NextActionHint("inspect_dump", "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
-                    processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null));
+                hints.ToArray());
         }
 
         if (ex is UnauthorizedAccessException)
         {
+            if (string.Equals(tool, "collect_thread_snapshot", StringComparison.Ordinal))
+            {
+                return DiagnosticResult.Fail<T>(
+                    $"{tool} was denied access{pidHint}.",
+                    new DiagnosticError("PermissionDenied", message, typeName),
+                    new NextActionHint("list_dotnet_processes", "Verify the MCP server runs as the same UID as the target process."),
+                    new NextActionHint("collect_off_cpu_sample", "When ptrace cannot be granted, use the perf-replay fallback tracked in issue #92.",
+                        processId is int pidForReplay && pidForReplay > 0 ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 } : null));
+            }
+
             return DiagnosticResult.Fail<T>(
                 $"{tool} was denied access{pidHint}.",
                 new DiagnosticError("PermissionDenied", message, typeName),

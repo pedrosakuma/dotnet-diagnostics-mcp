@@ -87,6 +87,7 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
             Threads: threads,
             Locks: locks)
         {
+            Source = "clrmd-thread-walk",
             Warnings = warnings.Count > 0 ? warnings : null,
         };
     }
@@ -114,6 +115,7 @@ public sealed class ClrMdThreadSnapshotInspector : IThreadSnapshotInspector
             Threads: threads,
             Locks: locks)
         {
+            Source = "clrmd-thread-walk",
             DumpFilePath = dumpFilePath,
             DumpFileSizeBytes = fileInfo.Length,
             Warnings = warnings.Count > 0 ? warnings : null,

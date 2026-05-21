@@ -41,7 +41,8 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
 RUN groupadd --system --gid 10001 diagnosticsmcp \
  && useradd --system --uid 10001 --gid diagnosticsmcp --create-home --shell /usr/sbin/nologin diagnosticsmcp
 
-# Optionally install Linux perf for NativeAOT CPU sampling fallback + off-CPU sched
+# Install elfutils (eu-stack) for Linux NativeAOT thread snapshots.
+# Also optionally install Linux perf for NativeAOT CPU sampling fallback + off-CPU sched
 # capture. Ubuntu Noble (the .NET 10 base) does not ship the transitional
 # `linux-perf` meta-package, so we install `linux-tools-common` (the perf wrapper)
 # plus `linux-tools-generic` (which pulls a versioned linux-tools-<kernel>-generic
@@ -51,11 +52,13 @@ RUN groupadd --system --gid 10001 diagnosticsmcp \
 # At runtime the container additionally needs CAP_PERFMON (or perf_event_paranoid <= 1
 # on the host) — see deploy/k8s/ephemeral-attach.patch.json for the K8s recipe.
 ARG INSTALL_PERF=false
-RUN if [ "$INSTALL_PERF" = "true" ]; then \
-        apt-get update \
-     && apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic \
-     && rm -rf /var/lib/apt/lists/*; \
-    fi
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends elfutils \
+ && if [ "$INSTALL_PERF" = "true" ]; then \
+        apt-get install -y --no-install-recommends \
+            linux-tools-common linux-tools-generic; \
+    fi \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/publish ./
 RUN chown -R diagnosticsmcp:diagnosticsmcp /app

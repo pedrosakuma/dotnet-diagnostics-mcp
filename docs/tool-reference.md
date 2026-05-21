@@ -233,6 +233,14 @@ When ptrace cannot be granted, fall back to `collect_process_dump` +
 not require ptrace from the sidecar — but writing the dump file is still
 gated on the diagnostic socket UID).
 
+For **NativeAOT on Linux**, `collect_thread_snapshot` now routes to
+`eu-stack -p <pid>` (elfutils) instead of ClrMD. The snapshot payload carries
+`source: "linux-native-stack"` and maps wait reason from
+`/proc/<pid>/task/<tid>/{status,wchan}` (`BlockedOnLock`, `BlockedOnIO`,
+`BlockedOnUninterruptibleIO`, `Stopped`, `Running`). This path still requires
+same-UID + ptrace gate; when denied the `PermissionDenied` envelope includes a
+hint to the perf-replay fallback tracked in issue #92.
+
 ---
 
 ## `list_dotnet_processes`

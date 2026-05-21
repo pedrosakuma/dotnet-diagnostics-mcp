@@ -60,6 +60,8 @@ public sealed record ThreadSnapshotArtifact(
     IReadOnlyList<ManagedThread> Threads,
     IReadOnlyList<MonitorLockState> Locks)
 {
+    /// <summary>Collector backend that produced this snapshot (for example <c>clrmd-thread-walk</c> or <c>linux-native-stack</c>).</summary>
+    public string? Source { get; init; }
     /// <summary>Path to the originating dump file when <see cref="Origin"/> is <see cref="ThreadSnapshotOrigin.Dump"/>; <c>null</c> for live captures.</summary>
     public string? DumpFilePath { get; init; }
     /// <summary>On-disk size of the originating dump file; <c>null</c> for live captures.</summary>
