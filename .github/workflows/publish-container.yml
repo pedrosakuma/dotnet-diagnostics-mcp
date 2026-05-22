@@ -165,21 +165,24 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Create & push multi-arch manifest
+      - name: Create multi-arch manifest (staging, no release tags)
         id: manifest
         working-directory: /tmp/digests
-        # Captures the freshly-pushed OCI image index digest so the SLSA attestation
-        # below targets the multi-arch manifest itself (not each per-arch leaf), which
-        # is what consumers resolve when they `docker pull <tag>` or run
-        # `gh attestation verify oci://...:<tag>`.
+        # Pushes the multi-arch OCI image index under a temporary, ref-scoped tag
+        # so we can capture its digest and attest it BEFORE the release-facing tags
+        # (version, latest, edge, ...) become resolvable. Without this two-phase
+        # promotion, a failure in the attestation step would leak unattested tags
+        # to consumers (same invariant the sibling repo pinned in #133).
+        env:
+          STAGING_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.variant }}
         run: |
           set -euo pipefail
           docker buildx imagetools create \
-            $(jq -cr '.tags | map("--tag " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            --tag "$STAGING_TAG" \
             $(printf "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s " *)
-          first_tag="$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
-          digest="$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r .digest)"
+          digest="$(docker buildx imagetools inspect "$STAGING_TAG" --format '{{json .Manifest}}' | jq -r .digest)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "staging_tag=$STAGING_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Attest container image provenance
         uses: actions/attest-build-provenance@v2
@@ -187,6 +190,21 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
+
+      - name: Promote attested digest to release tags
+        # Only runs after the SLSA attestation is published, so any tag a consumer
+        # can resolve has a matching attestation in the registry.
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            tag_args+=( --tag "$tag" )
+          done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create "${tag_args[@]}" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
 
       - name: Inspect pushed manifest
         run: |
