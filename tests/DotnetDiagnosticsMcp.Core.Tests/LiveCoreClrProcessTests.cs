@@ -201,7 +201,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
             activity.ParentId == outer.Id);
     }
 
-    [Fact]
+    [Fact(Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
     public async Task CpuSampler_ProducesHotspots()
     {
         EnsureSampleRunning();
@@ -527,7 +527,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    [Fact(Timeout = 60_000)]
+    [Fact(Timeout = 60_000, Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
     public async Task CpuSampler_EmitsClosedGenericInstantiations_FromCoreClrSampleFixture()
     {
         EnsureSampleRunning();
