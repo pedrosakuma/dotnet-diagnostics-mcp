@@ -111,6 +111,8 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<Orchestrator.Investigations.IPortForwardManager, Orchestrator.Investigations.KubernetesPortForwardManager>();
         services.AddSingleton<Orchestrator.Investigations.IInvestigationProxyClient, Orchestrator.Investigations.PodLocalInvestigationProxyClient>();
         services.AddSingleton<Orchestrator.Investigations.IPodAttachOrchestrator, Orchestrator.Investigations.KubernetesPodAttachOrchestrator>();
+        services.AddSingleton<Orchestrator.Investigations.InvestigationCloser>();
+        services.AddHostedService<InvestigationHandleReaperBackgroundService>();
         return true;
     }
 

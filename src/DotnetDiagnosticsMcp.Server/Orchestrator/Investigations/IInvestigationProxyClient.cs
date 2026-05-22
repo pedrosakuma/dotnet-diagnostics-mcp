@@ -34,4 +34,12 @@ public interface IInvestigationProxyClient
     /// <param name="cancellationToken">Cancellation tied to the orchestrator-side
     /// request.</param>
     Task<CallToolResult> CallToolAsync(InvestigationHandle handle, CallToolRequestParams request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Tears down any cached MCP client state for <paramref name="handleId"/>. Invoked
+    /// by <c>detach_from_pod</c>, the TTL reaper, and attach-failure paths so the next
+    /// attach against the same target cannot reuse a stale transport. Idempotent — must
+    /// be a no-op for unknown / already-disposed handles and must never throw.
+    /// </summary>
+    Task DisposeForHandleAsync(string handleId);
 }

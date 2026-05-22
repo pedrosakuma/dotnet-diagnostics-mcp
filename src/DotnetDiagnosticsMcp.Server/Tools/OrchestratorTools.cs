@@ -154,6 +154,7 @@ public sealed class OrchestratorTools
         IPodAttachOrchestrator orchestrator,
         OrchestratorOptions options,
         IInvestigationSessionBinder sessionBinder,
+        IInvestigationStore store,
         McpServer server,
         ILoggerFactory? loggerFactory = null,
         [Description("Pod namespace. Falls back to the orchestrator's DefaultNamespace when omitted.")]
@@ -207,14 +208,29 @@ public sealed class OrchestratorTools
         var proxyUrl = handle.State == InvestigationState.Active
             ? options.ProxyBasePath.TrimEnd('/') + "/" + handle.HandleId
             : null;
-        var session = AttachSession.FromHandle(handle, proxyUrl);
 
         // Bind the MCP session to the handle so future server-side machinery (P3b-4 /
         // intercept slice) can route subsequent tool calls through the proxy without the
         // client having to rewrite URLs. We only bind on Active handles — Attaching /
         // Failed states are not yet usable and would mislead any session-aware resolver.
+        //
+        // We re-read the store right before binding to close the
+        // attach-vs-concurrent-detach/reaper window: AttachAsync may have returned an
+        // Active handle that a concurrent detach_from_pod / TTL reaper has since flipped
+        // terminal. In that case we MUST NOT bind (the proxy/port-forward is already
+        // torn down) and we MUST NOT report Active to the caller.
+        InvestigationHandle observedHandle = handle;
         if (handle.State == InvestigationState.Active)
         {
+            observedHandle = store.GetById(handle.HandleId) ?? handle;
+            if (observedHandle.State != InvestigationState.Active)
+            {
+                var msg = $"Investigation {handle.HandleId} was closed during attach (observed {observedHandle.State}).";
+                return DiagnosticResult.Fail<AttachSession>(
+                    $"attach_to_pod failed: {msg}",
+                    new DiagnosticError(OrchestratorErrorKinds.AttachFailed, msg),
+                    BuildAttachRecoveryHint(OrchestratorErrorKinds.AttachFailed));
+            }
             var sessionId = TryGetServerSessionId(server);
             if (!string.IsNullOrEmpty(sessionId))
             {
@@ -229,6 +245,8 @@ public sealed class OrchestratorTools
                         handle.HandleId);
             }
         }
+
+        var session = AttachSession.FromHandle(observedHandle, proxyUrl);
 
         var summary = $"Investigation {session.HandleId} {(session.State == InvestigationState.Active ? "attached" : session.State.ToString().ToLowerInvariant())} " +
                       $"to {session.Namespace}/{session.PodName} container={session.TargetContainerName} " +
@@ -296,4 +314,185 @@ public sealed class OrchestratorTools
         => server?.GetType()
                   .GetProperty("SessionId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                   ?.GetValue(server) as string;
+
+    [McpServerTool(
+        Name = "detach_from_pod",
+        Title = "Close an active investigation handle",
+        Destructive = true,
+        ReadOnly = false,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Closes an investigation produced by attach_to_pod: tears down the cached MCP client, " +
+        "stops the port-forward, unbinds every MCP session still pointed at the handle, and marks " +
+        "the handle as Closed so subsequent tool calls fall back to local execution. " +
+        "Idempotent — calling on a missing/already-terminal handle is a no-op and returns Ok. " +
+        "NOTE: the ephemeral diagnostics container CANNOT be removed (Kubernetes constraint); " +
+        "it remains on the Pod's spec until the Pod is recreated. Detach therefore only releases " +
+        "the orchestrator-side transport, it does not roll the Pod back to its original state.")]
+    public static async Task<DiagnosticResult<DetachResult>> DetachFromPod(
+        InvestigationCloser closer,
+        IInvestigationSessionBinder sessionBinder,
+        McpServer server,
+        [Description("Investigation handle id returned by attach_to_pod. When omitted, defaults to the handle currently bound to this MCP session.")]
+        string? handleId = null,
+        CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken; // Close pipeline is best-effort and must finish even if the caller bailed.
+
+        var resolvedHandleId = handleId;
+        if (string.IsNullOrWhiteSpace(resolvedHandleId))
+        {
+            var sessionId = TryGetServerSessionId(server);
+            resolvedHandleId = sessionBinder.TryGetHandleId(sessionId);
+        }
+
+        if (string.IsNullOrWhiteSpace(resolvedHandleId))
+        {
+            var result = new DetachResult(
+                HandleId: string.Empty,
+                Found: false,
+                AlreadyTerminal: false,
+                PreviousState: null,
+                NewState: null,
+                UnboundSessionIds: System.Array.Empty<string>());
+            return DiagnosticResult.Ok(
+                result,
+                "detach_from_pod: no handleId was supplied and this MCP session has no investigation binding. Nothing to detach.",
+                new NextActionHint(
+                    "list_active_investigations",
+                    "Call list_active_investigations to enumerate known handles, then re-run detach_from_pod with an explicit handleId."));
+        }
+
+        var outcome = await closer.CloseAsync(
+            resolvedHandleId,
+            InvestigationState.Closed).ConfigureAwait(false);
+
+        var detach = new DetachResult(
+            HandleId: outcome.HandleId,
+            Found: outcome.Found,
+            AlreadyTerminal: outcome.AlreadyTerminal,
+            PreviousState: outcome.PreviousState,
+            NewState: outcome.NewState,
+            UnboundSessionIds: outcome.UnboundSessionIds);
+
+        string summary;
+        if (!outcome.Found)
+        {
+            summary = $"detach_from_pod: handle '{resolvedHandleId}' is unknown — no-op (already evicted, never minted, or wrong id).";
+        }
+        else if (outcome.AlreadyTerminal)
+        {
+            summary = $"detach_from_pod: handle '{resolvedHandleId}' was already {outcome.PreviousState?.ToString().ToLowerInvariant()}; drained {outcome.UnboundSessionIds.Count} residual session binding(s).";
+        }
+        else
+        {
+            summary = $"detach_from_pod: handle '{resolvedHandleId}' transitioned {outcome.PreviousState?.ToString().ToLowerInvariant()}→closed; unbound {outcome.UnboundSessionIds.Count} MCP session(s); ephemeral container remains on the Pod spec.";
+        }
+
+        return DiagnosticResult.Ok(
+            detach,
+            summary,
+            new NextActionHint(
+                "attach_to_pod",
+                "Subsequent diagnostic tool calls on this MCP session now resolve locally on the orchestrator host. " +
+                "Re-attach with attach_to_pod if you need to continue investigating the same Pod."));
+    }
+
+    [McpServerTool(
+        Name = "list_active_investigations",
+        Title = "List investigation handles known to the orchestrator",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns every investigation handle the orchestrator has minted (or knows about) since startup. " +
+        "By default only Active/Attaching handles are returned — pass includeTerminal=true to also see " +
+        "Closed/Expired/Failed entries for diagnostic forensics. Bearer tokens are never included; the " +
+        "shape matches attach_to_pod's response so the same envelope works for both tools.")]
+    public static Task<DiagnosticResult<InvestigationListPage>> ListActiveInvestigations(
+        IInvestigationStore store,
+        OrchestratorOptions options,
+        [Description("When true, includes handles in terminal states (Closed/Expired/Failed). Default false — only Active/Attaching.")]
+        bool includeTerminal = false,
+        CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+
+        var snapshot = store.Snapshot();
+
+        int active = 0, attaching = 0, closed = 0, expired = 0, failed = 0;
+        foreach (var h in snapshot)
+        {
+            switch (h.State)
+            {
+                case InvestigationState.Active: active++; break;
+                case InvestigationState.Attaching: attaching++; break;
+                case InvestigationState.Closed: closed++; break;
+                case InvestigationState.Expired: expired++; break;
+                case InvestigationState.Failed: failed++; break;
+            }
+        }
+
+        var proxyPrefix = options.ProxyBasePath.TrimEnd('/');
+        var items = new List<AttachSession>(snapshot.Count);
+        foreach (var h in snapshot)
+        {
+            if (!includeTerminal && IsTerminalState(h.State)) continue;
+            var proxyUrl = h.State == InvestigationState.Active
+                ? proxyPrefix + "/" + h.HandleId
+                : null;
+            items.Add(AttachSession.FromHandle(h, proxyUrl));
+        }
+
+        items.Sort(static (a, b) => b.AttachedAt.CompareTo(a.AttachedAt));
+
+        var page = new InvestigationListPage(
+            Items: items,
+            TotalKnown: snapshot.Count,
+            ActiveCount: active,
+            AttachingCount: attaching,
+            ClosedCount: closed,
+            ExpiredCount: expired,
+            FailedCount: failed);
+
+        string summary;
+        if (items.Count == 0)
+        {
+            summary = includeTerminal
+                ? "list_active_investigations: no investigations on record."
+                : "list_active_investigations: no Active/Attaching investigations. Pass includeTerminal=true to inspect Closed/Expired/Failed history.";
+        }
+        else
+        {
+            summary = $"list_active_investigations: {items.Count} returned (active={active}, attaching={attaching}" +
+                      (includeTerminal ? $", closed={closed}, expired={expired}, failed={failed}" : "") +
+                      $"; totalKnown={snapshot.Count}).";
+        }
+
+        return Task.FromResult(DiagnosticResult.Ok(
+            page,
+            summary,
+            new NextActionHint(
+                "detach_from_pod",
+                items.Count == 0
+                    ? "Call attach_to_pod to open a new investigation."
+                    : "Pass an item's handleId to detach_from_pod to close it explicitly, or wait for the TTL reaper.")));
+    }
+
+    private static bool IsTerminalState(InvestigationState state)
+        => state is InvestigationState.Closed or InvestigationState.Expired or InvestigationState.Failed;
 }
+
+/// <summary>
+/// Client-safe result of <see cref="OrchestratorTools.DetachFromPod"/>. Mirrors the
+/// internal <c>InvestigationCloseOutcome</c> minus log strings.
+/// </summary>
+public sealed record DetachResult(
+    string HandleId,
+    bool Found,
+    bool AlreadyTerminal,
+    InvestigationState? PreviousState,
+    InvestigationState? NewState,
+    IReadOnlyCollection<string> UnboundSessionIds);

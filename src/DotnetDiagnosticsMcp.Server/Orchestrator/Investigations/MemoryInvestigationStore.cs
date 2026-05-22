@@ -80,6 +80,45 @@ internal sealed class MemoryInvestigationStore : IInvestigationStore
         }
     }
 
+    public InvestigationTerminalTransition TryTransitionToTerminal(
+        string handleId,
+        InvestigationState targetState,
+        string? failureReason,
+        out InvestigationState? previousState)
+    {
+        previousState = null;
+        if (targetState is not (InvestigationState.Closed or InvestigationState.Expired or InvestigationState.Failed))
+        {
+            throw new ArgumentException(
+                $"TryTransitionToTerminal requires a terminal target state; got {targetState}.",
+                nameof(targetState));
+        }
+
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(handleId, out var current))
+            {
+                return InvestigationTerminalTransition.NotFound;
+            }
+            previousState = current.State;
+            if (current.State is InvestigationState.Closed
+                or InvestigationState.Expired
+                or InvestigationState.Failed)
+            {
+                return InvestigationTerminalTransition.AlreadyTerminal;
+            }
+            var updated = current with
+            {
+                State = targetState,
+                FailureReason = targetState == InvestigationState.Closed
+                    ? current.FailureReason
+                    : failureReason ?? current.FailureReason,
+            };
+            _byId[handleId] = updated;
+            return InvestigationTerminalTransition.Transitioned;
+        }
+    }
+
     public InvestigationHandle? FindReusableTarget(string podNamespace, string podName, string containerName)
     {
         lock (_gate)

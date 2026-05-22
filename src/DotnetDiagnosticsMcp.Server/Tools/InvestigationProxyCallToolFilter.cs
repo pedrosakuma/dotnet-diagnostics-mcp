@@ -52,7 +52,8 @@ internal static class InvestigationProxyCallToolFilter
     {
         "list_pods",
         "attach_to_pod",
-        // Future: "detach_from_pod", "list_active_investigations" (P4).
+        "detach_from_pod",
+        "list_active_investigations",
     };
 
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Create(

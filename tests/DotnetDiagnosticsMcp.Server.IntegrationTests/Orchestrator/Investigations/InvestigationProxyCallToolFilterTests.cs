@@ -59,6 +59,8 @@ public sealed class InvestigationProxyCallToolFilterTests
     [Theory]
     [InlineData("list_pods")]
     [InlineData("attach_to_pod")]
+    [InlineData("detach_from_pod")]
+    [InlineData("list_active_investigations")]
     public async Task PassesThrough_WhenToolIsOrchestratorBypassed(string toolName)
     {
         var fx = new Fixture();
@@ -287,6 +289,20 @@ public sealed class InvestigationProxyCallToolFilterTests
 
         public void Update(InvestigationHandle handle) => _byId[handle.HandleId] = handle;
         public InvestigationHandle? GetById(string handleId) => _byId.TryGetValue(handleId, out var h) ? h : null;
+        public InvestigationTerminalTransition TryTransitionToTerminal(
+            string handleId,
+            InvestigationState targetState,
+            string? failureReason,
+            out InvestigationState? previousState)
+        {
+            previousState = null;
+            if (!_byId.TryGetValue(handleId, out var current)) return InvestigationTerminalTransition.NotFound;
+            previousState = current.State;
+            if (current.State is InvestigationState.Closed or InvestigationState.Expired or InvestigationState.Failed)
+                return InvestigationTerminalTransition.AlreadyTerminal;
+            _byId[handleId] = current with { State = targetState, FailureReason = targetState == InvestigationState.Closed ? current.FailureReason : failureReason ?? current.FailureReason };
+            return InvestigationTerminalTransition.Transitioned;
+        }
         public InvestigationHandle? FindReusableTarget(string podNamespace, string podName, string containerName) => null;
         public IReadOnlyCollection<InvestigationHandle> Snapshot() => _byId.Values.ToArray();
     }
@@ -305,6 +321,16 @@ public sealed class InvestigationProxyCallToolFilterTests
             LastHandle = handle;
             LastRequest = request;
             return Next(handle, request, cancellationToken);
+        }
+
+        public int DisposeCallCount;
+        public string? LastDisposedHandleId;
+
+        public Task DisposeForHandleAsync(string handleId)
+        {
+            Interlocked.Increment(ref DisposeCallCount);
+            LastDisposedHandleId = handleId;
+            return Task.CompletedTask;
         }
     }
 }

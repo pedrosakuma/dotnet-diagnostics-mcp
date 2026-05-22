@@ -31,6 +31,22 @@ public interface IInvestigationStore
     /// <summary>Updates an existing handle (e.g. state transition). Throws if the id is unknown.</summary>
     void Update(InvestigationHandle handle);
 
+    /// <summary>
+    /// Atomically transitions a handle to a terminal state (Closed / Expired / Failed),
+    /// under the store lock. Returns the outcome so the caller can distinguish
+    /// "transitioned now", "already terminal" (lost the race or prior close), and
+    /// "unknown handle".
+    /// </summary>
+    /// <param name="handleId">Target handle id.</param>
+    /// <param name="targetState">Terminal state to transition into. Must be Closed, Expired or Failed.</param>
+    /// <param name="failureReason">Optional reason; ignored for Closed (which preserves any existing reason).</param>
+    /// <param name="previousState">Out: state observed before the (attempted) transition. Null when the handle is unknown.</param>
+    InvestigationTerminalTransition TryTransitionToTerminal(
+        string handleId,
+        InvestigationState targetState,
+        string? failureReason,
+        out InvestigationState? previousState);
+
     /// <summary>Returns the handle with the given id, or null if unknown.</summary>
     InvestigationHandle? GetById(string handleId);
 
@@ -43,4 +59,19 @@ public interface IInvestigationStore
 
     /// <summary>Snapshot of every known handle. Order is unspecified.</summary>
     IReadOnlyCollection<InvestigationHandle> Snapshot();
+}
+
+/// <summary>
+/// Result of <see cref="IInvestigationStore.TryTransitionToTerminal"/>.
+/// </summary>
+public enum InvestigationTerminalTransition
+{
+    /// <summary>The handle id is not (or no longer) registered.</summary>
+    NotFound,
+
+    /// <summary>The handle was non-terminal and was atomically transitioned to the requested terminal state.</summary>
+    Transitioned,
+
+    /// <summary>The handle existed but was already terminal — no state change applied.</summary>
+    AlreadyTerminal,
 }

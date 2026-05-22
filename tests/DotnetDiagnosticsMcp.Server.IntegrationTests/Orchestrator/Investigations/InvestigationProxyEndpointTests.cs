@@ -179,6 +179,15 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
         { existing = null; _byId[newHandle.HandleId] = newHandle; return true; }
         public void Update(InvestigationHandle handle) => _byId[handle.HandleId] = handle;
         public InvestigationHandle? GetById(string id) => _byId.TryGetValue(id, out var h) ? h : null;
+        public InvestigationTerminalTransition TryTransitionToTerminal(string handleId, InvestigationState targetState, string? failureReason, out InvestigationState? previousState)
+        {
+            previousState = null;
+            if (!_byId.TryGetValue(handleId, out var current)) return InvestigationTerminalTransition.NotFound;
+            previousState = current.State;
+            if (current.State is InvestigationState.Closed or InvestigationState.Expired or InvestigationState.Failed) return InvestigationTerminalTransition.AlreadyTerminal;
+            _byId[handleId] = current with { State = targetState, FailureReason = targetState == InvestigationState.Closed ? current.FailureReason : failureReason ?? current.FailureReason };
+            return InvestigationTerminalTransition.Transitioned;
+        }
         public InvestigationHandle? FindReusableTarget(string ns, string pod, string c) => null;
         public System.Collections.Generic.IReadOnlyCollection<InvestigationHandle> Snapshot() => _byId.Values.ToArray();
     }
