@@ -339,6 +339,8 @@ public sealed class OrchestratorTools
     public static async Task<DiagnosticResult<DetachResult>> DetachFromPod(
         InvestigationCloser closer,
         IInvestigationSessionBinder sessionBinder,
+        IInvestigationStore store,
+        OrchestratorOptions options,
         McpServer server,
         [Description("Investigation handle id returned by attach_to_pod. When omitted, defaults to the handle currently bound to this MCP session.")]
         string? handleId = null,
@@ -346,10 +348,10 @@ public sealed class OrchestratorTools
     {
         _ = cancellationToken; // Close pipeline is best-effort and must finish even if the caller bailed.
 
+        var sessionId = TryGetServerSessionId(server);
         var resolvedHandleId = handleId;
         if (string.IsNullOrWhiteSpace(resolvedHandleId))
         {
-            var sessionId = TryGetServerSessionId(server);
             resolvedHandleId = sessionBinder.TryGetHandleId(sessionId);
         }
 
@@ -368,6 +370,25 @@ public sealed class OrchestratorTools
                 new NextActionHint(
                     "list_active_investigations",
                     "Call list_active_investigations to enumerate known handles, then re-run detach_from_pod with an explicit handleId."));
+        }
+
+        // B3 review (issue #164): require owner-session match before closing.
+        // Without this any authenticated caller who learns a handle id (e.g. via
+        // logs, a previous share, brute-forcing) could DoS another session's
+        // investigation. Unknown handles are still no-ops (idempotent close)
+        // and don't leak existence beyond what the caller already knows.
+        var existing = store.GetById(resolvedHandleId);
+        if (existing is not null &&
+            existing.OwnerSessionId is not null &&
+            !string.Equals(existing.OwnerSessionId, sessionId, StringComparison.Ordinal) &&
+            !options.AllowCrossSessionAdmin)
+        {
+            return DiagnosticResult.Fail<DetachResult>(
+                summary: $"detach_from_pod: handle '{resolvedHandleId}' is owned by a different MCP session.",
+                error: new DiagnosticError(
+                    Kind: "PermissionDenied",
+                    Message: "Cannot close another MCP session's investigation handle.",
+                    Detail: "Re-attach to the pod in this session, or wait for the TTL reaper to retire the handle."));
         }
 
         var outcome = await closer.CloseAsync(
@@ -434,19 +455,6 @@ public sealed class OrchestratorTools
 
         var snapshot = store.Snapshot();
 
-        int active = 0, attaching = 0, closed = 0, expired = 0, failed = 0;
-        foreach (var h in snapshot)
-        {
-            switch (h.State)
-            {
-                case InvestigationState.Active: active++; break;
-                case InvestigationState.Attaching: attaching++; break;
-                case InvestigationState.Closed: closed++; break;
-                case InvestigationState.Expired: expired++; break;
-                case InvestigationState.Failed: failed++; break;
-            }
-        }
-
         // H6 (issue #164): determine the caller's MCP session id once. Handles
         // owned by other sessions are filtered out below unless the admin
         // escape hatch is active. A null sessionId (stdio / unit test) is
@@ -456,6 +464,27 @@ public sealed class OrchestratorTools
         // behavior degrades sensibly.
         var callerSessionId = TryGetServerSessionId(server!);
         var adminListing = includeAllSessions && options.AllowCrossSessionAdmin;
+
+        // B3 review (issue #164): when not in admin mode, counts and TotalKnown
+        // must be computed over the *visible* set only. Returning a global
+        // TotalKnown / state counts would re-introduce the enumeration side
+        // channel that H6 closes: an attacker could attach a tiny probe handle
+        // and watch the counts move as other sessions attached / detached.
+        int active = 0, attaching = 0, closed = 0, expired = 0, failed = 0;
+        int visibleTotal = 0;
+        foreach (var h in snapshot)
+        {
+            if (!adminListing && !IsOwnedByCaller(h, callerSessionId)) continue;
+            visibleTotal++;
+            switch (h.State)
+            {
+                case InvestigationState.Active: active++; break;
+                case InvestigationState.Attaching: attaching++; break;
+                case InvestigationState.Closed: closed++; break;
+                case InvestigationState.Expired: expired++; break;
+                case InvestigationState.Failed: failed++; break;
+            }
+        }
 
         var proxyPrefix = options.ProxyBasePath.TrimEnd('/');
         var items = new List<AttachSession>(snapshot.Count);
@@ -478,7 +507,7 @@ public sealed class OrchestratorTools
 
         var page = new InvestigationListPage(
             Items: items,
-            TotalKnown: snapshot.Count,
+            TotalKnown: visibleTotal,
             ActiveCount: active,
             AttachingCount: attaching,
             ClosedCount: closed,
@@ -489,22 +518,22 @@ public sealed class OrchestratorTools
         if (items.Count == 0)
         {
             summary = includeTerminal
-                ? (redactedCount > 0
-                    ? $"list_active_investigations: no investigations owned by this MCP session ({redactedCount} hidden — owned by other sessions)."
-                    : "list_active_investigations: no investigations on record.")
-                : (redactedCount > 0
-                    ? $"list_active_investigations: no Active/Attaching investigations owned by this MCP session ({redactedCount} hidden). Pass includeTerminal=true to inspect Closed/Expired/Failed history."
-                    : "list_active_investigations: no Active/Attaching investigations. Pass includeTerminal=true to inspect Closed/Expired/Failed history.");
+                ? "list_active_investigations: no investigations owned by this MCP session."
+                : "list_active_investigations: no Active/Attaching investigations owned by this MCP session. Pass includeTerminal=true to inspect Closed/Expired/Failed history.";
         }
         else
         {
             summary = $"list_active_investigations: {items.Count} returned (active={active}, attaching={attaching}" +
                       (includeTerminal ? $", closed={closed}, expired={expired}, failed={failed}" : "") +
-                      $"; totalKnown={snapshot.Count}" +
-                      (redactedCount > 0 ? $"; {redactedCount} hidden — owned by other sessions" : string.Empty) +
+                      $"; totalKnown={visibleTotal}" +
                       (adminListing ? "; admin listing (includeAllSessions=true)" : string.Empty) +
                       ").";
         }
+
+        // redactedCount is intentionally consumed internally for logging only.
+        // We do NOT include it in the user-visible summary because that would
+        // still leak the existence of other sessions' handles.
+        _ = redactedCount;
 
         return Task.FromResult(DiagnosticResult.Ok(
             page,

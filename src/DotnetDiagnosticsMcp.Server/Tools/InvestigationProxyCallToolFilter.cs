@@ -130,6 +130,33 @@ internal static class InvestigationProxyCallToolFilter
             return await next(requestParams, cancellationToken).ConfigureAwait(false);
         }
 
+        // H6 / B3 review (issue #164): defense-in-depth owner check. The binder
+        // is supposed to bind callers only to handles they own, but if a binding
+        // ever drifts (e.g. session id rotation, a reuse code path that misses
+        // the owner check) we must not forward upstream as someone else. When
+        // the handle has an owner and it doesn't match the caller, surface a
+        // structured error rather than silently widening access. Un-owned
+        // handles (stdio / framework) remain forward-able by anyone.
+        if (handle.OwnerSessionId is not null &&
+            !string.Equals(handle.OwnerSessionId, sessionId, StringComparison.Ordinal))
+        {
+            loggerAccessor()?.LogWarning(
+                "Refusing to forward '{ToolName}' from session {SessionId} via investigation {HandleId}: handle is owned by a different session.",
+                toolName, sessionId, handle.HandleId);
+            return new CallToolResult
+            {
+                IsError = true,
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock
+                    {
+                        Text = $"Cannot forward '{toolName}' via investigation {handle.HandleId}: it is owned by a different MCP session. " +
+                               "Re-attach to the pod in this session or call the tool locally with an explicit processId.",
+                    },
+                },
+            };
+        }
+
         // H7 (issue #164): enforce the explicit forwarded-tool allowlist BEFORE we
         // delegate to the proxy client. A tool that is not on the allowlist is NOT
         // silently demoted to local execution (which would mask "this tool doesn't

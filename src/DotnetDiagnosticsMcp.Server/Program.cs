@@ -129,15 +129,11 @@ return 0;
 
 static string RateLimitPartitionKey(HttpContext httpContext)
 {
-    // X-Forwarded-For first (orchestrator deployments typically sit behind a
-    // gateway), else the immediate remote address, else a constant — never
-    // partition the world into a single bucket without at least a coarse key.
-    var fwd = httpContext.Request.Headers["X-Forwarded-For"].ToString();
-    if (!string.IsNullOrWhiteSpace(fwd))
-    {
-        var first = fwd.Split(',', 2)[0].Trim();
-        if (!string.IsNullOrEmpty(first)) return "ip:" + first;
-    }
+    // Defense-in-depth: do NOT honor X-Forwarded-For unless the host is also
+    // wired up with UseForwardedHeaders + a trusted-proxy allowlist. Otherwise
+    // an authenticated client can rotate the header to mint a fresh bucket
+    // per request and bypass the limiter entirely. RemoteIpAddress is the
+    // immediate peer that already passed any reverse-proxy hop.
     var remote = httpContext.Connection.RemoteIpAddress?.ToString();
     return string.IsNullOrEmpty(remote) ? "ip:unknown" : "ip:" + remote;
 }

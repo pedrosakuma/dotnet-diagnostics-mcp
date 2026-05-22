@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -262,6 +263,70 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
 
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
         _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("/proxy/inv_dot/mcp/../health")]
+    [InlineData("/proxy/inv_dot/mcp/%2e%2e/health")]
+    public async Task Proxy_RejectsDotSegmentPath_WithStructured404(string url)
+    {
+        // B3 review (issue #164 High 3): dot-segments must be rejected before
+        // they can be normalized away by UriBuilder and escape /mcp.
+        _store.Add(NewHandle("inv_dot", InvestigationState.Active, "pod-token"));
+
+        var response = await _client.PostAsync(url, new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyPathNotAllowed");
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_RejectsDisallowedJsonRpcTool_With403()
+    {
+        // B3 review (issue #164 High 1): a direct POST to /proxy/{id}/mcp must
+        // be blocked by the same allowlist that gates the in-process call-tool
+        // filter — otherwise the HTTP proxy is a bypass.
+        _store.Add(NewHandle("inv_jrpc_bad", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK);
+
+        var payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"totally_not_a_real_tool\",\"arguments\":{}}}";
+        var response = await _client.PostAsync("/proxy/inv_jrpc_bad/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyToolNotAllowed");
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_AllowsJsonRpcInitialize_Passthrough()
+    {
+        // Non-tools/call methods must pass through unaltered — the allowlist
+        // gate is scoped to tools/call envelopes only.
+        _store.Add(NewHandle("inv_jrpc_init", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
+
+        var payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
+        var response = await _client.PostAsync("/proxy/inv_jrpc_init/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_AllowsJsonRpcKnownTool_Passthrough()
+    {
+        _store.Add(NewHandle("inv_jrpc_ok", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
+
+        var allowed = Server.Orchestrator.Investigations.InvestigationProxyToolAllowlist.AllowedToolNames.First();
+        var payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + allowed + "\",\"arguments\":{}}}";
+        var response = await _client.PostAsync("/proxy/inv_jrpc_ok/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull();
     }
 
     [Fact]

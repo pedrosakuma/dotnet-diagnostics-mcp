@@ -101,9 +101,27 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
         // target from both creating an ephemeral container.
         if (!_store.TryReserveTarget(handle, request.AllowReuseExistingSession, out var existing))
         {
+            // H6 / B3 review (issue #164): reuse is owner-aware. A reused handle
+            // is only returned to the caller when the caller owns it. Otherwise
+            // we surface a structured error rather than binding the caller to
+            // another session's investigation (which would let them reach the
+            // pod via the in-process call-tool forward and bypass the HTTP
+            // proxy's ownership check). Un-owned handles (stdio / framework)
+            // remain reusable by anyone.
+            if (existing!.OwnerSessionId is not null &&
+                !string.Equals(existing.OwnerSessionId, request.OwnerSessionId, StringComparison.Ordinal))
+            {
+                _logger.LogInformation(
+                    "Refusing to reuse handle {HandleId} for {Namespace}/{Pod}/{Container}: owned by a different MCP session.",
+                    existing.HandleId, ns, request.PodName, container.Name);
+                throw new OrchestratorException(
+                    "PermissionDenied",
+                    $"An investigation for {ns}/{request.PodName}/{container.Name} is already active in another MCP session. " +
+                    "Wait for that session to detach, or have its owner share their session id, before attaching here.");
+            }
             _logger.LogInformation(
                 "Reusing investigation handle {HandleId} for {Namespace}/{Pod}/{Container} (state={State}).",
-                existing!.HandleId, ns, request.PodName, container.Name, existing.State);
+                existing.HandleId, ns, request.PodName, container.Name, existing.State);
             return existing;
         }
 

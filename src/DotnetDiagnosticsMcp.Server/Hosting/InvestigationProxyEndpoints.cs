@@ -174,7 +174,18 @@ internal static class InvestigationProxyEndpoints
         // emit (the SDK currently uses just "/mcp"). The route pattern already
         // restricts inbound paths but recompute the upstream path defensively to
         // prevent any future route refactor from forwarding a probe path.
+        // Defense in depth: reject any dot-segment that could let UriBuilder
+        // normalize a request out of /mcp (e.g. "../health"). The check is
+        // applied to decoded segments so percent-encoded variants are also
+        // rejected.
         var trimmedRest = rest.Trim('/');
+        if (ContainsDotSegment(trimmedRest))
+        {
+            await WriteProblemAsync(context, StatusCodes.Status404NotFound,
+                "ProxyPathNotAllowed",
+                "Dot segments are not permitted in the proxy path.").ConfigureAwait(false);
+            return;
+        }
         var targetPath = string.IsNullOrEmpty(trimmedRest) ? McpPathSegment : McpPathSegment + "/" + trimmedRest;
 
         var manager = context.RequestServices.GetRequiredService<IPortForwardManager>();
@@ -224,6 +235,25 @@ internal static class InvestigationProxyEndpoints
             }
 
             var bytes = ms.ToArray();
+
+            // H7: even though the route is /mcp only, a direct POST to the proxy
+            // bypasses the in-process call-tool filter's allowlist. Apply the same
+            // gate here on the JSON-RPC envelope so disallowed tool names never
+            // reach the pod-local MCP regardless of how the body arrived.
+            var disallowed = FindDisallowedToolName(bytes);
+            if (disallowed is not null)
+            {
+                logger.LogWarning(
+                    "Proxy rejected disallowed tool name '{Tool}' for handle {HandleId}.",
+                    disallowed, handleId);
+                await WriteProblemAsync(context, StatusCodes.Status403Forbidden,
+                    "ProxyToolNotAllowed",
+                    $"Tool '{disallowed}' is not in the diagnostic proxy allowlist. " +
+                    "Only the read-only diagnostic tools published by DiagnosticTools may traverse the proxy.")
+                    .ConfigureAwait(false);
+                return;
+            }
+
             upstream.Content = new ByteArrayContent(bytes);
             foreach (var h in context.Request.Headers)
             {
@@ -366,6 +396,86 @@ internal static class InvestigationProxyEndpoints
         => !HttpMethods.IsGet(request.Method) &&
            !HttpMethods.IsHead(request.Method) &&
            !HttpMethods.IsDelete(request.Method);
+
+    /// <summary>
+    /// Returns true when any segment of <paramref name="path"/> is a relative
+    /// dot segment (".", "..") in raw or percent-encoded form. Defense against
+    /// path-traversal that could escape the <c>/mcp</c> upstream prefix once
+    /// <see cref="UriBuilder"/> normalizes the path.
+    /// </summary>
+    private static bool ContainsDotSegment(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        foreach (var raw in path.Split('/'))
+        {
+            string segment;
+            try { segment = Uri.UnescapeDataString(raw); }
+            catch (UriFormatException) { return true; }
+            if (segment is "." or "..") return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// H7 (deep defense): when the request body is a JSON-RPC <c>tools/call</c>
+    /// envelope (or a batch containing one), require every <c>params.name</c>
+    /// to be in the diagnostic-tool allowlist. Other JSON-RPC methods
+    /// (<c>initialize</c>, <c>resources/*</c>, <c>prompts/*</c>) pass through so
+    /// the SDK handshake keeps working — only tool invocation is gated. Returns
+    /// the disallowed tool name when rejection is required, else null.
+    /// </summary>
+    private static string? FindDisallowedToolName(byte[] body)
+    {
+        if (body.Length == 0) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            return FindDisallowedToolNameInElement(doc.RootElement);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Non-JSON body — let the upstream MCP handle it; the allowlist is
+            // a tool-invocation gate and non-JSON bodies are not invocations.
+            return null;
+        }
+    }
+
+    private static string? FindDisallowedToolNameInElement(System.Text.Json.JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    var found = FindDisallowedToolNameInElement(item);
+                    if (found is not null) return found;
+                }
+                return null;
+            case System.Text.Json.JsonValueKind.Object:
+                if (!element.TryGetProperty("method", out var methodEl) ||
+                    methodEl.ValueKind != System.Text.Json.JsonValueKind.String ||
+                    methodEl.GetString() != "tools/call")
+                {
+                    return null;
+                }
+                if (!element.TryGetProperty("params", out var paramsEl) ||
+                    paramsEl.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                    !paramsEl.TryGetProperty("name", out var nameEl) ||
+                    nameEl.ValueKind != System.Text.Json.JsonValueKind.String)
+                {
+                    // Malformed tools/call — reject by returning a sentinel that
+                    // hits the structured 403 path; clients should send a
+                    // well-formed envelope.
+                    return "<missing-name>";
+                }
+                var toolName = nameEl.GetString();
+                return Orchestrator.Investigations.InvestigationProxyToolAllowlist.IsAllowed(toolName)
+                    ? null
+                    : (toolName ?? "<null>");
+            default:
+                return null;
+        }
+    }
 
     /// <summary>
     /// H6: extract the caller's MCP session id from the inbound request. The
