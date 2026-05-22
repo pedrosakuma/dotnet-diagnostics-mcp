@@ -71,11 +71,17 @@ public sealed class KindIntegrationTests
     [Fact]
     public async Task AttachToLabeledReplica_ListsExactlyOnePidThroughProxy()
     {
-        if (!TryGetActivation(out var activation))
+        if (!IsGateEnabled())
         {
-            _output.WriteLine("KindIntegrationTests: opt-in env vars missing; skipping.");
+            _output.WriteLine($"KindIntegrationTests: opt-in env var {EnableEnvVar} is unset; skipping.");
             return;
         }
+
+        // Once the gate is on, missing config must FAIL — silently passing
+        // would hide a CI misconfiguration (typo, missing secret, etc.) and
+        // produce a misleading green run on what's supposed to be the
+        // acceptance test for issue #20.
+        var activation = RequireActivation();
 
         var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var ct = cts.Token;
@@ -157,7 +163,36 @@ public sealed class KindIntegrationTests
             // forwarded into the right Pod's PID namespace.
             // ------------------------------------------------------------
             var proxyEndpoint = new Uri(activation.OrchestratorBaseUrl, $"/{proxyBase}/mcp");
-            await using var podClient = await ConnectAsync(proxyEndpoint, activation.BearerToken, ct);
+
+            // The ephemeral container's state can be `Running` (which is what
+            // the orchestrator waits for before returning Active) several
+            // hundred milliseconds before the in-container Kestrel listener
+            // is actually accepting MCP requests. Retry briefly to absorb
+            // that race instead of flaking on connection refused / 502.
+            McpClient podClient = null!;
+            var connectDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+            Exception? lastConnectFailure = null;
+            while (DateTime.UtcNow < connectDeadline)
+            {
+                try
+                {
+                    podClient = await ConnectAsync(proxyEndpoint, activation.BearerToken, ct);
+                    break;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lastConnectFailure = ex;
+                    _output.WriteLine($"proxy MCP connect retry: {ex.GetType().Name}: {ex.Message}");
+                    await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+                }
+            }
+            if (podClient is null)
+            {
+                throw new Xunit.Sdk.XunitException(
+                    "Could not open MCP client against proxied pod within 60s: " +
+                    (lastConnectFailure?.ToString() ?? "<no inner exception>"));
+            }
+            await using var _podClient = podClient;
 
             var listProcsResult = await podClient.CallToolAsync(
                 "list_dotnet_processes",
@@ -218,37 +253,42 @@ public sealed class KindIntegrationTests
     // Activation + transport helpers.
     // -----------------------------------------------------------------------
 
-    private static bool TryGetActivation(out Activation activation)
+    private static bool IsGateEnabled()
     {
-        activation = default!;
         var gate = Environment.GetEnvironmentVariable(EnableEnvVar);
-        if (!string.Equals(gate, "1", StringComparison.Ordinal) &&
-            !string.Equals(gate, "true", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
+        return string.Equals(gate, "1", StringComparison.Ordinal) ||
+               string.Equals(gate, "true", StringComparison.OrdinalIgnoreCase);
+    }
 
+    private static Activation RequireActivation()
+    {
         var url = Environment.GetEnvironmentVariable(OrchestratorUrlEnvVar);
         var token = Environment.GetEnvironmentVariable(OrchestratorTokenEnvVar);
         var label = Environment.GetEnvironmentVariable(KindTargetLabelEnvVar);
         var ns = Environment.GetEnvironmentVariable(KindNamespaceEnvVar);
 
-        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(token) ||
-            string.IsNullOrWhiteSpace(label))
+        if (string.IsNullOrWhiteSpace(url))
         {
-            return false;
+            throw new Xunit.Sdk.XunitException($"{EnableEnvVar} is set but {OrchestratorUrlEnvVar} is missing/empty.");
+        }
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            throw new Xunit.Sdk.XunitException($"{EnableEnvVar} is set but {OrchestratorTokenEnvVar} is missing/empty.");
+        }
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            throw new Xunit.Sdk.XunitException($"{EnableEnvVar} is set but {KindTargetLabelEnvVar} is missing/empty.");
         }
         if (!Uri.TryCreate(url, UriKind.Absolute, out var baseUri))
         {
-            return false;
+            throw new Xunit.Sdk.XunitException($"{OrchestratorUrlEnvVar} is not a valid absolute URI: {url}");
         }
 
-        activation = new Activation(
+        return new Activation(
             OrchestratorBaseUrl: baseUri,
             BearerToken: token!,
             Namespace: string.IsNullOrWhiteSpace(ns) ? DefaultNamespace : ns!,
             TargetLabel: label!);
-        return true;
     }
 
     private static async Task<McpClient> ConnectAsync(Uri endpoint, string bearer, CancellationToken cancellationToken)

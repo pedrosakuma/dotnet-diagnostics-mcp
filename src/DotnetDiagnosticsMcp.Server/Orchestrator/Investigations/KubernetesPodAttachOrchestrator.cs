@@ -314,14 +314,33 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
         {
             return null;
         }
+
+        // Inherit identity (UID/GID/non-root) and the target's non-elevating
+        // restrictions so the ephemeral container survives Pod Security
+        // "restricted" admission in the same namespace.
+        //
+        // Deliberately drop:
+        //   * Privileged=true and AllowPrivilegeEscalation=true (never widen).
+        //   * Capabilities.Add (workload-specific elevations).
+        // We keep Capabilities.Drop so the ephemeral container is not *more*
+        // permissive than the target.
+        V1Capabilities? capabilities = null;
+        if (source.Capabilities?.Drop is { Count: > 0 } drop)
+        {
+            capabilities = new V1Capabilities { Drop = new List<string>(drop) };
+        }
+
         return new V1SecurityContext
         {
             RunAsUser = source.RunAsUser,
             RunAsGroup = source.RunAsGroup,
             RunAsNonRoot = source.RunAsNonRoot,
-            // Deliberately drop capabilities / privileged / seccomp — the ephemeral
-            // diagnostics container only needs the target's identity, not its full
-            // security posture (which may include workload-specific elevations).
+            AllowPrivilegeEscalation = source.AllowPrivilegeEscalation is false ? false : null,
+            Capabilities = capabilities,
+            SeccompProfile = source.SeccompProfile,
+            SeLinuxOptions = source.SeLinuxOptions,
+            WindowsOptions = source.WindowsOptions,
+            ReadOnlyRootFilesystem = source.ReadOnlyRootFilesystem,
         };
     }
 
