@@ -41,13 +41,18 @@ var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Confi
 // Hold the resolved ILoggerFactory once the app is built so the CallTool filter (configured
 // before Build()) can obtain a logger lazily without sharing state with WebApplication.
 ILoggerFactory? loggerFactoryHolder = null;
+IServiceProvider? servicesHolder = null;
 
 builder.Services
-    .AddDiagnosticMcpServer(() => loggerFactoryHolder, enableOrchestratorTools: orchestratorEnabled)
+    .AddDiagnosticMcpServer(
+        () => loggerFactoryHolder,
+        enableOrchestratorTools: orchestratorEnabled,
+        servicesAccessor: () => servicesHolder)
     .WithHttpTransport();
 
 var app = builder.Build();
 loggerFactoryHolder = app.Services.GetRequiredService<ILoggerFactory>();
+servicesHolder = app.Services;
 
 var token = BearerTokenOptions.LoadOrGenerate(app.Logger);
 app.UseMiddleware<BearerTokenMiddleware>(token);
@@ -86,12 +91,17 @@ static async Task<int> RunStdioAsync(string[] args)
     var orchestratorEnabled = hostBuilder.Services.AddOrchestratorServices(hostBuilder.Configuration);
 
     ILoggerFactory? stdioLoggerFactoryHolder = null;
+    IServiceProvider? stdioServicesHolder = null;
     hostBuilder.Services
-        .AddDiagnosticMcpServer(() => stdioLoggerFactoryHolder, enableOrchestratorTools: orchestratorEnabled)
+        .AddDiagnosticMcpServer(
+            () => stdioLoggerFactoryHolder,
+            enableOrchestratorTools: orchestratorEnabled,
+            servicesAccessor: () => stdioServicesHolder)
         .WithStdioServerTransport();
 
     var host = hostBuilder.Build();
     stdioLoggerFactoryHolder = host.Services.GetRequiredService<ILoggerFactory>();
+    stdioServicesHolder = host.Services;
 
     await host.RunAsync().ConfigureAwait(false);
     return 0;

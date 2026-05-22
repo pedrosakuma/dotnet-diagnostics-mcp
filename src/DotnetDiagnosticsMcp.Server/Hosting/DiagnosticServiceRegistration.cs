@@ -109,6 +109,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<Orchestrator.Investigations.IInvestigationStore, Orchestrator.Investigations.MemoryInvestigationStore>();
         services.AddSingleton<Orchestrator.Investigations.IInvestigationSessionBinder, Orchestrator.Investigations.MemoryInvestigationSessionBinder>();
         services.AddSingleton<Orchestrator.Investigations.IPortForwardManager, Orchestrator.Investigations.KubernetesPortForwardManager>();
+        services.AddSingleton<Orchestrator.Investigations.IInvestigationProxyClient, Orchestrator.Investigations.PodLocalInvestigationProxyClient>();
         services.AddSingleton<Orchestrator.Investigations.IPodAttachOrchestrator, Orchestrator.Investigations.KubernetesPodAttachOrchestrator>();
         return true;
     }
@@ -126,7 +127,8 @@ internal static class DiagnosticServiceRegistration
     public static IMcpServerBuilder AddDiagnosticMcpServer(
         this IServiceCollection services,
         Func<ILoggerFactory?> loggerFactoryAccessor,
-        bool enableOrchestratorTools = false)
+        bool enableOrchestratorTools = false,
+        Func<IServiceProvider?>? servicesAccessor = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(loggerFactoryAccessor);
@@ -137,6 +139,15 @@ internal static class DiagnosticServiceRegistration
                 options.Filters.Request.CallToolFilters.Add(
                     ToolErrorSurfaceFilter.Create(
                         () => loggerFactoryAccessor()?.CreateLogger(typeof(ToolErrorSurfaceFilter).FullName!)));
+
+                if (enableOrchestratorTools && servicesAccessor is not null)
+                {
+                    // Adds after ToolErrorSurfaceFilter so an exception escaping the proxy
+                    // intercept (e.g. SDK protocol violation) is still surfaced as a
+                    // structured error result rather than the SDK's generic terminal mask.
+                    options.Filters.Request.CallToolFilters.Add(
+                        BuildInvestigationProxyFilter(servicesAccessor, loggerFactoryAccessor));
+                }
 
                 options.ProtocolVersion = "2025-11-25";
 
@@ -167,6 +178,39 @@ internal static class DiagnosticServiceRegistration
         }
 
         return builder;
+    }
+
+    private static ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> BuildInvestigationProxyFilter(
+        Func<IServiceProvider?> servicesAccessor,
+        Func<ILoggerFactory?> loggerFactoryAccessor)
+    {
+        // Wrap the real filter so DI resolution happens lazily on the first call —
+        // AddMcpServer's options callback runs before Build(). We resolve once per call
+        // since IInvestigationProxyClient is a singleton (no per-request scope needed).
+        ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult>? cached = null;
+        var gate = new object();
+
+        return next =>
+        {
+            if (cached is null)
+            {
+                lock (gate)
+                {
+                    if (cached is null)
+                    {
+                        var sp = servicesAccessor()
+                            ?? throw new InvalidOperationException(
+                                "InvestigationProxyCallToolFilter requires a service provider; servicesAccessor returned null.");
+                        cached = Tools.InvestigationProxyCallToolFilter.Create(
+                            sp.GetRequiredService<Orchestrator.Investigations.IInvestigationSessionBinder>(),
+                            sp.GetRequiredService<Orchestrator.Investigations.IInvestigationStore>(),
+                            sp.GetRequiredService<Orchestrator.Investigations.IInvestigationProxyClient>(),
+                            () => loggerFactoryAccessor()?.CreateLogger(typeof(Tools.InvestigationProxyCallToolFilter).FullName!));
+                    }
+                }
+            }
+            return cached(next);
+        };
     }
 
     private const string ServerInstructionsText =
