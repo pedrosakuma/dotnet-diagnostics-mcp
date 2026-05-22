@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Text;
+using DotnetDiagnosticsMcp.Core.Artifacts;
 using DotnetDiagnosticsMcp.Core.Memory;
 using Microsoft.Diagnostics.Runtime;
 using Microsoft.Extensions.Logging;
@@ -27,11 +28,15 @@ namespace DotnetDiagnosticsMcp.Core.JitCapture;
 public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
 {
     private const int DefaultReadChunkBytes = 4096;
+    private readonly IArtifactRootProvider _artifactRoot;
     private readonly ILogger<ClrMdJitMethodCapturer> _logger;
     private readonly ConcurrentDictionary<string, Guid?> _mvidCache = new(StringComparer.Ordinal);
 
-    public ClrMdJitMethodCapturer(ILogger<ClrMdJitMethodCapturer>? logger = null)
+    public ClrMdJitMethodCapturer(
+        IArtifactRootProvider artifactRoot,
+        ILogger<ClrMdJitMethodCapturer>? logger = null)
     {
+        _artifactRoot = artifactRoot ?? throw new ArgumentNullException(nameof(artifactRoot));
         _logger = logger ?? NullLogger<ClrMdJitMethodCapturer>.Instance;
     }
 
@@ -84,10 +89,17 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
     private static void FinalizeWrites(string outputDir, IReadOnlyList<PendingWrite> writes)
     {
         if (writes.Count == 0) return;
-        Directory.CreateDirectory(outputDir);
+        // Note: outputDir was already created with restrictive permissions inside
+        // ResolveOutputDirectory; no second CreateDirectory pass is needed (and doing
+        // it again would re-validate the path through a symlinked parent on a TOCTOU
+        // race).
         foreach (var w in writes)
         {
-            File.WriteAllBytes(w.Path, w.Bytes);
+            // CreateRestrictedFile uses FileMode.CreateNew (refuses an existing
+            // symlink at the leaf) and FileStreamOptions.UnixCreateMode=0600 so the
+            // file is born with restrictive permissions — no umask race.
+            using var fs = SafeArtifactPath.CreateRestrictedFile(w.Path);
+            fs.Write(w.Bytes, 0, w.Bytes.Length);
         }
     }
 
@@ -306,19 +318,19 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
         writes.Add(new PendingWrite(path, payload));
     }
 
-    private static string ResolveOutputDirectory(MethodCaptureRequest req, int pid)
+    private string ResolveOutputDirectory(MethodCaptureRequest req, int pid)
     {
-        // Always return an absolute path so the file side-channel handoff to
-        // dotnet-native-mcp.disassemble works regardless of working directory.
-        if (!string.IsNullOrWhiteSpace(req.OutputDirectory))
-        {
-            return Path.GetFullPath(req.OutputDirectory!);
-        }
-        return Path.Combine(
-            Path.GetTempPath(),
-            "dotnet-diagnostics-mcp",
+        // SafeArtifactPath rejects absolute paths and traversal/symlink escapes; the
+        // default sub-path preserves the legacy per-pid layout when no caller override
+        // is supplied. The returned path is always under the operator-configured root.
+        var defaultRelative = Path.Combine(
             "method-bytes",
             pid.ToString(CultureInfo.InvariantCulture));
+        return SafeArtifactPath.ResolveDirectory(
+            _artifactRoot.Root,
+            req.OutputDirectory,
+            defaultRelative,
+            parameterName: nameof(MethodCaptureRequest.OutputDirectory));
     }
 
     private static string BuildFileName(MethodIdentity identity, ClrMethod method, string region, string? tier)

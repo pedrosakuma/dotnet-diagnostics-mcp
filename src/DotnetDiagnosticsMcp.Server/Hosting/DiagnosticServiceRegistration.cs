@@ -34,6 +34,7 @@ internal static class DiagnosticServiceRegistration
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddSingleton(new SymbolPathBuilder(configuredSymbolPath));
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.Artifacts.IArtifactRootProvider, DotnetDiagnosticsMcp.Core.Artifacts.EnvironmentArtifactRootProvider>();
         services.AddSingleton<IProcessDiscovery, LocalProcessDiscovery>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Container.IContainerSignalsCollector, DotnetDiagnosticsMcp.Core.Container.CgroupV2SignalsCollector>();
         services.AddSingleton<ICapabilityDetector, CapabilityDetector>();

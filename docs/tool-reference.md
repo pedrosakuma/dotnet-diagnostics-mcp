@@ -920,13 +920,20 @@ name and captures the events it emits in the window. Use for HTTP activity
 
 Writes a process dump to disk via the diagnostic IPC channel.
 
+> **Sandbox (issue #163).** `outputDirectory` is interpreted as a **relative**
+> sub-path under the operator-configured artifact root. The root is set by the
+> `MCP_ARTIFACT_ROOT` environment variable (default
+> `{TempPath}/dotnet-diagnostics-mcp`). Absolute paths, `..` traversal, and
+> symlink escapes are rejected with a structured `InvalidArtifactPath` error.
+> Files are written with POSIX mode `0600`; the parent directory is `0700`.
+
 **Parameters:**
 
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `processId` | `int` | — | Target process id |
 | `dumpType` | `string` | `"Mini"` | `Mini` / `Triage` / `WithHeap` / `Full` |
-| `outputDirectory` | `string?` | `<temp>/dotnet-diagnostics-mcp` | Where to write the file |
+| `outputDirectory` | `string?` | artifact root | **Relative** sub-path under `MCP_ARTIFACT_ROOT`. Must not be absolute. |
 
 **Returns:** `DumpResult`:
 
@@ -982,7 +989,7 @@ attach.
 | `dumpFilePath` | `string?` | — | Path to a `WithHeap`/`Full` dump. Mutually exclusive with `processId` |
 | `codeAddress` | `string?` | — | Optional native IP (hex or decimal) for the fast `GetMethodByInstructionPointer` path; verified against `(mvid, token)` |
 | `tier` | `string?` | — | Informational label (`Tier0`/`Tier1`/etc.) echoed into the output file name. ClrMD does not expose tier metadata, so this is **not** a filter |
-| `outputDirectory` | `string?` | `<temp>/dotnet-diagnostics-mcp` | Where to write the `.bin` files |
+| `outputDirectory` | `string?` | `method-bytes/{pid}` | **Relative** sub-path under `MCP_ARTIFACT_ROOT` (default `{TempPath}/dotnet-diagnostics-mcp`). Same sandbox rules as `collect_process_dump`: absolute paths, `..` traversal, and symlink escapes are rejected with `InvalidArtifactPath`. `.bin` files are written `0600`. |
 
 **Returns:** `CapturedMethodBytes`:
 

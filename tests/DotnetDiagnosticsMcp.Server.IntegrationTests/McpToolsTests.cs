@@ -647,7 +647,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
     {
         await using var client = await ConnectAsync();
 
-        var directory = Path.Combine(Path.GetTempPath(), $"diagnosticsmcp-tests-{Guid.NewGuid():N}");
+        // Sandbox (issue #163): outputDirectory must be relative — the server resolves it
+        // under the operator-configured artifact root (MCP_ARTIFACT_ROOT, default
+        // {temp}/dotnet-diagnostics-mcp).
+        var relativeSub = $"diagnosticsmcp-tests-{Guid.NewGuid():N}";
+        var absoluteRoot = Path.Combine(Path.GetTempPath(), "dotnet-diagnostics-mcp", relativeSub);
         try
         {
             var result = await client.CallToolAsync(
@@ -656,7 +660,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 {
                     ["processId"] = Environment.ProcessId,
                     ["dumpType"] = "Mini",
-                    ["outputDirectory"] = directory,
+                    ["outputDirectory"] = relativeSub,
                 },
                 cancellationToken: CancellationToken.None);
 
@@ -664,7 +668,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             var dump = DeserializeStructured<DumpResult>(result);
             dump.Should().NotBeNull();
             dump!.ProcessId.Should().Be(Environment.ProcessId);
-            dump.FilePath.Should().StartWith(directory);
+            dump.FilePath.Should().StartWith(absoluteRoot);
             File.Exists(dump.FilePath).Should().BeTrue();
             dump.FileSizeBytes.Should().BeGreaterThan(0);
         }
@@ -672,9 +676,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         {
             try
             {
-                if (Directory.Exists(directory))
+                if (Directory.Exists(absoluteRoot))
                 {
-                    Directory.Delete(directory, recursive: true);
+                    Directory.Delete(absoluteRoot, recursive: true);
                 }
             }
             catch (Exception)
@@ -682,6 +686,31 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 // best effort cleanup
             }
         }
+    }
+
+    [Fact]
+    public async Task CollectProcessDump_RejectsAbsoluteOutputDirectory()
+    {
+        await using var client = await ConnectAsync();
+
+        var absolute = Path.Combine(Path.GetTempPath(), $"diagnosticsmcp-escape-{Guid.NewGuid():N}");
+        var result = await client.CallToolAsync(
+            "collect_process_dump",
+            new Dictionary<string, object?>
+            {
+                ["processId"] = Environment.ProcessId,
+                ["dumpType"] = "Mini",
+                ["outputDirectory"] = absolute,
+            },
+            cancellationToken: CancellationToken.None);
+
+        // The envelope itself does not flip IsError (structured-error contract); the
+        // failure is carried in the typed payload's Error.Kind so the LLM can branch.
+        var envelope = DeserializeEnvelope(result);
+        envelope.Should().NotBeNull();
+        envelope!.Error.Should().NotBeNull();
+        envelope.Error!.Kind.Should().Be("InvalidArtifactPath");
+        Directory.Exists(absolute).Should().BeFalse("rejected paths must never be created");
     }
 
     [Fact]

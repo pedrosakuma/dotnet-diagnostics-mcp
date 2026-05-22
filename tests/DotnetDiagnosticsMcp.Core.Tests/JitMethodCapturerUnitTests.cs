@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.Artifacts;
 using DotnetDiagnosticsMcp.Core.JitCapture;
 using FluentAssertions;
 
@@ -5,10 +6,12 @@ namespace DotnetDiagnosticsMcp.Core.Tests;
 
 public class JitMethodCapturerUnitTests
 {
+    private static IArtifactRootProvider TestArtifactRoot() => new EnvironmentArtifactRootProvider();
+
     [Fact]
     public async Task CaptureLiveAsync_RejectsNonPositivePid()
     {
-        var capturer = new ClrMdJitMethodCapturer();
+        var capturer = new ClrMdJitMethodCapturer(TestArtifactRoot());
         var req = new MethodCaptureRequest(Guid.NewGuid(), 0x06000001);
 
         await FluentActions
@@ -23,7 +26,7 @@ public class JitMethodCapturerUnitTests
     [Fact]
     public async Task CaptureLiveAsync_RejectsNullRequest()
     {
-        var capturer = new ClrMdJitMethodCapturer();
+        var capturer = new ClrMdJitMethodCapturer(TestArtifactRoot());
 
         await FluentActions
             .Awaiting(() => capturer.CaptureLiveAsync(1234, null!))
@@ -33,7 +36,7 @@ public class JitMethodCapturerUnitTests
     [Fact]
     public async Task CaptureFromDumpAsync_RejectsMissingFile()
     {
-        var capturer = new ClrMdJitMethodCapturer();
+        var capturer = new ClrMdJitMethodCapturer(TestArtifactRoot());
         var req = new MethodCaptureRequest(Guid.NewGuid(), 0x06000001);
         var missing = Path.Combine(Path.GetTempPath(), $"does-not-exist-{Guid.NewGuid():N}.dmp");
 
@@ -45,7 +48,7 @@ public class JitMethodCapturerUnitTests
     [Fact]
     public async Task CaptureFromDumpAsync_RejectsEmptyPath()
     {
-        var capturer = new ClrMdJitMethodCapturer();
+        var capturer = new ClrMdJitMethodCapturer(TestArtifactRoot());
         var req = new MethodCaptureRequest(Guid.NewGuid(), 0x06000001);
 
         await FluentActions

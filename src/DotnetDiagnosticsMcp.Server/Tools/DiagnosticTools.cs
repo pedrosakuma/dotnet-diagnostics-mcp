@@ -1335,7 +1335,7 @@ public sealed class DiagnosticTools
         IProcessContextResolver resolver,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Dump type: 'Mini', 'Triage', 'WithHeap' or 'Full'. Defaults to Mini.")] ProcessDumpType dumpType = ProcessDumpType.Mini,
-        [Description("Optional output directory. If null, defaults to <temp>/dotnet-diagnostics-mcp.")] string? outputDirectory = null,
+        [Description("Optional sub-path under the artifact root (MCP_ARTIFACT_ROOT, default <temp>/dotnet-diagnostics-mcp). MUST be relative — absolute paths and '..' traversal are rejected (InvalidArtifactPath). Dump files are written with POSIX mode 0600.")] string? outputDirectory = null,
         CancellationToken cancellationToken = default)
     {
         var resolved = await ResolveContextAsync<DumpResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -2027,7 +2027,7 @@ public sealed class DiagnosticTools
         [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
         [Description("Optional fast-path: a code address already observed for this method (e.g. MethodCodeStart from MethodLoad_V2). Hex (with or without 0x prefix) or decimal. Mismatches with (moduleVersionId, metadataToken) surface as a warning, not a hard error.")] string? codeAddress = null,
         [Description("Optional tier label echoed back on the result (e.g. 'Tier0', 'Tier1', 'Tier1OSR'). ClrMD does not expose the JIT OptimizationTier directly; this field is informational. The authoritative MethodCompilationType (None/Jit/Ngen) is always returned.")] string? tier = null,
-        [Description("Output directory for the .bin file(s). Defaults to {temp}/dotnet-diagnostics-mcp/method-bytes/{pid}/.")] string? outputDirectory = null,
+        [Description("Optional sub-path under the artifact root (MCP_ARTIFACT_ROOT, default <temp>/dotnet-diagnostics-mcp). Defaults to 'method-bytes/{pid}'. MUST be relative — absolute paths and '..' traversal are rejected (InvalidArtifactPath). .bin files are written with POSIX mode 0600.")] string? outputDirectory = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(moduleVersionId)) return InvalidArg<CapturedMethodBytes>(nameof(moduleVersionId), "is required");
@@ -2821,6 +2821,15 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<T>(
                 $"{tool} cannot run{pidHint}: required external tool '{missingTool.ToolName}' is missing.",
                 new DiagnosticError("ToolNotFound", message, typeName));
+        }
+
+        if (ex is DotnetDiagnosticsMcp.Core.Artifacts.ArtifactPathException artifactEx)
+        {
+            return DiagnosticResult.Fail<T>(
+                $"{tool} rejected the request: {artifactEx.Message}",
+                new DiagnosticError("InvalidArtifactPath", artifactEx.Message, artifactEx.ParameterName),
+                new NextActionHint(tool,
+                    "Re-issue with a relative sub-path under the artifact root, or omit outputDirectory to use the default."));
         }
 
         if (ex is ArgumentException or InvalidOperationException)

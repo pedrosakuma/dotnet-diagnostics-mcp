@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using DotnetDiagnosticsMcp.Core.Activities;
+using DotnetDiagnosticsMcp.Core.Artifacts;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
@@ -283,12 +284,13 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         expectedMvid.Should().NotBeNull();
 
         // Capture a WithHeap dump (the only kind that supports heap walk).
-        var dumpDir = Path.Combine(Path.GetTempPath(), $"diagnosticsmcp-inspect-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(dumpDir);
+        var dumpRoot = Path.Combine(Path.GetTempPath(), $"diagnosticsmcp-inspect-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dumpRoot);
         try
         {
-            var dumper = new DotnetDiagnosticsMcp.Core.Dump.DiagnosticsClientDumper();
-            var dump = await dumper.WriteDumpAsync(Pid, ProcessDumpType.WithHeap, dumpDir, CancellationToken.None);
+            var dumper = new DotnetDiagnosticsMcp.Core.Dump.DiagnosticsClientDumper(
+                new TestArtifactRootProvider(dumpRoot));
+            var dump = await dumper.WriteDumpAsync(Pid, ProcessDumpType.WithHeap, outputDirectory: null, CancellationToken.None);
             File.Exists(dump.FilePath).Should().BeTrue();
             dump.FileSizeBytes.Should().BeGreaterThan(0);
 
@@ -316,7 +318,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
         finally
         {
-            try { Directory.Delete(dumpDir, recursive: true); } catch { /* best-effort */ }
+            try { Directory.Delete(dumpRoot, recursive: true); } catch { /* best-effort */ }
         }
     }
 
@@ -501,10 +503,10 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         var outDir = Path.Combine(Path.GetTempPath(), $"diagnosticsmcp-jitcap-{Guid.NewGuid():N}");
         try
         {
-            var capturer = new ClrMdJitMethodCapturer();
+            var capturer = new ClrMdJitMethodCapturer(new TestArtifactRootProvider(outDir));
             var artifact = await capturer.CaptureLiveAsync(
                 Pid,
-                new MethodCaptureRequest(mvid, token, OutputDirectory: outDir),
+                new MethodCaptureRequest(mvid, token, OutputDirectory: null),
                 CancellationToken.None);
 
             artifact.Origin.Should().Be(CapturedMethodBytesOrigin.Live);
