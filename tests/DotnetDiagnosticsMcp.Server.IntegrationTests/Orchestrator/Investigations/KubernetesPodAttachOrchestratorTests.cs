@@ -43,6 +43,7 @@ public class KubernetesPodAttachOrchestratorTests
         api.PatchedSpec.TargetContainerName.Should().Be(Container);
         api.PatchedSpec.Env.Should().Contain(e => e.Name == "MCP_BEARER_TOKEN" && e.Value == handle.PodLocalBearerToken);
         api.PatchedSpec.Env.Should().Contain(e => e.Name == "ASPNETCORE_URLS" && e.Value == $"http://0.0.0.0:{options.ProxyPodPort}");
+        api.PatchedSpec.Args.Should().Equal("--urls", $"http://0.0.0.0:{options.ProxyPodPort}");
         store.GetById(handle.HandleId).Should().BeSameAs(handle);
     }
 
@@ -56,6 +57,7 @@ public class KubernetesPodAttachOrchestratorTests
         await orch.AttachAsync(NewRequest(), CancellationToken.None);
 
         api.PatchedSpec!.Env.Should().Contain(e => e.Name == "ASPNETCORE_URLS" && e.Value == "http://0.0.0.0:18888");
+        api.PatchedSpec.Args.Should().Equal("--urls", "http://0.0.0.0:18888");
     }
 
     [Fact]

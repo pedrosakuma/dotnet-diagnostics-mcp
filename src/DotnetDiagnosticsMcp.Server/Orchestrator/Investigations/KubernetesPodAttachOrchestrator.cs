@@ -290,6 +290,11 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
                 new() { Name = "MCP_BEARER_TOKEN", Value = token },
                 new() { Name = "ASPNETCORE_URLS", Value = $"http://0.0.0.0:{_options.ProxyPodPort}" },
             },
+            // The shipped image's appsettings.json pins "Urls" to 127.0.0.1:8787, which
+            // outranks ASPNETCORE_URLS in WebApplication.CreateBuilder's configuration
+            // precedence. Pass --urls explicitly so the kestrel binding follows the
+            // command-line override (highest precedence) and matches ProxyPodPort.
+            Args = new List<string> { "--urls", $"http://0.0.0.0:{_options.ProxyPodPort}" },
             VolumeMounts = volumeMounts,
             SecurityContext = securityContext,
             TerminationMessagePolicy = "File",
