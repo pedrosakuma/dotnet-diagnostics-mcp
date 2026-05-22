@@ -31,15 +31,20 @@
 #   TOKEN=$(gcloud secrets versions access latest --secret=diag-mcp-bearer-token)
 #   URL=$(gcloud run services describe dotnet-diagnostics-mcp \
 #     --region us-central1 --format='value(status.url)')
-#   curl -fsS -H "Authorization: Bearer $TOKEN" "$URL/healthz"
+#   curl -fsS -H "Authorization: Bearer $TOKEN" "$URL/health"
 #
 # Substitute these placeholders before applying:
 #   PROJECT_ID           — your GCP project id
+#   PROJECT_NUMBER       — your GCP project's numeric id
+#                          (gcloud projects describe ... --format='value(projectNumber)')
 #   REGION               — Cloud Run region (e.g. us-central1)
 #   APP_IMAGE            — image URI of the target .NET application
 #   DIAG_IMAGE           — diagnostics MCP sidecar image (default below)
 #   APP_SERVICE_ACCOUNT  — service-account email the revision runs as
 #   BEARER_SECRET_NAME   — Secret Manager secret with the MCP bearer token
+#                          (referenced in two places — the
+#                          run.googleapis.com/secrets annotation alias and
+#                          the container env secretKeyRef.name)
 
 apiVersion: serving.knative.dev/v1
 kind: Service
@@ -61,6 +66,13 @@ spec:
         # gen2 execution environment is required for multi-container
         # services and for in-memory emptyDir volumes.
         run.googleapis.com/execution-environment: gen2
+
+        # Map the short alias used by `secretKeyRef.name` below to the
+        # fully-qualified Secret Manager resource. Cloud Run requires
+        # this annotation because `secretKeyRef` cannot reference a
+        # Secret Manager secret directly by short name.
+        # Replace PROJECT_NUMBER with the numeric project id.
+        run.googleapis.com/secrets: BEARER_SECRET_NAME:projects/PROJECT_NUMBER/secrets/BEARER_SECRET_NAME
 
         # Start the app container only after diag is ready, so the .NET
         # runtime has the socket directory in place when it boots.

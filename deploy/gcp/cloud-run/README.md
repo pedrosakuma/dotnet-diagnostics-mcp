@@ -125,11 +125,15 @@ attach will fail with `Permission denied`. See `AGENTS.md` →
 
 1. **Edit `service.yaml`** and replace these placeholders:
    - `REGION` — Cloud Run region (matches `gcloud config get-value run/region`)
+   - `PROJECT_NUMBER` — your project's numeric id
+     (`gcloud projects describe $(gcloud config get-value project) --format='value(projectNumber)'`)
    - `APP_IMAGE` — your application's container image URI
    - `DIAG_IMAGE` — diagnostics sidecar image (default
      `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest`)
    - `APP_SERVICE_ACCOUNT` — the service account email created above
    - `BEARER_SECRET_NAME` — Secret Manager secret holding the bearer token
+     (appears in two places: the `run.googleapis.com/secrets` annotation
+     alias **and** in `valueFrom.secretKeyRef.name` — keep them in sync)
    - the `app` container's `startupProbe.tcpSocket.port` if your app does
      not listen on `8080`
 2. **Validate without deploying** (dry-run; gcloud reports schema and
@@ -167,7 +171,7 @@ gcloud run services logs read dotnet-diagnostics-mcp \
 TOKEN=$(gcloud secrets versions access latest --secret=diag-mcp-bearer-token)
 URL=$(gcloud run services describe dotnet-diagnostics-mcp \
   --region us-central1 --format='value(status.url)')
-curl -fsS -H "Authorization: Bearer $TOKEN" "$URL/healthz"
+curl -fsS -H "Authorization: Bearer $TOKEN" "$URL/health"
 ```
 
 A passing health check proves the diag listener is up. It does **not**
