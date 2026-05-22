@@ -91,23 +91,46 @@ internal static class InvestigationProxyEndpoints
         if (context.Request.QueryString.HasValue) targetUri.Query = context.Request.QueryString.Value!.TrimStart('?');
 
         using var upstream = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUri.Uri);
+        // Force HTTP/1.1: the synthetic "http://pod-local" host has no ALPN; HttpClient may
+        // attempt HTTP/2 negotiation and stall on the port-forward WS which carries opaque
+        // bytes and has no h2 handshake.
+        upstream.Version = HttpVersion.Version11;
+        upstream.VersionPolicy = HttpVersionPolicy.RequestVersionExact;
         CopyRequestHeaders(context.Request, upstream, handle.PodLocalBearerToken);
 
         if (HasBody(context.Request))
         {
-            upstream.Content = new StreamContent(context.Request.Body);
+            // Buffer the request body into a fixed-length ByteArrayContent. Streaming
+            // context.Request.Body through StreamContent leaves HttpClient in duplex
+            // mode where it gates the body-write completion on the upstream response,
+            // which deadlocks when the second pooled port-forward connection is in a
+            // half-closed state. A bounded byte body is sent in one shot (Content-Length
+            // is set automatically) and dodges that interaction. MCP request bodies are
+            // small (~hundreds of bytes); the buffering cost is negligible.
+            using var ms = new MemoryStream();
+            await context.Request.Body.CopyToAsync(ms, context.RequestAborted).ConfigureAwait(false);
+            var bytes = ms.ToArray();
+            upstream.Content = new ByteArrayContent(bytes);
             foreach (var h in context.Request.Headers)
             {
                 if (!h.Key.StartsWith("Content-", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(h.Key, "Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
                 upstream.Content.Headers.TryAddWithoutValidation(h.Key, (IEnumerable<string>)h.Value!);
             }
         }
 
         HttpResponseMessage response;
+        var swSend = System.Diagnostics.Stopwatch.StartNew();
+        logger.LogInformation(
+            "Proxy upstream send begin: handle={HandleId} method={Method} path={Path} bodyLen={BodyLen}",
+            handleId, context.Request.Method, targetPath, upstream.Content?.Headers.ContentLength);
         try
         {
             response = await client.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted)
                 .ConfigureAwait(false);
+            logger.LogInformation(
+                "Proxy upstream send end: handle={HandleId} status={Status} elapsedMs={Elapsed}",
+                handleId, (int)response.StatusCode, swSend.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
