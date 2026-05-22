@@ -1,0 +1,65 @@
+# Replica "b" of the CoreClrSample target used by KindIntegrationTests
+# (issue #20, P6 acceptance). See deployment-a.yaml for the full rationale.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p6-sample-b
+  namespace: p6-sample
+  labels:
+    app: p6-sample
+    p6-target: b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: p6-sample
+      p6-target: b
+  template:
+    metadata:
+      labels:
+        app: p6-sample
+        p6-target: b
+        diagnostics.dotnet.io/prepared: "true"
+    spec:
+      containers:
+        - name: app
+          image: coreclr-sample:p6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: ASPNETCORE_URLS
+              value: http://0.0.0.0:8080
+            - name: DOTNET_EnableDiagnostics
+              value: "1"
+            - name: P6_TARGET_LABEL
+              value: b
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: diag-tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      securityContext:
+        fsGroup: 10001
+      volumes:
+        - name: diag-tmp
+          emptyDir: {}

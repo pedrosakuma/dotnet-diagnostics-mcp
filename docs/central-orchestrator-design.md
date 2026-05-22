@@ -712,3 +712,65 @@ The correct Phase-1 opinionated path is:
 - stateless session handles with TTL and reaping,
 - and four new fleet-aware MCP tools that sit in front of the unchanged existing diagnostics tool surface.
 That gives the LLM one fleet endpoint without undoing the constraints and wins already documented in the current on-demand topology.
+
+---
+
+## Running the kind integration test locally
+
+The P6 acceptance test (`KindIntegrationTests`, decorated with
+`[Trait("Category", "KindIntegration")]`) stands up two CoreClrSample replicas
+on a kind cluster, attaches to one via the orchestrator's `attach_to_pod`, and
+then calls `list_dotnet_processes` through the per-handle reverse proxy. It
+asserts exactly one PID is visible and that its
+`ManagedEntrypointAssemblyName` is `CoreClrSample` — proving the proxy
+forwarded the request into the chosen Pod's PID namespace and not the
+sibling's.
+
+The CI job in `.github/workflows/kind-integration.yml` is the source of truth.
+To reproduce locally:
+
+```bash
+# 1. Build images
+docker build -t dotnet-diagnostics-mcp:p6 -f deploy/Dockerfile .
+docker build -t coreclr-sample:p6 -f samples/CoreClrSample/Dockerfile .
+
+# 2. Create a kind cluster and load images
+kind create cluster --name p6-kind
+kind load docker-image dotnet-diagnostics-mcp:p6 --name p6-kind
+kind load docker-image coreclr-sample:p6 --name p6-kind
+
+# 3. Install the orchestrator
+kubectl create namespace dotnet-diagnostics-mcp
+helm install dotnet-dbg-mcp deploy/helm/dotnet-diagnostics-orchestrator \
+  --namespace dotnet-diagnostics-mcp \
+  --set image.repository=dotnet-diagnostics-mcp \
+  --set image.tag=p6 \
+  --set image.pullPolicy=IfNotPresent \
+  --set bearerToken.value=kind-test-bearer-token \
+  --set orchestrator.ephemeralContainerImage=dotnet-diagnostics-mcp:p6 \
+  --set 'orchestrator.allowedNamespaces[0]'=p6-sample \
+  --set 'orchestrator.labelKeyAllowlist[2]'=p6-target \
+  --wait --timeout 3m
+
+# 4. Apply the two-replica sample fixture
+kubectl apply -f deploy/k8s/p6-sample/
+kubectl -n p6-sample wait --for=condition=Available deploy/p6-sample-a --timeout=3m
+kubectl -n p6-sample wait --for=condition=Available deploy/p6-sample-b --timeout=3m
+
+# 5. Port-forward and run the test
+kubectl -n dotnet-diagnostics-mcp port-forward \
+  svc/dotnet-dbg-mcp-dotnet-diagnostics-orchestrator 5130:5130 &
+
+DOTNET_DBG_MCP_KIND_TEST=1 \
+DOTNET_DBG_MCP_ORCH_URL=http://127.0.0.1:5130 \
+DOTNET_DBG_MCP_ORCH_TOKEN=kind-test-bearer-token \
+DOTNET_DBG_MCP_KIND_NAMESPACE=p6-sample \
+DOTNET_DBG_MCP_KIND_TARGET_LABEL=p6-target=a \
+dotnet test tests/DotnetDiagnosticsMcp.Server.IntegrationTests/ -c Release \
+  --filter "Category=KindIntegration"
+```
+
+Without `DOTNET_DBG_MCP_KIND_TEST=1` the test returns early (no-op pass) so
+it is safe to leave in the standard test inventory; `ci.yml`'s server
+integration step explicitly excludes `Category=KindIntegration` to keep the
+no-op out of regular runs.
