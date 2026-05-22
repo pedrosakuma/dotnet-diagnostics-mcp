@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dotnet-diagnostics-orchestrator.fullname" . }}
+  namespace: {{ include "dotnet-diagnostics-orchestrator.namespace" . }}
+  labels:
+    {{- include "dotnet-diagnostics-orchestrator.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dotnet-diagnostics-orchestrator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dotnet-diagnostics-orchestrator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: orchestrator
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "dotnet-diagnostics-orchestrator.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: orchestrator
+          image: {{ include "dotnet-diagnostics-orchestrator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          env:
+            - name: ASPNETCORE_URLS
+              value: {{ printf "http://0.0.0.0:%v" .Values.service.port | quote }}
+            - name: MCP_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dotnet-diagnostics-orchestrator.secretName" . }}
+                  key: token
+            - name: Orchestrator__Enabled
+              value: {{ ternary "true" "false" .Values.orchestrator.enabled | quote }}
+            - name: Orchestrator__DefaultNamespace
+              value: {{ include "dotnet-diagnostics-orchestrator.defaultNamespace" . | quote }}
+            {{- if gt (len .Values.orchestrator.allowedNamespaces) 0 }}
+            {{- range $i, $ns := .Values.orchestrator.allowedNamespaces }}
+            - name: {{ printf "Orchestrator__NamespaceAllowlist__%d" $i }}
+              value: {{ $ns | quote }}
+            {{- end }}
+            {{- else }}
+            - name: Orchestrator__NamespaceAllowlist__0
+              value: {{ include "dotnet-diagnostics-orchestrator.namespace" . | quote }}
+            {{- end }}
+            {{- range $i, $label := .Values.orchestrator.labelKeyAllowlist }}
+            - name: {{ printf "Orchestrator__LabelKeyAllowlist__%d" $i }}
+              value: {{ $label | quote }}
+            {{- end }}
+            - name: Orchestrator__PreparedLabelKey
+              value: {{ .Values.orchestrator.preparedLabelKey | quote }}
+            - name: Orchestrator__RequirePreparedLabel
+              value: {{ ternary "true" "false" .Values.orchestrator.requirePreparedLabel | quote }}
+            - name: Orchestrator__EphemeralContainerImage
+              value: {{ include "dotnet-diagnostics-orchestrator.ephemeralImage" . | quote }}
+            - name: Orchestrator__AttachReadinessTimeoutSeconds
+              value: {{ .Values.orchestrator.attachReadinessTimeoutSeconds | quote }}
+            - name: Orchestrator__DefaultInvestigationTtlSeconds
+              value: {{ .Values.orchestrator.defaultInvestigationTtlSeconds | quote }}
+            - name: Orchestrator__ProxyPodPort
+              value: {{ .Values.orchestrator.proxyPodPort | quote }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

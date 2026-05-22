@@ -1,0 +1,42 @@
+# Central orchestrator RBAC.
+#
+# This raw manifest uses the conventional `diagnosticsmcp-system` namespace for the
+# orchestrator's ServiceAccount. Update both metadata.namespace and the
+# ClusterRoleBinding subject namespace if you install into a different namespace, or
+# prefer the Kustomize / Helm surfaces which wire that automatically.
+#
+# Single-namespace tenants can replace the ClusterRole/ClusterRoleBinding with a
+# Role/RoleBinding in the target namespace using the SAME rules below.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dotnet-diagnostics-orchestrator
+  namespace: diagnosticsmcp-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dotnet-diagnostics-orchestrator
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dotnet-diagnostics-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: dotnet-diagnostics-orchestrator
+    namespace: diagnosticsmcp-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dotnet-diagnostics-orchestrator

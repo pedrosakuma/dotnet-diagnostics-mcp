@@ -1,0 +1,46 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: diagnosticsmcp-prod
+resources:
+  - ../../base
+configMapGenerator:
+  - name: orchestrator-settings
+    literals:
+      - targetNamespace=diagnosticsmcp-prod
+      - orchestratorImage=ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:v0.1.0
+secretGenerator:
+  - name: dotnet-diagnostics-orchestrator-bearer
+    literals:
+      - token=replace-me-with-a-strong-random-token
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+  - path: deployment-patch.yaml
+replacements:
+  - source:
+      kind: ConfigMap
+      name: orchestrator-settings
+      fieldPath: data.targetNamespace
+    targets:
+      - select:
+          kind: Deployment
+          name: dotnet-diagnostics-orchestrator
+        fieldPaths:
+          - spec.template.spec.containers.[name=orchestrator].env.[name=Orchestrator__DefaultNamespace].value
+          - spec.template.spec.containers.[name=orchestrator].env.[name=Orchestrator__NamespaceAllowlist__0].value
+      - select:
+          kind: ClusterRoleBinding
+          name: dotnet-diagnostics-orchestrator
+        fieldPaths:
+          - subjects.0.namespace
+  - source:
+      kind: ConfigMap
+      name: orchestrator-settings
+      fieldPath: data.orchestratorImage
+    targets:
+      - select:
+          kind: Deployment
+          name: dotnet-diagnostics-orchestrator
+        fieldPaths:
+          - spec.template.spec.containers.[name=orchestrator].image
+          - spec.template.spec.containers.[name=orchestrator].env.[name=Orchestrator__EphemeralContainerImage].value

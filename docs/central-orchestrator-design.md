@@ -455,13 +455,14 @@ Because ephemeral containers cannot be removed, investigations can leave a longe
 #### Threat 5 — audit gaps
 Without logs that tie user, target, and tool call together, the orchestrator becomes a privileged black box.
 ### 6.4 Required mitigations
-#### Namespace-scoped Role by default
-The default deployment should be:
+#### Prefer namespace-scoped RBAC when possible
+The least-privilege deployment is still:
 - one namespace,
 - one `Role`,
 - one `RoleBinding`,
 - one `ServiceAccount`.
-Do **not** make ClusterRole the default recommendation. Cluster-wide scope may be supported later, but it should be an explicitly conscious escalation.
+
+That said, issue #20 explicitly calls for a fleet-facing orchestrator that may span multiple namespaces, so the P5 deployment assets also ship a ClusterRole/ClusterRoleBinding example for that case. Treat cluster scope as an explicit escalation, and down-scope to a namespace-local Role/RoleBinding whenever a tenant only needs one namespace.
 #### Label-selector allowlist
 The orchestrator should enforce an allowlist such as:
 ```text
@@ -532,6 +533,13 @@ When the outer orchestrator token rotates, new client requests must use the new 
 When projected ServiceAccount tokens rotate, the orchestrator should pick up the new token without restart and new kube API calls should use fresh credentials automatically through the client library.
 #### Pod-local per-attach token rotation
 Do **not** rotate Pod-local bearer tokens mid-session in Phase 1. Each attach gets one token for its lifetime. If the session expires, create a new attach with a new token.
+### 7.6 Deployment assets
+P5 ships the first production deployment surface under:
+- [`deploy/k8s/orchestrator/`](../deploy/k8s/orchestrator) for raw manifests + Kustomize overlays,
+- [`deploy/helm/dotnet-diagnostics-orchestrator/`](../deploy/helm/dotnet-diagnostics-orchestrator) for Helm,
+- [`deploy/k8s/README.md`](../deploy/k8s/README.md) for operator quick starts and the runbook.
+
+Those assets intentionally keep the orchestrator itself non-root and ptrace-free while the per-investigation ephemeral diagnostics container is expected to retain the pod-local UID / `/tmp` / capability contract described in §4 and [`deploy/k8s/CENTRAL-TOPOLOGY.md`](../deploy/k8s/CENTRAL-TOPOLOGY.md). The current P5 deployment docs call out that the attach implementation still needs a code follow-up to inject the shared `/tmp` volume mount automatically on Linux targets.
 ---
 ## 8. Phased implementation plan
 This feature should land as a sequence of small, reviewable PRs.

@@ -1,0 +1,72 @@
+image:
+  repository: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Resource namespace override. Leave empty to use the Helm release namespace.
+namespace: ""
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 5130
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+bearerToken:
+  # Use an existing Secret with key `token` when set.
+  existingSecret: ""
+  # Replace before production, or prefer existingSecret.
+  value: replace-me-with-a-strong-random-token
+
+orchestrator:
+  enabled: true
+  # Leave empty to default to the chart namespace.
+  defaultNamespace: ""
+  # Leave empty to scope list_pods / attach_to_pod to the chart namespace.
+  allowedNamespaces: []
+  labelKeyAllowlist:
+    - diagnostics.dotnet.io/prepared
+    - app
+    - app.kubernetes.io/name
+  preparedLabelKey: diagnostics.dotnet.io/prepared
+  requirePreparedLabel: true
+  # Leave empty to reuse image.repository:image.tag for injected ephemeral containers.
+  ephemeralContainerImage: ""
+  attachReadinessTimeoutSeconds: 60
+  defaultInvestigationTtlSeconds: 1800
+  proxyPodPort: 5130
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

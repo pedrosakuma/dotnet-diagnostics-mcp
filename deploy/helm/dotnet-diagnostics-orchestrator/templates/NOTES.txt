@@ -1,0 +1,11 @@
+1. Retrieve the orchestrator bearer token:
+   kubectl -n {{ include "dotnet-diagnostics-orchestrator.namespace" . }} get secret {{ include "dotnet-diagnostics-orchestrator.secretName" . }} -o jsonpath='{.data.token}' | base64 -d && echo
+
+2. Port-forward the Service locally:
+   kubectl -n {{ include "dotnet-diagnostics-orchestrator.namespace" . }} port-forward svc/{{ include "dotnet-diagnostics-orchestrator.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+3. Point your MCP client at:
+   http://127.0.0.1:{{ .Values.service.port }}/mcp
+
+4. Health check (Authorization header optional for /health, shown here for parity with real traffic):
+   curl -H "Authorization: Bearer <token>" http://127.0.0.1:{{ .Values.service.port }}/health

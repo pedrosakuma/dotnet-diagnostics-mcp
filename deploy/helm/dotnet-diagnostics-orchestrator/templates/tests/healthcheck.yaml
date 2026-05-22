@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "dotnet-diagnostics-orchestrator.fullname" . }}-healthcheck
+  namespace: {{ include "dotnet-diagnostics-orchestrator.namespace" . }}
+  labels:
+    {{- include "dotnet-diagnostics-orchestrator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl:8.7.1
+      env:
+        - name: MCP_BEARER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "dotnet-diagnostics-orchestrator.secretName" . }}
+              key: token
+      command:
+        - /bin/sh
+        - -ec
+      args:
+        - >-
+          curl -fsS
+          -H "Authorization: Bearer ${MCP_BEARER_TOKEN}"
+          http://{{ include "dotnet-diagnostics-orchestrator.fullname" . }}:{{ .Values.service.port }}/health
+          >/dev/null

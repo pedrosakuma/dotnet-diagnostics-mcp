@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dotnet-diagnostics-orchestrator
+description: Central Kubernetes orchestrator for dotnet-diagnostics-mcp
+type: application
+version: 0.1.0
+appVersion: 0.1.0

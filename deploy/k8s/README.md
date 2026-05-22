@@ -1,121 +1,123 @@
 # Deploying dotnet-diagnostics-mcp on Kubernetes
 
-This folder contains a working sidecar topology that lets an LLM (via an MCP
-client) attach to a .NET application running in a Pod without modifying the
-application's image or code.
+This folder now contains both Kubernetes deployment models shipped by the repo:
+
+- the **always-on sidecar** for direct per-Pod investigations, and
+- the **central orchestrator** for Phase 7 fleet mode (`list_pods`, `attach_to_pod`, proxied diagnostics tools).
 
 ## Files
 
-- [`sample-sidecar.yaml`](./sample-sidecar.yaml) — Namespace, Secret (bearer
-  token), Deployment with **target app + diagnosticsmcp sidecar** and a ClusterIP
-  Service that exposes the MCP endpoint. **Always-on** topology.
-- [`central-target.yaml`](./central-target.yaml) — same target Deployment but
-  **without** a sidecar. Prepares the Pod (shared `/tmp` emptyDir, fixed UID)
-  so an ephemeral debug container can be attached on demand.
-- [`ephemeral-attach.patch.json`](./ephemeral-attach.patch.json) — `kubectl
-  patch --subresource=ephemeralcontainers` body that injects the MCP server
-  as an ephemeral container into a prepared target Pod.
-- [`CENTRAL-TOPOLOGY.md`](./CENTRAL-TOPOLOGY.md) — full design and
-  step-by-step recipe for the **on-demand** topology.
+- [`sample-sidecar.yaml`](./sample-sidecar.yaml) — Namespace, Secret, Deployment with **target app + diagnosticsmcp sidecar**, and a ClusterIP Service. Best when investigations are frequent.
+- [`central-target.yaml`](./central-target.yaml) — prepared target Deployment **without** a sidecar; used by the on-demand and orchestrator flows.
+- [`ephemeral-attach.patch.json`](./ephemeral-attach.patch.json) — raw `pods/ephemeralcontainers` patch for manual on-demand attach.
+- [`CENTRAL-TOPOLOGY.md`](./CENTRAL-TOPOLOGY.md) — operator-driven on-demand recipe and background on prepared targets.
+- [`orchestrator/`](./orchestrator) — raw RBAC / Secret / Deployment / Service manifests plus Kustomize overlays for the central orchestrator.
+- [`../helm/README.md`](../helm/README.md) — Helm install path for the same orchestrator surface.
 
-Pick the sidecar topology when investigations are frequent or unattended; pick
-the central/on-demand topology when you want zero recurring overhead and are
-OK with the operator (or an external orchestrator) initiating each attach.
+## Sidecar topology refresher
 
-## Why these pod-level settings are required
+The sidecar topology remains the simplest direct deployment model when one Pod equals one diagnostics endpoint.
+It still requires the same Linux pod-level prerequisites:
 
-The .NET runtime exposes a Diagnostic IPC endpoint per process:
+1. **Shared `/tmp`** between the app and diagnostics container so both see `/tmp/dotnet-diagnostic-<pid>`.
+2. **Shared PID visibility** (`shareProcessNamespace: true`) so the sidecar can enumerate the target process.
+3. **Matching UID/GID (or `fsGroup`)** so the sidecar can open the diagnostic socket.
 
-- **Linux**: a Unix domain socket at `/tmp/dotnet-diagnostic-<pid>`
-- **Windows**: a named pipe `dotnet-diagnostic-<pid>`
+See [`sample-sidecar.yaml`](./sample-sidecar.yaml) for the canonical manifest.
 
-For the sidecar to reach it on Linux pods, the two containers must agree on
-two things:
+## Central orchestrator quick starts
 
-1. **`shareProcessNamespace: true`** on the pod spec — without this the
-   sidecar cannot see the target's PIDs, so
-   `DiagnosticsClient.GetPublishedProcesses()` returns an empty list.
-2. **A shared volume mounted at `/tmp` in both containers** — so the socket
-   the runtime creates in the app container is visible from the sidecar. An
-   `emptyDir` volume is enough; it lives only as long as the pod.
-3. **Matching UID/GID (or `fsGroup`)** — the diagnostic socket inherits the
-   UID of the .NET process. If the sidecar runs as a different non-root user,
-   it gets `Permission denied` opening the socket. The manifest pins both
-   containers to UID/GID `10001` and sets `fsGroup: 10001` on the pod. If the
-   target app image *must* run as a different UID, either match `runAsUser`
-   in the sidecar or rely on `fsGroup` + group-readable socket permissions.
-
-The provided manifest configures all three.
-
-> **Validated locally with Docker** using `--pid=container:<app>` + a shared
-> volume mounted at `/tmp` in both containers — the same building blocks
-> Kubernetes provides via `shareProcessNamespace` and `emptyDir`.
-
-## Auth
-
-The sidecar requires an `Authorization: Bearer <token>` header on every
-request to `/mcp`. The token comes from the `MCP_BEARER_TOKEN` env var, which
-the manifest sources from a Kubernetes `Secret`. Rotate the secret and restart
-the pod to revoke a token.
-
-`/health` is exempt from auth so the kubelet readiness/liveness probes work
-without credentials.
-
-## Connecting an MCP client
-
-The Service exposes the sidecar on `ClusterIP:8787`. From a developer machine
-the simplest path is `kubectl port-forward`:
+### 1. Raw `kubectl apply`
 
 ```bash
-kubectl -n diagnosticsmcp-demo port-forward svc/sample-api-diagnosticsmcp 8787:8787
+kubectl create namespace diagnosticsmcp-system
+kubectl create namespace diagnosticsmcp-workloads
+
+# Edit deploy/k8s/orchestrator/deployment.yaml so Orchestrator__DefaultNamespace
+# and Orchestrator__NamespaceAllowlist__0 match your target namespace.
+# Edit deploy/k8s/orchestrator/rbac.yaml if you install outside diagnosticsmcp-system.
+# Replace the placeholder Secret token with `openssl rand -hex 32` output.
+
+kubectl apply -f deploy/k8s/orchestrator/rbac.yaml
+kubectl apply -f deploy/k8s/orchestrator/secret.yaml
+kubectl apply -f deploy/k8s/orchestrator/deployment.yaml
+kubectl apply -f deploy/k8s/orchestrator/service.yaml
 ```
 
-Then point an MCP-aware client at `http://localhost:8787/mcp` with the bearer
-token. For an LLM-based investigation, the model will typically:
+Then port-forward the Service and point the MCP client at `http://127.0.0.1:5130/mcp`.
 
-1. Call `list_dotnet_processes` to discover the target's PID.
-2. Call `get_diagnostic_capabilities` to see what's available (CoreCLR vs
-   NativeAOT, sampling, gcdump, etc.).
-3. Pick the appropriate tool — `snapshot_counters`, `collect_cpu_sample`,
-   `collect_exceptions`, `collect_gc_events`, `collect_event_source`, or
-   `collect_process_dump` — based on the symptom being investigated.
-
-## Building the sidecar image
-
-From the repo root:
+### 2. Kustomize overlay
 
 ```bash
-docker build -t ghcr.io/example/dotnet-diagnostics-mcp:latest -f deploy/Dockerfile .
-docker push ghcr.io/example/dotnet-diagnostics-mcp:latest
+kubectl kustomize deploy/k8s/orchestrator/kustomize/overlays/dev | kubectl apply -f -
 ```
 
-Replace the image reference in `sample-sidecar.yaml` with your own registry
-coordinates before applying.
+The dev overlay scopes discovery to `diagnosticsmcp-dev`, generates a placeholder bearer Secret, and keeps the image on `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest`.
+The prod overlay shows the same pattern with a pinned tag, explicit `replicas: 1`, and larger resource reservations.
 
-## Security considerations
+### 3. Helm
 
-- **Token confidentiality**: keep `MCP_BEARER_TOKEN` in a Secret (or external
-  secret store via CSI driver). Never bake it into the image.
-- **Network exposure**: the Service is `ClusterIP` by default. Use an Ingress
-  with TLS termination or a service mesh (mTLS) if you need to expose it
-  outside the cluster — never expose it directly to the public internet.
-- **Privilege**: the sidecar runs as a non-root user (UID 10001). Process
-  namespace sharing does not grant root, but it does let the sidecar see and
-  attach to the target. Treat the sidecar's auth boundary as equivalent to
-  shell access to the target process.
-- **Resource isolation**: keep `resources.limits` on the sidecar so a runaway
-  trace cannot starve the application.
+```bash
+helm upgrade --install diag-orchestrator \
+  deploy/helm/dotnet-diagnostics-orchestrator \
+  --namespace diagnosticsmcp-system \
+  --create-namespace \
+  --set bearerToken.value="$(openssl rand -hex 32)" \
+  --set orchestrator.allowedNamespaces[0]=diagnosticsmcp-workloads \
+  --set orchestrator.defaultNamespace=diagnosticsmcp-workloads
+```
 
-## Caveats
+See [`../helm/README.md`](../helm/README.md) for chart values, `helm test`, and notes output.
 
-- The sidecar will not be able to take a CPU sample of a **NativeAOT** target
-  process: the `Microsoft-DotNETCore-SampleProfiler` provider does not exist
-  in NativeAOT. Call `get_diagnostic_capabilities` first; the response
-  documents what is and isn't possible per target.
-- Dumps written by `collect_process_dump` land on the sidecar container's
-  filesystem. Mount a `PersistentVolumeClaim` or use an `emptyDir` of
-  sufficient size if you expect to capture large dumps.
-- The current manifest assumes a single replica. For multi-replica
-  deployments, point the MCP client at a specific Pod (`kubectl port-forward
-  pod/...`) rather than the Service so you know which instance you're
-  investigating.
+## Operator runbook
+
+### Rotate the outer bearer token
+
+1. Update the Secret (`kubectl apply -f deploy/k8s/orchestrator/secret.yaml` or `kubectl patch secret ...`).
+2. Restart the orchestrator Deployment: `kubectl rollout restart deploy/dotnet-diagnostics-orchestrator -n <ns>`.
+3. Distribute the new token to clients.
+
+Restart is expected: the orchestrator is intentionally stateless across restarts (see [`docs/central-orchestrator-design.md` §5.7](../../docs/central-orchestrator-design.md#57-orchestrator-restart-behavior)). Existing in-memory investigation handles are discarded and clients re-run `attach_to_pod`.
+
+### Scope RBAC to a single namespace
+
+Issue #20 requires `pods`, `pods/ephemeralcontainers`, and `pods/portforward`. The shipped raw/Helm surfaces use a ClusterRole because that is the exact fleet-wide permission set the orchestrator needs when it spans namespaces.
+
+For a single tenant namespace, replace the ClusterRole / ClusterRoleBinding with a Role / RoleBinding carrying the same rules in that namespace:
+
+```yaml
+apiGroups: [""]
+resources: ["pods"]
+verbs: ["get", "list", "watch"]
+---
+apiGroups: [""]
+resources: ["pods/ephemeralcontainers"]
+verbs: ["update", "patch"]
+---
+apiGroups: [""]
+resources: ["pods/portforward"]
+verbs: ["create"]
+```
+
+Keep `Orchestrator__NamespaceAllowlist__*` aligned with the namespace you grant.
+
+### How the orchestrator reaches the pod-local MCP server
+
+Per the design doc's [§4 proxy mechanics](../../docs/central-orchestrator-design.md#4-proxy-mechanics), the orchestrator does **not** shell out to `kubectl port-forward`.
+It uses the Kubernetes API in-process to:
+
+1. patch `pods/ephemeralcontainers`,
+2. wait for the injected diagnostics container to become Running,
+3. open `pods/portforward` streams to the pod-local MCP listener on `Orchestrator__ProxyPodPort` (default `5130`), and
+4. proxy the existing diagnostics tool surface through that investigation handle.
+
+That is why the orchestrator itself does **not** need `CAP_SYS_PTRACE`: ptrace-heavy work happens inside the injected per-Pod diagnostics container, not in the central Deployment.
+
+## Security notes
+
+- **Bearer = privileged diagnostics access.** Treat the orchestrator token as equivalent to shell-like access inside the namespaces it can reach.
+- **Do not expose the Service publicly.** Keep it `ClusterIP`, require an auth proxy or mesh identity at the edge, and prefer mTLS / NetworkPolicies between clients and the orchestrator.
+- **Keep Secrets external when possible.** `MCP_BEARER_TOKEN` should come from a Kubernetes Secret or external secret manager; never bake it into the image.
+- **Prepared targets still matter.** The orchestrator still depends on the shared `/tmp` emptyDir + matching UID contract documented in [`CENTRAL-TOPOLOGY.md`](./CENTRAL-TOPOLOGY.md) and [`central-target.yaml`](./central-target.yaml).
+- **Current Linux attach limitation:** the deploy assets package the orchestrator control plane today, but the current `attach_to_pod` implementation does **not yet** inject the target's shared `/tmp` volume mount into its ephemeral diagnostics container. On Linux prepared targets, keep using the manual [`ephemeral-attach.patch.json`](./ephemeral-attach.patch.json) or the always-on sidecar until that follow-up lands in code; otherwise the pod-local MCP server will not see `/tmp/dotnet-diagnostic-*`.
+- **Ephemeral containers persist until pod recreation.** `detach` only closes the orchestrator-side session; operators still restart / recreate the Pod to remove the in-Pod diagnostics container.
