@@ -14,5 +14,5 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
 {{- end }}

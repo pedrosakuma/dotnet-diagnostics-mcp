@@ -108,7 +108,7 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
 
         try
         {
-            var spec = BuildEphemeralContainerSpec(ephemeralName, container.Name, token);
+            var spec = BuildEphemeralContainerSpec(ephemeralName, container, token);
             await PatchEphemeralContainerAsync(ns, request.PodName, spec, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -259,8 +259,24 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
         return _options.EphemeralContainerNamePrefix + RandomHex(4);
     }
 
-    private V1EphemeralContainer BuildEphemeralContainerSpec(string ephemeralName, string targetContainer, string token)
+    private V1EphemeralContainer BuildEphemeralContainerSpec(string ephemeralName, V1Container target, string token)
     {
+        // Inherit the target container's volumeMounts so any prepared shared /tmp
+        // emptyDir (or equivalent) shows up under the same path in the ephemeral
+        // container. Without this the diagnostic IPC socket the runtime creates at
+        // /tmp/dotnet-diagnostic-<pid>-... would live in the target's mount namespace
+        // only — sharing the PID namespace (TargetContainerName) is not sufficient by
+        // itself. Mirrors the manual recipe in deploy/k8s/ephemeral-attach.patch.json.
+        var volumeMounts = target.VolumeMounts is { Count: > 0 }
+            ? new List<V1VolumeMount>(target.VolumeMounts.Select(CloneVolumeMount))
+            : null;
+
+        // Match the target container's UID/GID so the inherited socket file is
+        // readable. The CoreCLR runtime creates the socket with the process's
+        // effective uid; an ephemeral container running as a different uid sees
+        // EACCES on connect even when the mount is shared.
+        var securityContext = BuildEphemeralSecurityContext(target.SecurityContext);
+
         return new V1EphemeralContainer
         {
             Name = ephemeralName,
@@ -268,13 +284,68 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
             ImagePullPolicy = "IfNotPresent",
             // Required: join the target container's PID namespace so the diagnostic IPC
             // socket at /tmp/dotnet-diagnostic-<pid> is visible.
-            TargetContainerName = targetContainer,
+            TargetContainerName = target.Name,
             Env = new List<V1EnvVar>
             {
                 new() { Name = "MCP_BEARER_TOKEN", Value = token },
                 new() { Name = "ASPNETCORE_URLS", Value = $"http://0.0.0.0:{_options.ProxyPodPort}" },
             },
+            // The shipped image's appsettings.json pins "Urls" to 127.0.0.1:8787, which
+            // outranks ASPNETCORE_URLS in WebApplication.CreateBuilder's configuration
+            // precedence. Pass --urls explicitly so the kestrel binding follows the
+            // command-line override (highest precedence) and matches ProxyPodPort.
+            Args = new List<string> { "--urls", $"http://0.0.0.0:{_options.ProxyPodPort}" },
+            VolumeMounts = volumeMounts,
+            SecurityContext = securityContext,
             TerminationMessagePolicy = "File",
+        };
+    }
+
+    private static V1VolumeMount CloneVolumeMount(V1VolumeMount mount)
+        => new()
+        {
+            Name = mount.Name,
+            MountPath = mount.MountPath,
+            ReadOnlyProperty = mount.ReadOnlyProperty,
+            SubPath = mount.SubPath,
+            SubPathExpr = mount.SubPathExpr,
+            MountPropagation = mount.MountPropagation,
+            RecursiveReadOnly = mount.RecursiveReadOnly,
+        };
+
+    private static V1SecurityContext? BuildEphemeralSecurityContext(V1SecurityContext? source)
+    {
+        if (source is null)
+        {
+            return null;
+        }
+
+        // Inherit identity (UID/GID/non-root) and the target's non-elevating
+        // restrictions so the ephemeral container survives Pod Security
+        // "restricted" admission in the same namespace.
+        //
+        // Deliberately drop:
+        //   * Privileged=true and AllowPrivilegeEscalation=true (never widen).
+        //   * Capabilities.Add (workload-specific elevations).
+        // We keep Capabilities.Drop so the ephemeral container is not *more*
+        // permissive than the target.
+        V1Capabilities? capabilities = null;
+        if (source.Capabilities?.Drop is { Count: > 0 } drop)
+        {
+            capabilities = new V1Capabilities { Drop = new List<string>(drop) };
+        }
+
+        return new V1SecurityContext
+        {
+            RunAsUser = source.RunAsUser,
+            RunAsGroup = source.RunAsGroup,
+            RunAsNonRoot = source.RunAsNonRoot,
+            AllowPrivilegeEscalation = source.AllowPrivilegeEscalation is false ? false : null,
+            Capabilities = capabilities,
+            SeccompProfile = source.SeccompProfile,
+            SeLinuxOptions = source.SeLinuxOptions,
+            WindowsOptions = source.WindowsOptions,
+            ReadOnlyRootFilesystem = source.ReadOnlyRootFilesystem,
         };
     }
 

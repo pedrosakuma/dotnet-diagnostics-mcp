@@ -8,6 +8,7 @@ using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -90,23 +91,46 @@ internal static class InvestigationProxyEndpoints
         if (context.Request.QueryString.HasValue) targetUri.Query = context.Request.QueryString.Value!.TrimStart('?');
 
         using var upstream = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUri.Uri);
+        // Force HTTP/1.1: the synthetic "http://pod-local" host has no ALPN; HttpClient may
+        // attempt HTTP/2 negotiation and stall on the port-forward WS which carries opaque
+        // bytes and has no h2 handshake.
+        upstream.Version = HttpVersion.Version11;
+        upstream.VersionPolicy = HttpVersionPolicy.RequestVersionExact;
         CopyRequestHeaders(context.Request, upstream, handle.PodLocalBearerToken);
 
         if (HasBody(context.Request))
         {
-            upstream.Content = new StreamContent(context.Request.Body);
+            // Buffer the request body into a fixed-length ByteArrayContent. Streaming
+            // context.Request.Body through StreamContent leaves HttpClient in duplex
+            // mode where it gates the body-write completion on the upstream response,
+            // which deadlocks when the second pooled port-forward connection is in a
+            // half-closed state. A bounded byte body is sent in one shot (Content-Length
+            // is set automatically) and dodges that interaction. MCP request bodies are
+            // small (~hundreds of bytes); the buffering cost is negligible.
+            using var ms = new MemoryStream();
+            await context.Request.Body.CopyToAsync(ms, context.RequestAborted).ConfigureAwait(false);
+            var bytes = ms.ToArray();
+            upstream.Content = new ByteArrayContent(bytes);
             foreach (var h in context.Request.Headers)
             {
                 if (!h.Key.StartsWith("Content-", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(h.Key, "Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
                 upstream.Content.Headers.TryAddWithoutValidation(h.Key, (IEnumerable<string>)h.Value!);
             }
         }
 
         HttpResponseMessage response;
+        var swSend = System.Diagnostics.Stopwatch.StartNew();
+        logger.LogInformation(
+            "Proxy upstream send begin: handle={HandleId} method={Method} path={Path} bodyLen={BodyLen}",
+            handleId, context.Request.Method, targetPath, upstream.Content?.Headers.ContentLength);
         try
         {
             response = await client.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted)
                 .ConfigureAwait(false);
+            logger.LogInformation(
+                "Proxy upstream send end: handle={HandleId} status={Status} elapsedMs={Elapsed}",
+                handleId, (int)response.StatusCode, swSend.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
@@ -124,7 +148,41 @@ internal static class InvestigationProxyEndpoints
         {
             context.Response.StatusCode = (int)response.StatusCode;
             CopyResponseHeaders(response, context.Response);
-            await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted).ConfigureAwait(false);
+
+            // The pod-local MCP server uses Streamable HTTP semantics: the response to
+            // the initial POST is often a long-lived text/event-stream where each
+            // SSE event is a discrete chunk that the client must observe immediately
+            // to complete its initialize handshake. ASP.NET Core's default response
+            // body pipeline buffers writes until a threshold is hit or the request
+            // completes; with CopyToAsync that means the first SSE event sits in the
+            // buffer until the upstream stream closes — which for keep-alive sessions
+            // never happens, and the client trips its 100s HttpClient.Timeout. Disable
+            // buffering on the response body feature and stream chunks ourselves with
+            // an explicit flush after every read so the SSE event reaches the wire as
+            // soon as the upstream produces it.
+            context.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+            await StreamWithFlushAsync(response.Content, context.Response.Body, context.RequestAborted)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async Task StreamWithFlushAsync(HttpContent content, Stream destination, CancellationToken cancellationToken)
+    {
+        await using var source = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(8 * 1024);
+        try
+        {
+            while (true)
+            {
+                var read = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

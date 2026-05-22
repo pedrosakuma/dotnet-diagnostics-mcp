@@ -1,0 +1,172 @@
+name: Kind Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  kind:
+    name: Kind Integration (ubuntu-latest)
+    runs-on: ubuntu-latest
+    # Acceptance for issue #20 P6: stand up two CoreClrSample replicas on a
+    # kind cluster, install the orchestrator Helm chart, port-forward and run
+    # the [Category=KindIntegration] xUnit fact. The test attaches by label
+    # and asserts list_dotnet_processes through the proxy returns exactly one
+    # PID — the chosen Pod's, not the sibling's.
+    timeout-minutes: 25
+    env:
+      SAMPLE_IMAGE: coreclr-sample:p6
+      ORCH_IMAGE: dotnet-diagnostics-mcp:p6
+      ORCH_NAMESPACE: dotnet-diagnostics-mcp
+      SAMPLE_NAMESPACE: p6-sample
+      BEARER_TOKEN: kind-test-bearer-token
+      KIND_LOCAL_PORT: "5130"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-kind-${{ hashFiles('**/Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore + build
+        run: |
+          dotnet restore
+          dotnet build --no-restore --configuration Release
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build orchestrator image
+        run: |
+          docker build -t "${ORCH_IMAGE}" -f deploy/Dockerfile .
+
+      - name: Build sample image
+        run: |
+          docker build -t "${SAMPLE_IMAGE}" -f samples/CoreClrSample/Dockerfile .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: p6-kind
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image "${ORCH_IMAGE}" --name p6-kind
+          kind load docker-image "${SAMPLE_IMAGE}" --name p6-kind
+
+      - name: Install orchestrator (Helm)
+        run: |
+          kubectl create namespace "${ORCH_NAMESPACE}"
+          helm install dotnet-dbg-mcp deploy/helm/dotnet-diagnostics-orchestrator \
+            --namespace "${ORCH_NAMESPACE}" \
+            --set image.repository=dotnet-diagnostics-mcp \
+            --set image.tag=p6 \
+            --set image.pullPolicy=IfNotPresent \
+            --set bearerToken.value="${BEARER_TOKEN}" \
+            --set orchestrator.enabled=true \
+            --set orchestrator.ephemeralContainerImage="${ORCH_IMAGE}" \
+            --set 'orchestrator.allowedNamespaces[0]'="${SAMPLE_NAMESPACE}" \
+            --set 'orchestrator.labelKeyAllowlist[0]'=diagnostics.dotnet.io/prepared \
+            --set 'orchestrator.labelKeyAllowlist[1]'=app \
+            --set 'orchestrator.labelKeyAllowlist[2]'=p6-target \
+            --wait --timeout 3m
+
+      - name: Apply p6 sample manifests
+        run: |
+          kubectl apply -f deploy/k8s/p6-sample/
+
+      - name: Wait for sample pods to be Ready
+        run: |
+          kubectl -n "${SAMPLE_NAMESPACE}" wait --for=condition=Available deploy/p6-sample-a --timeout=3m
+          kubectl -n "${SAMPLE_NAMESPACE}" wait --for=condition=Available deploy/p6-sample-b --timeout=3m
+          kubectl -n "${SAMPLE_NAMESPACE}" get pods -o wide
+
+      - name: Port-forward orchestrator service (background)
+        run: |
+          ORCH_SVC=$(kubectl -n "${ORCH_NAMESPACE}" get svc \
+            -l app.kubernetes.io/instance=dotnet-dbg-mcp \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "Forwarding svc/${ORCH_SVC} -> localhost:${KIND_LOCAL_PORT}"
+          nohup kubectl -n "${ORCH_NAMESPACE}" port-forward "svc/${ORCH_SVC}" "${KIND_LOCAL_PORT}:5130" \
+            > port-forward.log 2>&1 &
+          echo $! > port-forward.pid
+          # Wait for the listener to be reachable.
+          for i in $(seq 1 30); do
+            if curl -fsS -m 2 "http://127.0.0.1:${KIND_LOCAL_PORT}/health" >/dev/null 2>&1; then
+              echo "orchestrator /health is reachable"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::orchestrator port-forward never became reachable"
+          cat port-forward.log || true
+          exit 1
+
+      - name: Run kind integration test
+        env:
+          DOTNET_DBG_MCP_KIND_TEST: "1"
+          DOTNET_DBG_MCP_ORCH_URL: http://127.0.0.1:5130
+          DOTNET_DBG_MCP_ORCH_TOKEN: kind-test-bearer-token
+          DOTNET_DBG_MCP_KIND_NAMESPACE: p6-sample
+          DOTNET_DBG_MCP_KIND_TARGET_LABEL: p6-target=a
+        run: |
+          dotnet test tests/DotnetDiagnosticsMcp.Server.IntegrationTests/DotnetDiagnosticsMcp.Server.IntegrationTests.csproj \
+            --no-build --configuration Release \
+            --filter "Category=KindIntegration" \
+            --blame-hang-timeout 5m \
+            --logger "trx;LogFileName=kind-test-results.trx" \
+            --logger "console;verbosity=detailed" \
+            --results-directory TestResults
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "===== orchestrator describe ====="
+          kubectl -n "${ORCH_NAMESPACE}" describe deploy || true
+          kubectl -n "${ORCH_NAMESPACE}" describe pods || true
+          echo "===== orchestrator logs ====="
+          kubectl -n "${ORCH_NAMESPACE}" logs -l app.kubernetes.io/instance=dotnet-dbg-mcp --all-containers --tail=500 || true
+          echo "===== sample describe ====="
+          kubectl -n "${SAMPLE_NAMESPACE}" describe pods || true
+          echo "===== sample logs ====="
+          for p in $(kubectl -n "${SAMPLE_NAMESPACE}" get pods -o name); do
+            echo "----- ${p} -----"
+            kubectl -n "${SAMPLE_NAMESPACE}" logs "${p}" --all-containers --tail=500 || true
+          done
+          echo "===== port-forward log ====="
+          cat port-forward.log || true
+
+      - name: Stop port-forward
+        if: always()
+        run: |
+          if [ -f port-forward.pid ]; then
+            kill "$(cat port-forward.pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload kind test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-integration-results
+          path: |
+            TestResults/**/*.trx
+            port-forward.log
+          if-no-files-found: ignore

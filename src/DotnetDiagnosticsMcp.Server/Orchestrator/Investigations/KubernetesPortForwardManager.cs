@@ -124,7 +124,12 @@ internal sealed class KubernetesPortForwardManager : IPortForwardManager, IAsync
             UseCookies = false,
             AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.None,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            // The port-forward demuxer can leave the WS-backed connection in a half-closed
+            // state when the pod-side server closes its read side but our reader hasn't yet
+            // observed EOF. Reusing such a connection deadlocks the next write. Force a
+            // fresh port-forward open per request — the cost is one extra round-trip to
+            // the kube-apiserver, well under 100ms in-cluster.
+            PooledConnectionLifetime = TimeSpan.Zero,
             ConnectCallback = (ctx, ct) => OpenPortForwardStreamAsync(handle, podPort, cts.Token, ct),
         };
 

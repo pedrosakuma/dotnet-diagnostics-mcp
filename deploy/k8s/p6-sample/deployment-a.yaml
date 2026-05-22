@@ -1,0 +1,74 @@
+# Replica "a" of the CoreClrSample target used by KindIntegrationTests
+# (issue #20, P6 acceptance). The replica is its own Deployment instead of a
+# multi-replica one so the test can pick a specific Pod via the discriminating
+# label `p6-target=a` and assert later that the orchestrator forwarded
+# `list_dotnet_processes` to it (and not its sibling `p6-target=b`).
+#
+# Mirrors deploy/k8s/central-target.yaml (no sidecar, prepared label, shared
+# /tmp emptyDir, pinned UID/GID) so the orchestrator's ephemeral-container
+# attach path is exactly the one the production recipe documents.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p6-sample-a
+  namespace: p6-sample
+  labels:
+    app: p6-sample
+    p6-target: a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: p6-sample
+      p6-target: a
+  template:
+    metadata:
+      labels:
+        app: p6-sample
+        p6-target: a
+        diagnostics.dotnet.io/prepared: "true"
+    spec:
+      containers:
+        - name: app
+          image: coreclr-sample:p6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: ASPNETCORE_URLS
+              value: http://0.0.0.0:8080
+            - name: DOTNET_EnableDiagnostics
+              value: "1"
+            # Surfaced through list_dotnet_processes so the kind test can assert
+            # the proxied call landed on replica `a` and not `b`.
+            - name: P6_TARGET_LABEL
+              value: a
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: diag-tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /weatherforecast
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      securityContext:
+        fsGroup: 10001
+      volumes:
+        - name: diag-tmp
+          emptyDir: {}

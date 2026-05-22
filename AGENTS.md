@@ -53,6 +53,14 @@ dotnet test tests/DotnetDiagnosticsMcp.Core.Tests/ -c Release --no-build \
   --filter FullyQualifiedName~Counters_ReturnsSystemRuntimeMetrics
 ```
 
+The orchestrator's end-to-end kind acceptance test is gated by
+`Category=KindIntegration` and runs only when the
+`.github/workflows/kind-integration.yml` job (or the manual reproduction
+documented in [`docs/central-orchestrator-design.md`](./docs/central-orchestrator-design.md))
+sets `DOTNET_DBG_MCP_KIND_TEST=1` plus its companion env vars. The standard
+`ci.yml` server-integration leg filters `Category!=KindIntegration` so it
+never appears as a misleading "Passed" no-op there.
+
 **Bearer token.** The server reads `MCP_BEARER_TOKEN` from the environment. If unset, it
 generates an ephemeral 32-byte hex token at startup and logs it as a warning — there is no
 hard-coded default. The local docker walkthroughs explicitly pass `MCP_BEARER_TOKEN=dev-token`.

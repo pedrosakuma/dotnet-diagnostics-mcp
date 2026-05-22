@@ -43,6 +43,7 @@ public class KubernetesPodAttachOrchestratorTests
         api.PatchedSpec.TargetContainerName.Should().Be(Container);
         api.PatchedSpec.Env.Should().Contain(e => e.Name == "MCP_BEARER_TOKEN" && e.Value == handle.PodLocalBearerToken);
         api.PatchedSpec.Env.Should().Contain(e => e.Name == "ASPNETCORE_URLS" && e.Value == $"http://0.0.0.0:{options.ProxyPodPort}");
+        api.PatchedSpec.Args.Should().Equal("--urls", $"http://0.0.0.0:{options.ProxyPodPort}");
         store.GetById(handle.HandleId).Should().BeSameAs(handle);
     }
 
@@ -56,6 +57,93 @@ public class KubernetesPodAttachOrchestratorTests
         await orch.AttachAsync(NewRequest(), CancellationToken.None);
 
         api.PatchedSpec!.Env.Should().Contain(e => e.Name == "ASPNETCORE_URLS" && e.Value == "http://0.0.0.0:18888");
+        api.PatchedSpec.Args.Should().Equal("--urls", "http://0.0.0.0:18888");
+    }
+
+    [Fact]
+    public async Task AttachAsync_InheritsTargetVolumeMounts_SoSharedTmpSocketIsVisible()
+    {
+        // Regression guard for the central topology: without this the ephemeral
+        // container would have its own /tmp and the diagnostic IPC socket created
+        // by the target's runtime at /tmp/dotnet-diagnostic-<pid> would be
+        // invisible to it, breaking list_dotnet_processes through the proxy.
+        var pod = BuildPreparedPod();
+        pod.Spec!.Containers[0].VolumeMounts = new List<V1VolumeMount>
+        {
+            new() { Name = "diag-tmp", MountPath = "/tmp" },
+            new() { Name = "ro-config", MountPath = "/config", ReadOnlyProperty = true },
+        };
+        var api = new StubAttachApi(pod: pod, ephemeralRunningAfter: 1);
+        var (orch, _, _) = NewOrchestrator(api);
+
+        await orch.AttachAsync(NewRequest(), CancellationToken.None);
+
+        api.PatchedSpec!.VolumeMounts.Should().NotBeNull();
+        api.PatchedSpec.VolumeMounts.Should().HaveCount(2);
+        api.PatchedSpec.VolumeMounts!.Should().ContainSingle(v =>
+            v.Name == "diag-tmp" && v.MountPath == "/tmp");
+        api.PatchedSpec.VolumeMounts!.Should().ContainSingle(v =>
+            v.Name == "ro-config" && v.MountPath == "/config" && v.ReadOnlyProperty == true);
+    }
+
+    [Fact]
+    public async Task AttachAsync_TargetWithoutVolumeMounts_LeavesEphemeralVolumeMountsNull()
+    {
+        var pod = BuildPreparedPod();
+        pod.Spec!.Containers[0].VolumeMounts = null;
+        var api = new StubAttachApi(pod: pod, ephemeralRunningAfter: 1);
+        var (orch, _, _) = NewOrchestrator(api);
+
+        await orch.AttachAsync(NewRequest(), CancellationToken.None);
+
+        api.PatchedSpec!.VolumeMounts.Should().BeNull(
+            "container-level security context is optional and so is volumeMounts");
+    }
+
+    [Fact]
+    public async Task AttachAsync_InheritsTargetSecurityContext_RunAsUserAndGroup()
+    {
+        // The ephemeral container must run as the same UID as the target so the
+        // diagnostic IPC socket file (mode 0600 owned by the runtime's effective
+        // uid) is readable. It also inherits non-elevating restrictions
+        // (allowPrivilegeEscalation=false, capability drops, seccomp profile,
+        // MAC contexts) so it survives Pod Security "restricted" admission.
+        // Privileged=true and capability adds are intentionally dropped.
+        var pod = BuildPreparedPod();
+        pod.Spec!.Containers[0].SecurityContext = new V1SecurityContext
+        {
+            RunAsUser = 10001,
+            RunAsGroup = 10001,
+            RunAsNonRoot = true,
+            Privileged = true, // must be dropped
+            AllowPrivilegeEscalation = false,
+            Capabilities = new V1Capabilities
+            {
+                Add = new List<string> { "NET_ADMIN" }, // must be dropped
+                Drop = new List<string> { "ALL" },
+            },
+            SeccompProfile = new V1SeccompProfile { Type = "RuntimeDefault" },
+        };
+        var api = new StubAttachApi(pod: pod, ephemeralRunningAfter: 1);
+        var (orch, _, _) = NewOrchestrator(api);
+
+        await orch.AttachAsync(NewRequest(), CancellationToken.None);
+
+        var ctx = api.PatchedSpec!.SecurityContext;
+        ctx.Should().NotBeNull();
+        ctx!.RunAsUser.Should().Be(10001);
+        ctx.RunAsGroup.Should().Be(10001);
+        ctx.RunAsNonRoot.Should().Be(true);
+        ctx.Privileged.Should().BeNull(
+            "the orchestrator must not silently propagate elevated privileges");
+        ctx.AllowPrivilegeEscalation.Should().Be(false,
+            "non-elevating restrictions must be inherited for PSS-restricted admission");
+        ctx.Capabilities.Should().NotBeNull();
+        ctx.Capabilities!.Add.Should().BeNullOrEmpty(
+            "capability adds are workload-specific elevations and must not propagate");
+        ctx.Capabilities.Drop.Should().BeEquivalentTo(new[] { "ALL" });
+        ctx.SeccompProfile.Should().NotBeNull();
+        ctx.SeccompProfile!.Type.Should().Be("RuntimeDefault");
     }
 
     [Fact]
