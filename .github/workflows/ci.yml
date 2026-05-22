@@ -52,13 +52,30 @@ jobs:
       # five minutes (live sample-process tests usually take ~10s; the longest
       # observed legitimate test is well under a minute). Prevents the whole CI
       # job from burning a full 6h budget on a stuck collector.
-      - name: Test
-        run: dotnet test --no-build --configuration Release --blame-hang-timeout 5m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
+      #
+      # The two test assemblies are run as separate steps (rather than a single
+      # `dotnet test` at the solution level) so that MSBuild does NOT run them
+      # in parallel. Both assemblies spawn live child .NET processes and open
+      # EventPipe sessions; running them concurrently on the 4-vCPU runner has
+      # been observed to crash the Core test host under load (issue #147).
+      # Intra-assembly parallelism is preserved (each `[Collection]` with
+      # DisableParallelization=true still serializes its own live tests).
+      #
+      # `--blame-crash --blame-crash-dump-type full` keeps a dump around the
+      # next time a test host actually dies, so future investigations don't
+      # have to push a CI-only repro PR just to capture state.
+      - name: Test (Core)
+        run: dotnet test tests/DotnetDiagnosticsMcp.Core.Tests/DotnetDiagnosticsMcp.Core.Tests.csproj --no-build --configuration Release --blame-hang-timeout 5m --blame-hang-dump-type none --blame-crash --blame-crash-dump-type full --logger "trx;LogFileName=core-test-results.trx" --results-directory TestResults
+
+      - name: Test (Server integration)
+        run: dotnet test tests/DotnetDiagnosticsMcp.Server.IntegrationTests/DotnetDiagnosticsMcp.Server.IntegrationTests.csproj --no-build --configuration Release --blame-hang-timeout 5m --blame-hang-dump-type none --blame-crash --blame-crash-dump-type full --logger "trx;LogFileName=server-test-results.trx" --results-directory TestResults
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.os }}
-          path: '**/TestResults/*.trx'
+          path: |
+            **/TestResults/*.trx
+            **/TestResults/**/*.dmp
           if-no-files-found: ignore
