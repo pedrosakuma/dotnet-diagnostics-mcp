@@ -24,6 +24,12 @@ jobs:
   pack-tool:
     name: Pack .NET global tool
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required by actions/attest-build-provenance to mint a Sigstore certificate
+      # via GitHub's OIDC issuer and publish the attestation back to the repo.
+      attestations: write
+      id-token: write
     outputs:
       version: ${{ steps.derive-version.outputs.version }}
     steps:
@@ -64,6 +70,14 @@ jobs:
             -p:Version=${{ steps.derive-version.outputs.version }} \
             --no-restore
 
+      - name: Attest nupkg provenance
+        # Attests the package bytes that are uploaded as an artifact below; the same
+        # bytes are downloaded by the publish-nuget job and pushed to NuGet.org, so
+        # consumers verifying the published .nupkg get a matching SLSA attestation.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'artifacts/nupkg/*.nupkg'
+
       - name: Upload nupkg
         uses: actions/upload-artifact@v6
         with:
@@ -76,6 +90,10 @@ jobs:
     name: Publish single-file binary (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
     needs: pack-tool
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -137,6 +155,13 @@ jobs:
             tar -czf ../dotnet-diagnostics-mcp-${{ needs.pack-tool.outputs.version }}-${{ matrix.rid }}.tar.gz dotnet-diagnostics-mcp appsettings*.json
           fi
 
+      - name: Attest binary archive provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            artifacts/dotnet-diagnostics-mcp-*.tar.gz
+            artifacts/dotnet-diagnostics-mcp-*.zip
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v6
         with:
@@ -151,6 +176,8 @@ jobs:
     name: Attach to GitHub Release
     runs-on: ubuntu-latest
     needs: [pack-tool, publish-binaries]
+    permissions:
+      contents: write   # create / update GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download all artifacts
@@ -171,6 +198,8 @@ jobs:
     name: Publish to NuGet.org
     runs-on: ubuntu-latest
     needs: [pack-tool, publish-binaries]
+    permissions:
+      contents: read
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v5
