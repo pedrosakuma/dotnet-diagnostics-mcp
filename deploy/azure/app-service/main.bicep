@@ -32,8 +32,8 @@ param planSku string = 'P0v3'
 @description('Image for the application container. Should be a Linux container; on private registries you will also need registryServer/Username/Password.')
 param appImage string
 
-@description('Image for the dotnet-diagnostics-mcp sidecar.')
-param diagImage string = 'ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest'
+@description('Image for the dotnet-diagnostics-mcp sidecar. Defaults to a released version tag (never :latest) so revisions are deterministic; for production override with a digest pin (image@sha256:...). See README.')
+param diagImage string = 'ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1'
 
 @description('TCP port the application container listens on.')
 param appPort int = 8080

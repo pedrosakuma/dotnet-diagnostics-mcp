@@ -57,8 +57,11 @@ Parameters:
 
   DiagImage:
     Type: String
-    Default: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
-    Description: Container image URI for the diagnostics MCP sidecar.
+    Default: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1
+    Description: >-
+      Container image URI for the diagnostics MCP sidecar. Pinned to a released
+      version tag rather than :latest to keep stack updates deterministic. For
+      production prefer a digest pin (image@sha256:...) — see the README.
 
   DiagPort:
     Type: Number

@@ -52,7 +52,7 @@ Then port-forward the Service and point the MCP client at `http://127.0.0.1:5130
 kubectl kustomize deploy/k8s/orchestrator/kustomize/overlays/dev | kubectl apply -f -
 ```
 
-The dev overlay scopes discovery to `diagnosticsmcp-dev`, generates a placeholder bearer Secret, and keeps the image on `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest`.
+The dev overlay scopes discovery to `diagnosticsmcp-dev`, generates a placeholder bearer Secret, and keeps the image on `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1`.
 The prod overlay shows the same pattern with a pinned tag, explicit `replicas: 1`, and larger resource reservations.
 
 ### 3. Helm

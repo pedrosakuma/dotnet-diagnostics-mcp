@@ -76,7 +76,7 @@ visibility across containers.
    Artifact Registry in the same region:
    - Your application image.
    - The diagnostics sidecar image — default
-     `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest`. If your project
+     `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1`. If your project
      blocks anonymous GHCR pulls, mirror it to Artifact Registry first.
 4. **A runtime service account** for the Cloud Run revision. It needs at
    minimum `roles/secretmanager.secretAccessor` on the bearer token secret:
@@ -129,7 +129,7 @@ attach will fail with `Permission denied`. See `AGENTS.md` →
      (`gcloud projects describe $(gcloud config get-value project) --format='value(projectNumber)'`)
    - `APP_IMAGE` — your application's container image URI
    - `DIAG_IMAGE` — diagnostics sidecar image (default
-     `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest`)
+     `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1`)
    - `APP_SERVICE_ACCOUNT` — the service account email created above
    - `BEARER_SECRET_NAME` — Secret Manager secret holding the bearer token
      (appears in two places: the `run.googleapis.com/secrets` annotation
@@ -222,3 +222,28 @@ through Identity-Aware Proxy, or an SSH tunnel.
 - [`AGENTS.md`](../../../AGENTS.md) — diagnostic socket UID invariant
 - [Cloud Run multi-container services](https://cloud.google.com/run/docs/deploying#multicontainer) — GCP docs
 - [Issue #22](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/22) — acceptance criteria
+
+## Production: pin to a digest
+
+The defaults above use a released version tag
+(`ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1`) rather than `:latest`, so a
+new upstream push cannot silently re-deploy under your stack. For production
+workloads go one step further and pin to a **content-addressable digest** so the
+exact image bytes are immutable across replicas, rollbacks, and pull retries:
+
+```bash
+# Resolve the current digest for the version tag you trust:
+docker buildx imagetools inspect \
+  ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1 \
+  --format '{{json .Manifest}}' | jq -r .digest
+# -> sha256:...
+
+# Use the digest form in your parameters / Bicep / service.yaml / template:
+ghcr.io/pedrosakuma/dotnet-diagnostics-mcp@sha256:<digest>
+```
+
+Mirror the digest into your private registry (Artifact Registry, ECR, ACR) for
+air-gapped or pull-quota-limited environments. Bump the pinned digest on the
+same cadence as your other base images; the SLSA build provenance attestation
+published by [`.github/workflows/publish-container.yml`](../../../.github/workflows/publish-container.yml)
+lets you verify the bytes before promoting.

@@ -29,8 +29,8 @@ param environmentId string
 @description('Image for the application container. Must be reachable by the Container App.')
 param appImage string
 
-@description('Image for the dotnet-diagnostics-mcp sidecar.')
-param diagImage string = 'ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest'
+@description('Image for the dotnet-diagnostics-mcp sidecar. Defaults to a released version tag (never :latest) so revisions are deterministic; for production override with a digest pin (image@sha256:...). See README.')
+param diagImage string = 'ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1'
 
 @description('TCP port the application container listens on. Exposed via ingress when ingressTarget=app.')
 param appPort int = 8080

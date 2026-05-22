@@ -84,10 +84,14 @@ public sealed class OrchestratorOptions
     /// <summary>
     /// Container image the orchestrator injects as the ephemeral diagnostics container
     /// on <c>attach_to_pod</c>. Must already be reachable by the target node's pull
-    /// configuration. Default: <c>ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest</c>;
-    /// override in production to pin a digest.
+    /// configuration. Default: <c>ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1</c>
+    /// (the latest released version tag — never <c>:latest</c>, which would silently
+    /// adopt new images in production). For production deployments override with a
+    /// content-addressable digest pin (e.g.
+    /// <c>ghcr.io/pedrosakuma/dotnet-diagnostics-mcp@sha256:...</c>) so the injected
+    /// sidecar bytes are immutable across replicas and re-attaches.
     /// </summary>
-    public string EphemeralContainerImage { get; set; } = "ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest";
+    public string EphemeralContainerImage { get; set; } = "ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1";
 
     /// <summary>
     /// Prefix applied to every injected ephemeral container's name. Lets operators

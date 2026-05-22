@@ -50,7 +50,7 @@ For Kubernetes on EKS (or any other cluster), use the generic recipes under
    - Your application image (any registry the task role/execution role can
      pull from; ECR is the simplest path).
    - The diagnostics sidecar image — by default
-     `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest`. If your account
+     `ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1`. If your account
      blocks anonymous GHCR pulls, mirror it to ECR first.
 5. **A bearer token in AWS Secrets Manager** for the MCP HTTP transport:
    ```bash
@@ -207,3 +207,28 @@ or a `localhost` port set up via `aws ssm start-session` port forwarding).
 - [`docs/cloud-integrations-design.md`](../../../docs/cloud-integrations-design.md) — parent portfolio decision
 - [`AGENTS.md`](../../../AGENTS.md) — diagnostic socket UID and `CAP_SYS_PTRACE` invariants
 - [Issue #22](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/22) — acceptance criteria
+
+## Production: pin to a digest
+
+The defaults above use a released version tag
+(`ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1`) rather than `:latest`, so a
+new upstream push cannot silently re-deploy under your stack. For production
+workloads go one step further and pin to a **content-addressable digest** so the
+exact image bytes are immutable across replicas, rollbacks, and pull retries:
+
+```bash
+# Resolve the current digest for the version tag you trust:
+docker buildx imagetools inspect \
+  ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1 \
+  --format '{{json .Manifest}}' | jq -r .digest
+# -> sha256:...
+
+# Use the digest form in your parameters / Bicep / service.yaml / template:
+ghcr.io/pedrosakuma/dotnet-diagnostics-mcp@sha256:<digest>
+```
+
+Mirror the digest into your private registry (Artifact Registry, ECR, ACR) for
+air-gapped or pull-quota-limited environments. Bump the pinned digest on the
+same cadence as your other base images; the SLSA build provenance attestation
+published by [`.github/workflows/publish-container.yml`](../../../.github/workflows/publish-container.yml)
+lets you verify the bytes before promoting.

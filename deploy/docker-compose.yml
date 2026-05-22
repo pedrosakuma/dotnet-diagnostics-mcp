@@ -38,7 +38,7 @@ name: dotnet-mcp
 
 services:
   diagnostics:
-    image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
+    image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1
     container_name: dotnet-diagnostics-mcp
     restart: unless-stopped
     ports:
@@ -64,7 +64,7 @@ services:
       retries: 3
 
   assembly:
-    image: ghcr.io/pedrosakuma/dotnet-assembly-mcp:latest
+    image: ghcr.io/pedrosakuma/dotnet-assembly-mcp:0.19.1
     container_name: dotnet-assembly-mcp
     restart: unless-stopped
     ports:

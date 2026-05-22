@@ -1,0 +1,29 @@
+# Dependabot configuration.
+#
+# Keeps third-party GitHub Actions (all SHA-pinned per #167) and Dockerfile base
+# images current. Updates land as PRs against `main`; CI's existing required
+# checks (build/test/kind-integration) gate the merge. Grouped to minimize PR
+# noise — minor and patch bumps for each ecosystem are bundled into a single PR.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docker-minor-patch:
+        update-types:
+          - minor
+          - patch

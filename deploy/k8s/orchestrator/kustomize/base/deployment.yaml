@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: orchestrator
-          image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
+          image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -58,7 +58,7 @@ spec:
             - name: Orchestrator__RequirePreparedLabel
               value: "true"
             - name: Orchestrator__EphemeralContainerImage
-              value: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
+              value: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1
             - name: Orchestrator__AttachReadinessTimeoutSeconds
               value: "60"
             - name: Orchestrator__DefaultInvestigationTtlSeconds

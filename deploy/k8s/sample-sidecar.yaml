@@ -69,7 +69,7 @@ spec:
       containers:
         # ----- 1. Target application (replace with your own image) -----
         - name: app
-          image: ghcr.io/example/sample-api:latest
+          image: ghcr.io/example/sample-api:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -93,7 +93,7 @@ spec:
 
         # ----- 2. dotnet-diagnostics-mcp sidecar -----
         - name: diagnosticsmcp
-          image: ghcr.io/example/dotnet-diagnostics-mcp:latest
+          image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1
           imagePullPolicy: IfNotPresent
           # ClrMD-backed tools (collect_thread_snapshot, inspect_live_heap,
           # inspect_dump on live PIDs, collect_process_dump) attach via
