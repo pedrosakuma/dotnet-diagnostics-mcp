@@ -31,6 +31,14 @@ spec:
         - name: orchestrator
           image: {{ include "dotnet-diagnostics-orchestrator.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # `--urls` is the highest-precedence binding source in
+          # WebApplication.CreateBuilder, so it overrides the appsettings.json
+          # "Urls" key the local-dev image ships with (which would otherwise
+          # bind to 127.0.0.1:8787 — invisible to the kubelet's probes and to
+          # the in-cluster Service).
+          args:
+            - "--urls"
+            - {{ printf "http://0.0.0.0:%v" .Values.service.port | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
