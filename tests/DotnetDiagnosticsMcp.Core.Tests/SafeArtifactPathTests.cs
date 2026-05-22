@@ -104,4 +104,38 @@ public sealed class SafeArtifactPathTests : IDisposable
         mode.Should().Be(UnixFileMode.UserRead | UnixFileMode.UserWrite,
             "the helper must collapse the file mode to user-only 0600");
     }
+
+    [Fact]
+    public void CreateRestrictedFile_BirthsFileWith0600_OnPosix()
+    {
+        var file = Path.Combine(_root, "born-restricted.bin");
+        using (var fs = SafeArtifactPath.CreateRestrictedFile(file))
+        {
+            fs.Write(new byte[] { 0x42 }, 0, 1);
+        }
+
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            File.GetUnixFileMode(file).Should().Be(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                "FileStreamOptions.UnixCreateMode must apply 0600 at creation time, eliminating the umask race");
+        }
+    }
+
+    [Fact]
+    public void CreateRestrictedFile_RefusesPreExistingLeaf()
+    {
+        var file = Path.Combine(_root, "already-there.bin");
+        File.WriteAllBytes(file, Array.Empty<byte>());
+
+        var act = () =>
+        {
+            using var fs = SafeArtifactPath.CreateRestrictedFile(file);
+        };
+
+        // FileMode.CreateNew throws IOException when the leaf already exists, which
+        // also defends against a symlink-swap attack between sandbox validation and
+        // the write.
+        act.Should().Throw<IOException>();
+    }
 }

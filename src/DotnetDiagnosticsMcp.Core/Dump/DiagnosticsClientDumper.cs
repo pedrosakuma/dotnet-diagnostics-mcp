@@ -46,7 +46,22 @@ public sealed class DiagnosticsClientDumper : IProcessDumper
             var client = new DiagnosticsClient(processId);
             var nativeType = (DumpType)(int)dumpType;
             _logger.LogInformation("Writing {DumpType} dump for pid {Pid} to {Path}", dumpType, processId, fullPath);
+
+            // Pre-create the destination as an empty 0600 file. POSIX open(2) with
+            // O_CREAT|O_TRUNC|O_WRONLY (which is what DiagnosticsClient.WriteDump uses
+            // under the hood) IGNORES the mode argument when the file already exists,
+            // so the dump payload inherits the pre-set 0600 mode. This closes the
+            // umask-race window the security audit flagged. FileMode.CreateNew also
+            // refuses to follow a symlink at the leaf (the symlink target would
+            // already exist), defending against a TOCTOU swap between
+            // SafeArtifactPath.ResolveDirectory and the write.
+            using (SafeArtifactPath.CreateRestrictedFile(fullPath))
+            {
+            }
+
             client.WriteDump(nativeType, fullPath, logDumpGeneration: false);
+
+            // Belt-and-braces: re-assert the mode and fail hard if the FS rejected it.
             SafeArtifactPath.SetRestrictiveFilePermissions(fullPath);
 
             var info = new FileInfo(fullPath);

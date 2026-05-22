@@ -75,8 +75,9 @@ public static class SafeArtifactPath
 
     /// <summary>
     /// Applies <c>0600</c> POSIX permissions to a newly-written artifact file. No-op on
-    /// Windows (see class summary). Failures are non-fatal — for example, a tmpfs that
-    /// already enforces a stricter umask will reject the chmod with <c>EPERM</c>.
+    /// Windows (see class summary). On POSIX a chmod failure is fatal: it propagates as
+    /// <see cref="ArtifactPathException"/> so the tool surfaces a structured error
+    /// envelope rather than silently leaving a world-readable artifact on disk.
     /// </summary>
     public static void SetRestrictiveFilePermissions(string filePath)
     {
@@ -86,18 +87,34 @@ public static class SafeArtifactPath
         {
             File.SetUnixFileMode(filePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
-        catch (FileNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
+            throw new ArtifactPathException(filePath,
+                $"failed to apply 0600 permissions to artifact ({ex.GetType().Name}: {ex.Message}).");
         }
-        catch (IOException)
+    }
+
+    /// <summary>
+    /// Opens a brand-new file in a sandboxed directory with <c>0600</c> POSIX permissions
+    /// applied at creation time (via <see cref="FileStreamOptions.UnixCreateMode"/>) so
+    /// the file never exists at a permissive umask-derived mode. Fails if the file
+    /// already exists (defends against a symlink swap at the leaf between
+    /// <see cref="ResolveDirectory"/> and the open call).
+    /// </summary>
+    public static FileStream CreateRestrictedFile(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        var options = new FileStreamOptions
         {
-        }
-        catch (UnauthorizedAccessException)
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+        };
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         }
-        catch (PlatformNotSupportedException)
-        {
-        }
+        return new FileStream(filePath, options);
     }
 
     private static string CanonicaliseRoot(string root)
@@ -214,14 +231,10 @@ public static class SafeArtifactPath
         {
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
-        catch (PlatformNotSupportedException)
-        {
+            throw new ArtifactPathException(path,
+                $"failed to apply 0700 permissions to artifact directory ({ex.GetType().Name}: {ex.Message}).");
         }
     }
 }

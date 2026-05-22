@@ -89,11 +89,17 @@ public sealed class ClrMdJitMethodCapturer : IJitMethodCapturer
     private static void FinalizeWrites(string outputDir, IReadOnlyList<PendingWrite> writes)
     {
         if (writes.Count == 0) return;
-        Directory.CreateDirectory(outputDir);
+        // Note: outputDir was already created with restrictive permissions inside
+        // ResolveOutputDirectory; no second CreateDirectory pass is needed (and doing
+        // it again would re-validate the path through a symlinked parent on a TOCTOU
+        // race).
         foreach (var w in writes)
         {
-            File.WriteAllBytes(w.Path, w.Bytes);
-            SafeArtifactPath.SetRestrictiveFilePermissions(w.Path);
+            // CreateRestrictedFile uses FileMode.CreateNew (refuses an existing
+            // symlink at the leaf) and FileStreamOptions.UnixCreateMode=0600 so the
+            // file is born with restrictive permissions — no umask race.
+            using var fs = SafeArtifactPath.CreateRestrictedFile(w.Path);
+            fs.Write(w.Bytes, 0, w.Bytes.Length);
         }
     }
 
