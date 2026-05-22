@@ -218,7 +218,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         result.Artifact.Root.Children.Should().NotBeEmpty("the call-tree artifact must capture at least one stack");
     }
 
-    [Fact]
+    [Fact(Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
     public async Task CpuSampler_ResolvesSourceLines_WhenEnabled()
     {
         EnsureSampleRunning();
@@ -240,7 +240,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         result.Artifact.ResolvedSources.Should().NotBeNull();
     }
 
-    [Fact]
+    [Fact(Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
     public async Task CpuSampler_EmitsMethodIdentities_ForUserCode()
     {
         EnsureSampleRunning();
@@ -649,7 +649,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    [Fact(Timeout = 90_000)]
+    [Fact(Timeout = 90_000, Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
     public async Task CpuSampler_ResolvesMethodLevelClosedGenerics_OnlyWhenOptInEnabled()
     {
         EnsureSampleRunning();
