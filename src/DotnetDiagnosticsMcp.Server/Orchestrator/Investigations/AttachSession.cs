@@ -19,10 +19,17 @@ public sealed record AttachSession(
     InvestigationState State,
     DateTimeOffset AttachedAt,
     DateTimeOffset ExpiresAt,
-    string? FailureReason = null)
+    string? FailureReason = null,
+    string? ProxyBaseUrl = null)
 {
-    /// <summary>Projects an internal handle into the client-safe shape, dropping the bearer token.</summary>
-    public static AttachSession FromHandle(InvestigationHandle handle)
+    /// <summary>
+    /// Projects an internal handle into the client-safe shape, dropping the bearer token.
+    /// When <paramref name="proxyBaseUrl"/> is supplied it is attached so the client knows
+    /// the URL prefix subsequent diagnostic tool calls should target. The orchestrator's
+    /// reverse proxy strips the prefix, injects the per-attach bearer token, and forwards
+    /// to the Pod-local diagnostics MCP.
+    /// </summary>
+    public static AttachSession FromHandle(InvestigationHandle handle, string? proxyBaseUrl = null)
     {
         ArgumentNullException.ThrowIfNull(handle);
         return new AttachSession(
@@ -34,6 +41,7 @@ public sealed record AttachSession(
             State: handle.State,
             AttachedAt: handle.AttachedAt,
             ExpiresAt: handle.ExpiresAt,
-            FailureReason: handle.FailureReason);
+            FailureReason: handle.FailureReason,
+            ProxyBaseUrl: proxyBaseUrl);
     }
 }

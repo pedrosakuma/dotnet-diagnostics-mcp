@@ -53,6 +53,10 @@ var token = BearerTokenOptions.LoadOrGenerate(app.Logger);
 app.UseMiddleware<BearerTokenMiddleware>(token);
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+if (orchestratorEnabled)
+{
+    app.MapInvestigationProxy();
+}
 app.MapMcp("/mcp");
 
 app.Run();

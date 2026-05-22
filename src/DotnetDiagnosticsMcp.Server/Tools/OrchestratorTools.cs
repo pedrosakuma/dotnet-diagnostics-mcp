@@ -149,6 +149,7 @@ public sealed class OrchestratorTools
         "on the Pod's spec until the Pod is recreated.")]
     public static async Task<DiagnosticResult<AttachSession>> AttachToPod(
         IPodAttachOrchestrator orchestrator,
+        OrchestratorOptions options,
         [Description("Pod namespace. Falls back to the orchestrator's DefaultNamespace when omitted.")]
         string? @namespace = null,
         [Description("Pod name. Required.")]
@@ -194,7 +195,13 @@ public sealed class OrchestratorTools
         }
 
         // Project to the client-safe shape so PodLocalBearerToken never leaves the server.
-        var session = AttachSession.FromHandle(handle);
+        // The proxy URL is a relative path the client appends to its MCP base; the
+        // orchestrator's reverse proxy at /proxy/{handleId}/... will swap the bearer for
+        // the per-attach Pod-local secret before forwarding.
+        var proxyUrl = handle.State == InvestigationState.Active
+            ? options.ProxyBasePath.TrimEnd('/') + "/" + handle.HandleId
+            : null;
+        var session = AttachSession.FromHandle(handle, proxyUrl);
 
         var summary = $"Investigation {session.HandleId} {(session.State == InvestigationState.Active ? "attached" : session.State.ToString().ToLowerInvariant())} " +
                       $"to {session.Namespace}/{session.PodName} container={session.TargetContainerName} " +
@@ -205,8 +212,9 @@ public sealed class OrchestratorTools
             summary,
             new NextActionHint(
                 "attach_to_pod",
-                "Proxied diagnostic tool calls land in the next orchestrator slice. " +
-                "Until then, the handle confirms the ephemeral container is Running and the bearer token is held server-side."));
+                proxyUrl is null
+                    ? "Investigation is not yet Active. Re-poll the handle or retry attach_to_pod."
+                    : $"Route subsequent diagnostic tool calls to '{proxyUrl}/...'. The orchestrator will inject the Pod-local bearer token automatically; do NOT include the external Authorization header on those calls."));
     }
 
     private static NextActionHint BuildAttachRecoveryHint(string errorKind) => errorKind switch

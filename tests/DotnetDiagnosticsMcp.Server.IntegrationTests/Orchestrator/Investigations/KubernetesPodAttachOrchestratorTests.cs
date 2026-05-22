@@ -379,6 +379,9 @@ public class KubernetesPodAttachOrchestratorTests
             _readCount = 0; // restart readiness clock so ephemeralRunningAfter applies post-patch
             return Task.FromResult(_pod!);
         }
+
+        public Task<k8s.IStreamDemuxer> OpenPortForwardAsync(string namespaceName, string name, int podPort, CancellationToken cancellationToken)
+            => throw new NotSupportedException("StubAttachApi does not exercise port-forward; use the dedicated KubernetesPortForwardManager tests.");
     }
 
     /// <summary>

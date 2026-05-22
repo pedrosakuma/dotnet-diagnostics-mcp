@@ -97,6 +97,9 @@ public class KubernetesPodInventoryTests
 
         public Task<V1Pod> AddEphemeralContainerAsync(string namespaceName, string name, V1EphemeralContainer ephemeralContainer, CancellationToken cancellationToken)
             => throw new NotSupportedException("KubernetesPodInventoryTests do not exercise AddEphemeralContainerAsync.");
+
+        public Task<k8s.IStreamDemuxer> OpenPortForwardAsync(string namespaceName, string name, int podPort, CancellationToken cancellationToken)
+            => throw new NotSupportedException("KubernetesPodInventoryTests do not exercise OpenPortForwardAsync.");
     }
 
     private static KubernetesPodInventory NewInventory(

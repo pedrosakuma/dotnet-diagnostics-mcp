@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using k8s;
 using k8s.Models;
 
 namespace DotnetDiagnosticsMcp.Server.Orchestrator;
@@ -59,5 +60,21 @@ public interface IKubernetesPodsApi
         string namespaceName,
         string name,
         V1EphemeralContainer ephemeralContainer,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Opens a port-forward WebSocket to a single port on the target Pod and returns a
+    /// running <see cref="IStreamDemuxer"/>. Channel 0 carries data for the requested
+    /// port; channel 1 carries error bytes. Caller owns the demuxer lifetime — disposing
+    /// it closes the underlying WebSocket.
+    /// </summary>
+    /// <param name="namespaceName">Pod namespace.</param>
+    /// <param name="name">Pod name.</param>
+    /// <param name="podPort">TCP port to forward to inside the Pod.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task<IStreamDemuxer> OpenPortForwardAsync(
+        string namespaceName,
+        string name,
+        int podPort,
         CancellationToken cancellationToken);
 }

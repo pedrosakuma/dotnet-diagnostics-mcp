@@ -110,4 +110,18 @@ public sealed class OrchestratorOptions
     /// (P4) can close idle sessions. Default: 1800 (30 minutes).
     /// </summary>
     public int DefaultInvestigationTtlSeconds { get; set; } = 1800;
+
+    /// <summary>
+    /// TCP port the ephemeral diagnostics container listens on inside the target Pod.
+    /// Must match the <c>ASPNETCORE_URLS</c> binding the orchestrator injects on attach
+    /// (see <see cref="Investigations.KubernetesPodAttachOrchestrator"/>). Default: 5130.
+    /// </summary>
+    public int ProxyPodPort { get; set; } = 5130;
+
+    /// <summary>
+    /// URL path prefix the orchestrator mounts the reverse proxy under. Subsequent
+    /// diagnostic tool calls for an investigation are routed via
+    /// <c>{ProxyBasePath}/{handleId}/{**rest}</c>. Default: <c>/proxy</c>.
+    /// </summary>
+    public string ProxyBasePath { get; set; } = "/proxy";
 }

@@ -79,4 +79,25 @@ internal sealed class KubernetesPodsApi : IKubernetesPodsApi
             namespaceParameter: namespaceName,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<IStreamDemuxer> OpenPortForwardAsync(
+        string namespaceName,
+        string name,
+        int podPort,
+        CancellationToken cancellationToken)
+    {
+        var client = _factory.GetClient();
+        // k8s SPDY-over-WS port-forward subprotocol: each port produces TWO channels
+        // (data + error). We request only one port; channel 0 is read/write data,
+        // channel 1 is read-only error bytes.
+        var ws = await client.WebSocketNamespacedPodPortForwardAsync(
+            name: name,
+            @namespace: namespaceName,
+            ports: new[] { podPort },
+            webSocketSubProtocol: WebSocketProtocol.V4BinaryWebsocketProtocol,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var demuxer = new StreamDemuxer(ws, StreamType.PortForward);
+        demuxer.Start();
+        return demuxer;
+    }
 }
