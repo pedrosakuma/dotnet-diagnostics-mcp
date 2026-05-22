@@ -57,6 +57,19 @@ internal sealed class PodLocalInvestigationProxyClient : IInvestigationProxyClie
         ArgumentNullException.ThrowIfNull(request);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
+        // H7 (issue #164): defense-in-depth allowlist check. The CallTool filter
+        // is the primary gate, but enforcing again here guarantees that any
+        // future code path that bypasses the filter (e.g. a direct call from a
+        // unit test, a refactor that re-orders the request pipeline, or a
+        // server-internal call site) still cannot drive a non-diagnostic tool
+        // upstream with the auto-injected pod-local bearer.
+        if (!InvestigationProxyToolAllowlist.IsAllowed(request.Name))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to forward tool '{request.Name}' to investigation {handle.HandleId}: " +
+                "tool is not on the orchestrator's investigation-proxy allowlist (DiagnosticTools surface).");
+        }
+
         var client = await GetOrCreateClientAsync(handle, cancellationToken).ConfigureAwait(false);
         return await client.CallToolAsync(request, cancellationToken).ConfigureAwait(false);
     }

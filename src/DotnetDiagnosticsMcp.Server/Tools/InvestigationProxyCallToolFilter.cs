@@ -130,6 +130,19 @@ internal static class InvestigationProxyCallToolFilter
             return await next(requestParams, cancellationToken).ConfigureAwait(false);
         }
 
+        // H7 (issue #164): enforce the explicit forwarded-tool allowlist BEFORE we
+        // delegate to the proxy client. A tool that is not on the allowlist is NOT
+        // silently demoted to local execution (which would mask "this tool doesn't
+        // make sense in a Pod-attached context" misuse from the LLM); it surfaces
+        // a structured error so the LLM can self-correct.
+        if (!InvestigationProxyToolAllowlist.IsAllowed(toolName))
+        {
+            loggerAccessor()?.LogWarning(
+                "Refusing to forward '{ToolName}' from session {SessionId} via investigation {HandleId}: tool is not on the proxy allowlist.",
+                toolName, sessionId, handle.HandleId);
+            return BuildToolNotAllowedResult(toolName, handle.HandleId);
+        }
+
         try
         {
             loggerAccessor()?.LogDebug(
@@ -196,6 +209,27 @@ internal static class InvestigationProxyCallToolFilter
               .Append(string.IsNullOrWhiteSpace(cur.Message) ? "(no message)" : cur.Message);
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// H7 (issue #164) — structured error surface when a tool name fails the
+    /// proxy allowlist gate. The shape mirrors <see cref="BuildErrorText"/> so the
+    /// LLM has one error-block format to reason about.
+    /// </summary>
+    internal static CallToolResult BuildToolNotAllowedResult(string toolName, string handleId)
+    {
+        var text = $"{toolName} failed: tool '{toolName}' is not on the orchestrator's investigation-proxy " +
+                   $"allowlist and was refused before forwarding to investigation {handleId}. " +
+                   "Only the documented diagnostics tools (DiagnosticTools surface) can traverse the proxy. " +
+                   "Either call this tool against a local pid (pass an explicit processId) or use a tool that is in the allowlist.";
+        return new CallToolResult
+        {
+            IsError = true,
+            Content = new List<ContentBlock>
+            {
+                new TextContentBlock { Text = text },
+            },
+        };
     }
 
     // Mirror of OrchestratorTools.TryGetServerSessionId / DiagnosticTools.TryGetServerSessionId.

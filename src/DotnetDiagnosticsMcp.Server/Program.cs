@@ -1,6 +1,9 @@
 using DotnetDiagnosticsMcp.Core.Symbols;
 using DotnetDiagnosticsMcp.Server.Auth;
 using DotnetDiagnosticsMcp.Server.Hosting;
+using DotnetDiagnosticsMcp.Server.Orchestrator;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 
 // --health-check (issue #27): probe-only client mode. Used by supervisor units
 // (systemd ExecStartPre, Scheduled Task pre-check, container HEALTHCHECK,
@@ -38,6 +41,43 @@ builder.Services.AddDiagnosticCoreServices(configuredSymbolPath);
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.StaleBinaryWatcher>();
 var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Configuration);
 
+// M5 (issue #164): per-IP fixed-window rate limit applied to /mcp and the proxy
+// endpoints. Budget defaults come from OrchestratorOptions but the policy is
+// always registered so /mcp gets the same protection even when the orchestrator
+// is disabled. Excess requests are short-circuited with 429; the response body
+// carries a structured envelope and a Retry-After hint.
+var rateLimitOptions = new OrchestratorOptions();
+builder.Configuration.GetSection("Orchestrator").Bind(rateLimitOptions);
+builder.Services.AddRateLimiter(rateLimiter =>
+{
+    rateLimiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    rateLimiter.OnRejected = static async (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.ContentType = "application/problem+json";
+        if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            ctx.HttpContext.Response.Headers.RetryAfter = ((int)retryAfter.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        await ctx.HttpContext.Response.WriteAsync(
+            "{\"status\":429,\"kind\":\"RateLimited\",\"detail\":\"Too many requests. Slow down and retry after the Retry-After interval.\"}",
+            ct).ConfigureAwait(false);
+    };
+    rateLimiter.AddPolicy(InvestigationProxyEndpoints.RateLimiterPolicyName, httpContext =>
+    {
+        var partitionKey = RateLimitPartitionKey(httpContext);
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey,
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = rateLimitOptions.RateLimitPermitsPerWindow,
+                Window = TimeSpan.FromSeconds(rateLimitOptions.RateLimitWindowSeconds),
+                QueueLimit = rateLimitOptions.RateLimitQueueLimit,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                AutoReplenishment = true,
+            });
+    });
+});
+
 // Hold the resolved ILoggerFactory once the app is built so the CallTool filter (configured
 // before Build()) can obtain a logger lazily without sharing state with WebApplication.
 ILoggerFactory? loggerFactoryHolder = null;
@@ -73,6 +113,10 @@ if (boundToNonLoopback && !hasOperatorToken)
 var token = BearerTokenOptions.LoadOrGenerate(app.Logger, allowEphemeralFallback: !boundToNonLoopback);
 app.UseMiddleware<BearerTokenMiddleware>(token);
 
+// M5: rate limiter middleware runs after bearer-auth so 401-bound traffic still
+// short-circuits cheaply and only authenticated traffic counts against the policy.
+app.UseRateLimiter();
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 if (orchestratorEnabled)
 {
@@ -82,6 +126,21 @@ app.MapMcp("/mcp");
 
 app.Run();
 return 0;
+
+static string RateLimitPartitionKey(HttpContext httpContext)
+{
+    // X-Forwarded-For first (orchestrator deployments typically sit behind a
+    // gateway), else the immediate remote address, else a constant — never
+    // partition the world into a single bucket without at least a coarse key.
+    var fwd = httpContext.Request.Headers["X-Forwarded-For"].ToString();
+    if (!string.IsNullOrWhiteSpace(fwd))
+    {
+        var first = fwd.Split(',', 2)[0].Trim();
+        if (!string.IsNullOrEmpty(first)) return "ip:" + first;
+    }
+    var remote = httpContext.Connection.RemoteIpAddress?.ToString();
+    return string.IsNullOrEmpty(remote) ? "ip:unknown" : "ip:" + remote;
+}
 
 static async Task<int> RunStdioAsync(string[] args)
 {

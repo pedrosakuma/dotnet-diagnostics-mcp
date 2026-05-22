@@ -9,6 +9,7 @@ using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -16,33 +17,106 @@ using Microsoft.Extensions.Logging;
 namespace DotnetDiagnosticsMcp.Server.Hosting;
 
 /// <summary>
-/// Maps the orchestrator's per-handle reverse proxy at <c>{ProxyBasePath}/{handleId}/{**rest}</c>.
-/// Validates the handle, resolves the cached <see cref="HttpClient"/> from
-/// <see cref="IPortForwardManager"/>, swaps the client-supplied <c>Authorization</c> header
-/// for the per-attach Pod-local bearer token, forwards the request to the ephemeral
-/// container's diagnostics MCP, and streams the response back. The Pod-local secret
-/// never leaves the orchestrator process.
+/// Maps the orchestrator's per-handle reverse proxy at <c>{ProxyBasePath}/{handleId}/mcp</c>.
+/// Validates the handle, enforces per-owner authorization, resolves the cached
+/// <see cref="HttpClient"/> from <see cref="IPortForwardManager"/>, swaps the
+/// client-supplied <c>Authorization</c> header for the per-attach Pod-local bearer
+/// token, forwards the request to the ephemeral container's diagnostics MCP, and
+/// streams the response back. The Pod-local secret never leaves the orchestrator
+/// process.
 /// </summary>
+/// <remarks>
+/// <para>
+/// H7 (issue #164): the route is restricted to the single <c>/mcp</c> path and to
+/// the HTTP methods Streamable HTTP actually uses (POST for JSON-RPC, GET for SSE
+/// reconnect, DELETE for session termination). Any other path or method returns
+/// 404 — new endpoints on the pod-local MCP do NOT become automatically reachable.
+/// </para>
+/// <para>
+/// H6 (issue #164): when the handle carries an <c>OwnerSessionId</c>, the request
+/// must present the matching <c>Mcp-Session-Id</c> header. Mismatch → structured
+/// 403 envelope. Handles minted without an owner (stdio attach, framework calls
+/// with no session id) remain reachable by every authenticated caller for
+/// dev-time stdio ergonomics.
+/// </para>
+/// <para>
+/// M5 (issue #164): the route applies the "mcp" rate-limit policy (per-IP fixed
+/// window) and a <see cref="OrchestratorOptions.ProxyRequestSizeLimitBytes"/> cap
+/// to bound per-request buffering by a misbehaving authenticated client.
+/// </para>
+/// </remarks>
 internal static class InvestigationProxyEndpoints
 {
-    private static readonly string[] ProxyHttpMethods = new[] { "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD" };
+    // H7: only the methods Streamable HTTP needs against /mcp. Reject everything else.
+    private static readonly string[] ProxyHttpMethods = new[] { "POST", "GET", "DELETE" };
+    private static readonly string[] AllHttpMethods = new[]
+    {
+        "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE",
+    };
+
+    /// <summary>H6: shared rate-limiter policy name, also referenced from /mcp registration.</summary>
+    internal const string RateLimiterPolicyName = "mcp";
+
+    /// <summary>H6: the per-handle relative path segment forwarded to the pod-local MCP.</summary>
+    internal const string McpPathSegment = "/mcp";
 
     private static readonly HashSet<string> HopByHopHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
         "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
         "TE", "Trailers", "Transfer-Encoding", "Upgrade", "Host",
         "Authorization", // stripped explicitly — orchestrator injects its own
+        "Cookie", // stripped: never forward client cookies upstream.
     };
 
     public static IEndpointRouteBuilder MapInvestigationProxy(this IEndpointRouteBuilder app)
     {
         ArgumentNullException.ThrowIfNull(app);
         var options = app.ServiceProvider.GetRequiredService<OrchestratorOptions>();
-        var pattern = options.ProxyBasePath.TrimEnd('/') + "/{handleId}/{**rest}";
+        var basePath = options.ProxyBasePath.TrimEnd('/');
 
-        app.MapMethods(pattern, ProxyHttpMethods, HandleAsync);
+        // H7: the route is bounded to /mcp (+ an optional trailing segment so the
+        // proxy still works if the pod-local SDK ever decides to namespace under
+        // /mcp/<session>/...) — any other rest is 404. Methods are bounded to the
+        // Streamable-HTTP verbs only.
+        var pattern = basePath + "/{handleId}/mcp/{**rest}";
+        var mcpRoute = app.MapMethods(pattern, ProxyHttpMethods, HandleAsync);
+        ApplyProxyEndpointMetadata(mcpRoute, options);
+
+        // Same shape without the trailing path segment so the proxy works for the
+        // canonical "POST /proxy/{id}/mcp" call without a wildcard segment.
+        var mcpRootPattern = basePath + "/{handleId}/mcp";
+        var mcpRootRoute = app.MapMethods(mcpRootPattern, ProxyHttpMethods, HandleAsync);
+        ApplyProxyEndpointMetadata(mcpRootRoute, options);
+
+        // H7: catch-all that returns a structured 404 for any other path under the
+        // proxy prefix. Without this an attacker probing /proxy/{id}/something-else
+        // would hit ASP.NET Core's generic 404 page; the structured envelope helps
+        // a well-behaved LLM client recover and prevents the host fingerprint from
+        // leaking through the default 404 body.
+        var fallbackPattern = basePath + "/{handleId}/{**rest}";
+        app.MapMethods(fallbackPattern, AllHttpMethods, HandleDisallowedAsync);
+
         return app;
     }
+
+    private static void ApplyProxyEndpointMetadata(IEndpointConventionBuilder route, OrchestratorOptions options)
+    {
+        // M5: cap request body size to bound buffering by a misbehaving authenticated
+        // client. We rely on Kestrel's MaxRequestBodySize feature; copying the limit
+        // onto the endpoint metadata makes it endpoint-scoped without affecting /mcp
+        // (which can keep the host-wide default).
+        route.WithMetadata(new RequestSizeLimitMetadata(options.ProxyRequestSizeLimitBytes));
+        // M5: rate-limit the proxy hot path under the shared "mcp" policy.
+        route.RequireRateLimiting(RateLimiterPolicyName);
+    }
+
+    private static Task HandleDisallowedAsync(HttpContext context)
+        => WriteProblemAsync(
+            context,
+            StatusCodes.Status404NotFound,
+            "ProxyPathNotAllowed",
+            $"The investigation proxy only accepts {string.Join('/', ProxyHttpMethods)} requests to '/proxy/{{handleId}}/mcp'. " +
+            "All other paths and methods are rejected. See docs/central-orchestrator-design.md §6 for the documented surface.");
 
     private static async Task HandleAsync(HttpContext context)
     {
@@ -54,7 +128,7 @@ internal static class InvestigationProxyEndpoints
         var rest = (string?)context.Request.RouteValues["rest"] ?? string.Empty;
         if (string.IsNullOrWhiteSpace(handleId))
         {
-            await WriteProblemAsync(context, StatusCodes.Status404NotFound, "Missing investigation handle id.").ConfigureAwait(false);
+            await WriteProblemAsync(context, StatusCodes.Status404NotFound, "ProxyHandleMissing", "Missing investigation handle id.").ConfigureAwait(false);
             return;
         }
 
@@ -63,15 +137,45 @@ internal static class InvestigationProxyEndpoints
         if (handle is null)
         {
             await WriteProblemAsync(context, StatusCodes.Status404NotFound,
+                "ProxyHandleUnknown",
                 $"Investigation handle '{handleId}' is unknown.").ConfigureAwait(false);
             return;
         }
         if (handle.State != InvestigationState.Active)
         {
             await WriteProblemAsync(context, StatusCodes.Status410Gone,
+                "ProxyHandleNotActive",
                 $"Investigation '{handleId}' is in state {handle.State} and cannot be proxied.").ConfigureAwait(false);
             return;
         }
+
+        // H6: enforce per-owner authorization. Streamable HTTP carries the MCP
+        // session id in the Mcp-Session-Id header; we compare it to the handle's
+        // OwnerSessionId. Handles minted without an owner (stdio attach, framework
+        // calls with no session id) remain reachable by every authenticated caller.
+        if (handle.OwnerSessionId is not null)
+        {
+            var caller = ExtractCallerSessionId(context.Request);
+            if (!string.Equals(caller, handle.OwnerSessionId, StringComparison.Ordinal))
+            {
+                logger.LogWarning(
+                    "Cross-session proxy attempt rejected: handle={HandleId} owner=present caller={CallerPresent} method={Method} path={Path}.",
+                    handleId, caller is null ? "absent" : "present", context.Request.Method, context.Request.Path);
+                await WriteProblemAsync(context, StatusCodes.Status403Forbidden,
+                    "ProxyOwnerMismatch",
+                    $"Investigation handle '{handleId}' is owned by a different MCP session. " +
+                    "Re-attach in this session via attach_to_pod to obtain a handle you own, " +
+                    "or present the Mcp-Session-Id header that originally minted the handle.").ConfigureAwait(false);
+                return;
+            }
+        }
+
+        // H7: hard-cap path to the Mcp segment plus optional sub-paths the SDK may
+        // emit (the SDK currently uses just "/mcp"). The route pattern already
+        // restricts inbound paths but recompute the upstream path defensively to
+        // prevent any future route refactor from forwarding a probe path.
+        var trimmedRest = rest.Trim('/');
+        var targetPath = string.IsNullOrEmpty(trimmedRest) ? McpPathSegment : McpPathSegment + "/" + trimmedRest;
 
         var manager = context.RequestServices.GetRequiredService<IPortForwardManager>();
         HttpClient client;
@@ -82,11 +186,10 @@ internal static class InvestigationProxyEndpoints
         catch (OrchestratorException ex)
         {
             logger.LogWarning(ex, "Port-forward setup failed for {HandleId}.", handleId);
-            await WriteProblemAsync(context, StatusCodes.Status502BadGateway, ex.Message).ConfigureAwait(false);
+            await WriteProblemAsync(context, StatusCodes.Status502BadGateway, "ProxyUpstreamUnavailable", ex.Message).ConfigureAwait(false);
             return;
         }
 
-        var targetPath = "/" + rest.TrimStart('/');
         var targetUri = new UriBuilder(client.BaseAddress!) { Path = targetPath };
         if (context.Request.QueryString.HasValue) targetUri.Query = context.Request.QueryString.Value!.TrimStart('?');
 
@@ -100,15 +203,26 @@ internal static class InvestigationProxyEndpoints
 
         if (HasBody(context.Request))
         {
-            // Buffer the request body into a fixed-length ByteArrayContent. Streaming
-            // context.Request.Body through StreamContent leaves HttpClient in duplex
-            // mode where it gates the body-write completion on the upstream response,
-            // which deadlocks when the second pooled port-forward connection is in a
-            // half-closed state. A bounded byte body is sent in one shot (Content-Length
-            // is set automatically) and dodges that interaction. MCP request bodies are
-            // small (~hundreds of bytes); the buffering cost is negligible.
+            // M5: enforce the body cap pre-buffer. Kestrel's MaxRequestBodySize
+            // (set via the endpoint metadata) is the primary gate; we also bound
+            // the copy here so a chunked-encoded body that lies about its length
+            // can't outgrow the cap during the CopyToAsync.
+            var options = context.RequestServices.GetRequiredService<OrchestratorOptions>();
             using var ms = new MemoryStream();
-            await context.Request.Body.CopyToAsync(ms, context.RequestAborted).ConfigureAwait(false);
+            try
+            {
+                await CopyBoundedAsync(context.Request.Body, ms, options.ProxyRequestSizeLimitBytes, context.RequestAborted)
+                    .ConfigureAwait(false);
+            }
+            catch (RequestBodyTooLargeException)
+            {
+                await WriteProblemAsync(context, StatusCodes.Status413PayloadTooLarge,
+                    "ProxyBodyTooLarge",
+                    $"Request body exceeds the configured proxy limit of {options.ProxyRequestSizeLimitBytes} bytes.")
+                    .ConfigureAwait(false);
+                return;
+            }
+
             var bytes = ms.ToArray();
             upstream.Content = new ByteArrayContent(bytes);
             foreach (var h in context.Request.Headers)
@@ -140,6 +254,7 @@ internal static class InvestigationProxyEndpoints
         {
             logger.LogWarning(ex, "Upstream request failed for {HandleId} → {Path}.", handleId, targetPath);
             await WriteProblemAsync(context, StatusCodes.Status502BadGateway,
+                "ProxyUpstreamFailed",
                 $"Pod-local diagnostics MCP did not respond: {ex.Message}").ConfigureAwait(false);
             return;
         }
@@ -186,6 +301,37 @@ internal static class InvestigationProxyEndpoints
         }
     }
 
+    /// <summary>
+    /// M5: copy <paramref name="source"/> into <paramref name="destination"/> up to
+    /// <paramref name="limit"/> bytes. Throws <see cref="RequestBodyTooLargeException"/>
+    /// when the source produces more than the limit. Pass <c>limit &lt;= 0</c> to disable.
+    /// </summary>
+    private static async Task CopyBoundedAsync(Stream source, Stream destination, long limit, CancellationToken cancellationToken)
+    {
+        if (limit <= 0)
+        {
+            await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(8 * 1024);
+        long total = 0;
+        try
+        {
+            while (true)
+            {
+                var read = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+                if (read == 0) return;
+                total += read;
+                if (total > limit) throw new RequestBodyTooLargeException();
+                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
     private static void CopyRequestHeaders(HttpRequest source, HttpRequestMessage destination, string podToken)
     {
         foreach (var h in source.Headers)
@@ -221,11 +367,48 @@ internal static class InvestigationProxyEndpoints
            !HttpMethods.IsHead(request.Method) &&
            !HttpMethods.IsDelete(request.Method);
 
+    /// <summary>
+    /// H6: extract the caller's MCP session id from the inbound request. The
+    /// Streamable-HTTP spec (and the MCP SDK) carry it in the <c>Mcp-Session-Id</c>
+    /// header on every request after <c>initialize</c>. Returns null when the
+    /// header is missing or empty so the caller can distinguish "no session"
+    /// from "wrong session" in logs.
+    /// </summary>
+    private static string? ExtractCallerSessionId(HttpRequest request)
+    {
+        if (!request.Headers.TryGetValue("Mcp-Session-Id", out var values)) return null;
+        var value = values.ToString();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
     private static Task WriteProblemAsync(HttpContext context, int status, string detail)
+        => WriteProblemAsync(context, status, kind: null, detail);
+
+    private static Task WriteProblemAsync(HttpContext context, int status, string? kind, string detail)
     {
         context.Response.StatusCode = status;
         context.Response.ContentType = "application/problem+json";
+        var kindFragment = kind is null
+            ? string.Empty
+            : ",\"kind\":" + System.Text.Json.JsonSerializer.Serialize(kind);
         return context.Response.WriteAsync(
-            $"{{\"status\":{status},\"detail\":{System.Text.Json.JsonSerializer.Serialize(detail)}}}");
+            $"{{\"status\":{status}{kindFragment},\"detail\":{System.Text.Json.JsonSerializer.Serialize(detail)}}}");
+    }
+
+    private sealed class RequestBodyTooLargeException : Exception
+    {
     }
 }
+
+/// <summary>
+/// Endpoint-scoped metadata applying <see cref="OrchestratorOptions.ProxyRequestSizeLimitBytes"/>
+/// to a route. Stored alongside the standard ASP.NET Core <c>IRequestSizeLimitMetadata</c>
+/// so the framework's max-request-body-size middleware caps incoming requests before they
+/// reach the proxy handler.
+/// </summary>
+internal sealed class RequestSizeLimitMetadata(long maxRequestBodySize)
+    : Microsoft.AspNetCore.Http.Metadata.IRequestSizeLimitMetadata
+{
+    public long? MaxRequestBodySize { get; } = maxRequestBodySize;
+}
+

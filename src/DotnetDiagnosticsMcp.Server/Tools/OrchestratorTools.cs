@@ -186,7 +186,13 @@ public sealed class OrchestratorTools
             ContainerName: containerName,
             TtlSeconds: ttlSeconds,
             RequirePreparedTarget: requirePreparedTarget,
-            AllowReuseExistingSession: allowReuseExistingSession);
+            AllowReuseExistingSession: allowReuseExistingSession,
+            // H6 (issue #164): stamp the caller's MCP session id onto the request
+            // so the handle the orchestrator mints is bound to this session and
+            // /proxy/{handleId} can later enforce per-owner authorization.
+            // TryGetServerSessionId returns null on stdio / framework calls without
+            // a session — those handles intentionally remain un-scoped.
+            OwnerSessionId: TryGetServerSessionId(server));
 
         InvestigationHandle handle;
         try
@@ -407,15 +413,21 @@ public sealed class OrchestratorTools
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Returns every investigation handle the orchestrator has minted (or knows about) since startup. " +
+        "Returns every investigation handle the orchestrator has minted on behalf of this MCP session. " +
         "By default only Active/Attaching handles are returned — pass includeTerminal=true to also see " +
-        "Closed/Expired/Failed entries for diagnostic forensics. Bearer tokens are never included; the " +
-        "shape matches attach_to_pod's response so the same envelope works for both tools.")]
+        "Closed/Expired/Failed entries for diagnostic forensics. Other sessions' handles are NEVER " +
+        "returned unless the orchestrator is configured with Orchestrator:AllowCrossSessionAdmin=true " +
+        "AND the caller passes includeAllSessions=true (operator-audit escape hatch). " +
+        "Bearer tokens are never included; the shape matches attach_to_pod's response so the same " +
+        "envelope works for both tools.")]
     public static Task<DiagnosticResult<InvestigationListPage>> ListActiveInvestigations(
         IInvestigationStore store,
         OrchestratorOptions options,
+        McpServer? server = null,
         [Description("When true, includes handles in terminal states (Closed/Expired/Failed). Default false — only Active/Attaching.")]
         bool includeTerminal = false,
+        [Description("Operator-only opt-in (requires Orchestrator:AllowCrossSessionAdmin=true). When true, returns handles minted by other MCP sessions. Default false — every caller sees only its own handles.")]
+        bool includeAllSessions = false,
         CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
@@ -435,11 +447,27 @@ public sealed class OrchestratorTools
             }
         }
 
+        // H6 (issue #164): determine the caller's MCP session id once. Handles
+        // owned by other sessions are filtered out below unless the admin
+        // escape hatch is active. A null sessionId (stdio / unit test) is
+        // treated as "system caller" and matches only handles that were minted
+        // without an owner (OwnerSessionId == null) — those are exactly the
+        // handles created on the same un-scoped transport, so the secure
+        // behavior degrades sensibly.
+        var callerSessionId = TryGetServerSessionId(server!);
+        var adminListing = includeAllSessions && options.AllowCrossSessionAdmin;
+
         var proxyPrefix = options.ProxyBasePath.TrimEnd('/');
         var items = new List<AttachSession>(snapshot.Count);
+        var redactedCount = 0;
         foreach (var h in snapshot)
         {
             if (!includeTerminal && IsTerminalState(h.State)) continue;
+            if (!adminListing && !IsOwnedByCaller(h, callerSessionId))
+            {
+                redactedCount++;
+                continue;
+            }
             var proxyUrl = h.State == InvestigationState.Active
                 ? proxyPrefix + "/" + h.HandleId
                 : null;
@@ -461,14 +489,21 @@ public sealed class OrchestratorTools
         if (items.Count == 0)
         {
             summary = includeTerminal
-                ? "list_active_investigations: no investigations on record."
-                : "list_active_investigations: no Active/Attaching investigations. Pass includeTerminal=true to inspect Closed/Expired/Failed history.";
+                ? (redactedCount > 0
+                    ? $"list_active_investigations: no investigations owned by this MCP session ({redactedCount} hidden — owned by other sessions)."
+                    : "list_active_investigations: no investigations on record.")
+                : (redactedCount > 0
+                    ? $"list_active_investigations: no Active/Attaching investigations owned by this MCP session ({redactedCount} hidden). Pass includeTerminal=true to inspect Closed/Expired/Failed history."
+                    : "list_active_investigations: no Active/Attaching investigations. Pass includeTerminal=true to inspect Closed/Expired/Failed history.");
         }
         else
         {
             summary = $"list_active_investigations: {items.Count} returned (active={active}, attaching={attaching}" +
                       (includeTerminal ? $", closed={closed}, expired={expired}, failed={failed}" : "") +
-                      $"; totalKnown={snapshot.Count}).";
+                      $"; totalKnown={snapshot.Count}" +
+                      (redactedCount > 0 ? $"; {redactedCount} hidden — owned by other sessions" : string.Empty) +
+                      (adminListing ? "; admin listing (includeAllSessions=true)" : string.Empty) +
+                      ").";
         }
 
         return Task.FromResult(DiagnosticResult.Ok(
@@ -479,6 +514,18 @@ public sealed class OrchestratorTools
                 items.Count == 0
                     ? "Call attach_to_pod to open a new investigation."
                     : "Pass an item's handleId to detach_from_pod to close it explicitly, or wait for the TTL reaper.")));
+    }
+
+    private static bool IsOwnedByCaller(InvestigationHandle handle, string? callerSessionId)
+    {
+        // Handles minted without an owner (stdio attach, framework calls that had
+        // no session id) are reachable by every authenticated caller — this is
+        // intentional to preserve dev-time stdio ergonomics, where there is only
+        // ever one human driving the orchestrator. In HTTP deployments every
+        // attach happens through a session-bearing transport, so the owner is
+        // always populated and per-session isolation applies.
+        if (handle.OwnerSessionId is null) return true;
+        return string.Equals(handle.OwnerSessionId, callerSessionId, StringComparison.Ordinal);
     }
 
     private static bool IsTerminalState(InvestigationState state)

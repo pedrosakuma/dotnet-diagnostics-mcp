@@ -92,7 +92,8 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
             PodLocalBearerToken: token,
             State: InvestigationState.Attaching,
             AttachedAt: now,
-            ExpiresAt: now + ttl);
+            ExpiresAt: now + ttl,
+            OwnerSessionId: request.OwnerSessionId);
 
         // Atomic check-and-reserve: when reuse is allowed and a target tuple already has an
         // Active/Attaching handle, return it instead of patching a second ephemeral container.

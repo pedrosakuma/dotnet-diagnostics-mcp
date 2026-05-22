@@ -13,13 +13,20 @@ namespace DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 /// <param name="TtlSeconds">Per-handle TTL override; null uses <c>OrchestratorOptions.DefaultInvestigationTtlSeconds</c>.</param>
 /// <param name="RequirePreparedTarget">When true (default), refuse to attach to an unprepared Pod.</param>
 /// <param name="AllowReuseExistingSession">When true (default), return an existing Active/Attaching handle for the same target instead of patching a second ephemeral container.</param>
+/// <param name="OwnerSessionId">H6 (issue #164): MCP session id of the caller, stamped onto the minted handle for per-owner authorization. Null produces an un-scoped handle reachable by any authenticated caller (stdio / framework without a session id).</param>
 public sealed record AttachRequest(
     string Namespace,
     string PodName,
     string? ContainerName = null,
     int? TtlSeconds = null,
     bool RequirePreparedTarget = true,
-    bool AllowReuseExistingSession = true);
+    bool AllowReuseExistingSession = true,
+    // H6 (issue #164): caller's MCP session id. The orchestrator stamps it onto
+    // the minted handle so /proxy/{handleId} and list_active_investigations can
+    // enforce per-owner authorization. Null is accepted (stdio / framework
+    // without a session id) and produces an un-scoped handle reachable by any
+    // authenticated caller.
+    string? OwnerSessionId = null);
 
 /// <summary>
 /// Two-phase attach: validate the target, patch the ephemeral container, wait for
