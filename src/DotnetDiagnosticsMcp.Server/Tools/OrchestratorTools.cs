@@ -214,7 +214,8 @@ public sealed class OrchestratorTools
                 "attach_to_pod",
                 proxyUrl is null
                     ? "Investigation is not yet Active. Re-poll the handle or retry attach_to_pod."
-                    : $"Route subsequent diagnostic tool calls to '{proxyUrl}/...'. The orchestrator will inject the Pod-local bearer token automatically; do NOT include the external Authorization header on those calls."));
+                    : $"Route subsequent diagnostic tool calls to '{proxyUrl}/...' on this orchestrator. " +
+                      "Continue presenting the normal orchestrator bearer token — the proxy strips it and injects the per-attach Pod-local bearer upstream automatically."));
     }
 
     private static NextActionHint BuildAttachRecoveryHint(string errorKind) => errorKind switch
