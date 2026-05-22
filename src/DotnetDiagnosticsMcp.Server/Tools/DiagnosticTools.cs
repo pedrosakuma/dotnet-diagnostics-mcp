@@ -477,16 +477,8 @@ public sealed class DiagnosticTools
         // surface. Default deny; operators allowlist hosts via Diagnostics:SymbolServerAllowlist.
         if (resolveSourceLines)
         {
-            var symbolValidation = symbolServerAllowlist.Validate(symbolPath);
-            if (!symbolValidation.IsAllowed)
-            {
-                return DiagnosticResult.Fail<CpuSample>(
-                    $"symbolPath references remote symbol server host '{symbolValidation.DeniedHost}' which is not on the allowlist.",
-                    new DiagnosticError(
-                        "SymbolServerNotAllowed",
-                        "Remote symbol servers are denied by default. Add the host to `Diagnostics:SymbolServerAllowlist` (env: `Diagnostics__SymbolServerAllowlist__0=<host>`) or drop the `srv*http(s)://…` segment and rely on the local symbol cache. Tracked by issue #165.",
-                        symbolValidation.DeniedSegment));
-            }
+            var symbolDenial = ValidateSymbolPath<CpuSample>(symbolServerAllowlist, symbolPath);
+            if (symbolDenial is not null) return symbolDenial;
         }
 
         var resolved = await ResolveContextAsync<CpuSample>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -733,16 +725,21 @@ public sealed class DiagnosticTools
         IOffCpuSampler sampler,
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of blocking stacks returned inline (the full set lives behind the handle). Defaults to 25.")] int topN = 25,
-        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 blocking stacks inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full artifact is always retained behind the issued handle — drill in with query_off_cpu_snapshot.")]
         SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<OffCpuSnapshot>(nameof(durationSeconds), "must be >= 1");
         if (topN < 1) return InvalidArg<OffCpuSnapshot>(nameof(topN), "must be >= 1");
+
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<OffCpuSnapshot>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
 
         var resolved = await ResolveContextAsync<OffCpuSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
@@ -1421,6 +1418,7 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<DumpInspection>> InspectDump(
         IDumpInspector inspector,
         IDiagnosticHandleStore handles,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Absolute path to a previously-captured .dmp file. Required.")] string dumpFilePath,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower.")] bool includeRetentionPaths = false,
@@ -1428,9 +1426,13 @@ public sealed class DiagnosticTools
         [Description("When true, enumerate every loaded type's static reference fields ranked by directly-referenced object size — surfaces 'singleton that grew forever' leaks. Off by default; adds an extra pass over AppDomains × Modules × Types.")] bool includeStaticFields = false,
         [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
-        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         CancellationToken cancellationToken = default)
     {
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<DumpInspection>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
+
         return await GuardAttachAsync("inspect_dump", processId: null, async () =>
         {
             var snapshot = await inspector.InspectAsync(
@@ -1513,6 +1515,7 @@ public sealed class DiagnosticTools
         IDumpInspector inspector,
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower and lengthens the suspend window.")] bool includeRetentionPaths = false,
@@ -1520,9 +1523,13 @@ public sealed class DiagnosticTools
         [Description("When true, enumerate every loaded type's static reference fields ranked by directly-referenced object size — surfaces 'singleton that grew forever' leaks. Off by default; lengthens the suspend window.")] bool includeStaticFields = false,
         [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
-        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         CancellationToken cancellationToken = default)
     {
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<LiveHeapInspection>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
+
         var resolved = await ResolveContextAsync<LiveHeapInspection>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
         var pid = resolved.ProcessId;
@@ -2015,12 +2022,13 @@ public sealed class DiagnosticTools
         IThreadSnapshotInspector inspector,
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath. Optional — when both processId and dumpFilePath are null/empty the server auto-selects a live .NET process.")] int? processId = null,
         [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
         [Description("Maximum stack frames captured per thread. Defaults to 64.")] int maxFramesPerThread = 64,
         [Description("Include runtime frames (PInvoke trampolines, etc.) without an associated managed method. Off by default.")] bool includeRuntimeFrames = false,
         [Description("Include pure native frames where ClrMD cannot resolve a method. Off by default.")] bool includeNativeFrames = false,
-        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns only the top-3 blocked threads inline and drops the SyncBlock lock-graph (use query_thread_snapshot(view=lock-graph) for the full graph). 'detail' returns the historical top-25 threads + top-25 locks. 'raw' is equivalent to detail. The full snapshot is always retained behind the issued handle.")]
         SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
@@ -2033,6 +2041,10 @@ public sealed class DiagnosticTools
         }
         if (maxFramesPerThread < 1) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), "must be >= 1");
         if (maxFramesPerThread > ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), $"must be <= {ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap} (bounds the live-attach suspend window)");
+
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<ThreadSnapshotQueryResult>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
 
         int livePid = 0;
         ProcessContext? liveCtx = null;
@@ -2830,6 +2842,26 @@ public sealed class DiagnosticTools
             $"Argument '{parameterName}' {requirement}.",
             new DiagnosticError("InvalidArgument", $"Argument '{parameterName}' {requirement}.", parameterName),
             new NextActionHint("get_diagnostic_capabilities", "Re-issue with valid arguments. See tool schema for ranges and defaults."));
+
+    /// <summary>
+    /// B4 / issue #165 / M3 helper: returns a denial envelope when the caller-supplied
+    /// <paramref name="symbolPath"/> references a remote symbol-server host that is not on
+    /// the configured allowlist. Returns <c>null</c> when the path is allowed (local path,
+    /// empty/null, or remote host on the allowlist) so the caller can early-return only on
+    /// denial. Must be invoked from every tool that forwards a caller-supplied
+    /// <c>symbolPath</c> into a SymbolReader / native symbolicator backend.
+    /// </summary>
+    private static DiagnosticResult<T>? ValidateSymbolPath<T>(SymbolServerAllowlist allowlist, string? symbolPath)
+    {
+        var validation = allowlist.Validate(symbolPath);
+        if (validation.IsAllowed) return null;
+        return DiagnosticResult.Fail<T>(
+            $"symbolPath references remote symbol server host '{validation.DeniedHost}' which is not on the allowlist.",
+            new DiagnosticError(
+                "SymbolServerNotAllowed",
+                "Remote symbol servers are denied by default. Add the host to `Diagnostics:SymbolServerAllowlist` (env: `Diagnostics__SymbolServerAllowlist__0=<host>`) or drop the `srv*http(s)://…` segment and rely on the local symbol cache. Tracked by issue #165.",
+                validation.DeniedSegment));
+    }
 
     /// <summary>
     /// Wraps a tool body that attaches to a live process via ClrMD / EventPipe / dotnet-diagnostics

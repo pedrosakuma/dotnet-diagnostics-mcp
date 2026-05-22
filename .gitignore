@@ -35,3 +35,4 @@ Thumbs.db
 deploy/azure/**/main.json
 nupkgs/
 .venv-cfnlint/
+.commit-msg.txt

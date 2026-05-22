@@ -1045,8 +1045,11 @@ substring matching the default patterns (Bearer/Basic tokens, JWT-shaped triples
 blocks) with `<redacted:sensitive>`. Add custom patterns via
 `Diagnostics:RedactionPatterns[]`.
 
-The `heap-snapshot://` MCP resource projection sanitises in the same way but has **no**
-caller opt-in — only the server flag controls it.
+The `heap-snapshot://` MCP resource projection is **always metadata-only** — it has no
+per-call opt-in surface, so the server flag alone cannot unlock raw values through that
+path. Operators who need the redacted-but-present view should call
+`query_heap_snapshot view=duplicate-strings includeSensitiveValues=true` (which honours
+both gates).
 
 ### M2 — `collect_event_source` provider allowlist
 
@@ -1065,13 +1068,20 @@ To capture a custom provider:
   `unsafeProvider=true` on the call. On that path `keywords=-1` is clamped to `0` and
   `eventLevel>4` is clamped to `Informational` unless the caller passed explicit safer values.
 
-### M3 — `collect_cpu_sample` symbol-server SSRF guard
+### M3 — symbol-server SSRF guard
 
 `symbolPath` historically accepted any `srv*http(s)://…` segment, which let a malicious
 caller turn the sidecar into an outbound HTTP client to any host on the cluster network.
 Caller-supplied `symbolPath` values are now parsed and every `srv*` / `symsrv*` segment's
 `http://` / `https://` URL must host-match `Diagnostics:SymbolServerAllowlist[]`. Local
-filesystem paths and bare directory entries always pass through.
+filesystem paths and bare directory entries always pass through. The deny path returns a
+`SymbolServerNotAllowed` envelope. Tools covered:
+
+- `collect_cpu_sample`
+- `collect_off_cpu_sample`
+- `collect_thread_snapshot`
+- `inspect_dump`
+- `inspect_live_heap`
 
 `MCP_SYMBOL_PATH` and `_NT_SYMBOL_PATH` from the **operator-set environment** are *not*
 validated — they are treated as trusted by the deployment.
