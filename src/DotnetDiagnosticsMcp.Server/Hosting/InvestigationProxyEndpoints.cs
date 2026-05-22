@@ -8,6 +8,7 @@ using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -124,7 +125,41 @@ internal static class InvestigationProxyEndpoints
         {
             context.Response.StatusCode = (int)response.StatusCode;
             CopyResponseHeaders(response, context.Response);
-            await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted).ConfigureAwait(false);
+
+            // The pod-local MCP server uses Streamable HTTP semantics: the response to
+            // the initial POST is often a long-lived text/event-stream where each
+            // SSE event is a discrete chunk that the client must observe immediately
+            // to complete its initialize handshake. ASP.NET Core's default response
+            // body pipeline buffers writes until a threshold is hit or the request
+            // completes; with CopyToAsync that means the first SSE event sits in the
+            // buffer until the upstream stream closes — which for keep-alive sessions
+            // never happens, and the client trips its 100s HttpClient.Timeout. Disable
+            // buffering on the response body feature and stream chunks ourselves with
+            // an explicit flush after every read so the SSE event reaches the wire as
+            // soon as the upstream produces it.
+            context.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+            await StreamWithFlushAsync(response.Content, context.Response.Body, context.RequestAborted)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async Task StreamWithFlushAsync(HttpContent content, Stream destination, CancellationToken cancellationToken)
+    {
+        await using var source = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(8 * 1024);
+        try
+        {
+            while (true)
+            {
+                var read = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
