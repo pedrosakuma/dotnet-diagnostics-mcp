@@ -1,10 +1,13 @@
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Server;
 
 namespace DotnetDiagnosticsMcp.Server.Tools;
@@ -150,6 +153,9 @@ public sealed class OrchestratorTools
     public static async Task<DiagnosticResult<AttachSession>> AttachToPod(
         IPodAttachOrchestrator orchestrator,
         OrchestratorOptions options,
+        IInvestigationSessionBinder sessionBinder,
+        McpServer server,
+        ILoggerFactory? loggerFactory = null,
         [Description("Pod namespace. Falls back to the orchestrator's DefaultNamespace when omitted.")]
         string? @namespace = null,
         [Description("Pod name. Required.")]
@@ -202,6 +208,27 @@ public sealed class OrchestratorTools
             ? options.ProxyBasePath.TrimEnd('/') + "/" + handle.HandleId
             : null;
         var session = AttachSession.FromHandle(handle, proxyUrl);
+
+        // Bind the MCP session to the handle so future server-side machinery (P3b-4 /
+        // intercept slice) can route subsequent tool calls through the proxy without the
+        // client having to rewrite URLs. We only bind on Active handles — Attaching /
+        // Failed states are not yet usable and would mislead any session-aware resolver.
+        if (handle.State == InvestigationState.Active)
+        {
+            var sessionId = TryGetServerSessionId(server);
+            if (!string.IsNullOrEmpty(sessionId))
+            {
+                sessionBinder.Bind(sessionId, handle.HandleId);
+            }
+            else
+            {
+                (loggerFactory ?? NullLoggerFactory.Instance)
+                    .CreateLogger(typeof(OrchestratorTools).FullName!)
+                    .LogDebug(
+                        "attach_to_pod: McpServer.SessionId unavailable; skipping investigation session binding for handle {HandleId}.",
+                        handle.HandleId);
+            }
+        }
 
         var summary = $"Investigation {session.HandleId} {(session.State == InvestigationState.Active ? "attached" : session.State.ToString().ToLowerInvariant())} " +
                       $"to {session.Namespace}/{session.PodName} container={session.TargetContainerName} " +
@@ -259,4 +286,14 @@ public sealed class OrchestratorTools
             "attach_to_pod",
             "Re-run with corrected arguments."),
     };
+
+    // Mirror of DiagnosticTools.TryGetServerSessionId. The MCP SDK exposes SessionId only
+    // as an internal-ish property; reflecting against the McpServer instance is the same
+    // pattern the diagnostic-tools side uses for MCP-task correlation (see
+    // DiagnosticTools.cs ~L2683). Returns null when no session is bound to the call
+    // (e.g. stdio transport or unit tests that synthesize an McpServer without one).
+    private static string? TryGetServerSessionId(McpServer server)
+        => server?.GetType()
+                  .GetProperty("SessionId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                  ?.GetValue(server) as string;
 }
