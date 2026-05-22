@@ -527,7 +527,13 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    [Fact(Timeout = 60_000, Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
+    // Quarantined on Linux CI only: this test reliably segfaults the xunit test host on
+    // ubuntu-latest under full-suite load (native crash inside libcoreclr's EventPipe
+    // SampleProfiler — see #147). Runs locally on Linux/macOS and on Windows CI so the
+    // closed-generic handoff contract from #21 stays covered while we pursue the upstream
+    // CoreCLR fix.
+    [Trait("Category", "Flaky")]
+    [SkipOnLinuxCiFact("Quarantined on Linux CI: crashes test host inside libcoreclr's EventPipe SampleProfiler. Tracked in #147 (dump artifact 7161760638 on run 26290739828). Runnable locally and on Windows CI.", Timeout = 60_000)]
     public async Task CpuSampler_EmitsClosedGenericInstantiations_FromCoreClrSampleFixture()
     {
         EnsureSampleRunning();
@@ -649,7 +655,11 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    [Fact(Timeout = 90_000, Skip = "Quarantined: crashes ubuntu-latest test host (EventPipe SampleProfiler). Tracked in #147.")]
+    // Quarantined on Linux CI only (same native libcoreclr crash family as #147; this
+    // specific test is tracked in #145). Stays runnable locally and on Windows CI so the
+    // ClrMD opt-in method-level instantiation enrichment from #86 keeps coverage.
+    [Trait("Category", "Flaky")]
+    [SkipOnLinuxCiFact("Quarantined on Linux CI: crashes test host inside libcoreclr's EventPipe SampleProfiler. Tracked in #145 / #147 (dump artifact 7161760638 on run 26290739828). Runnable locally and on Windows CI.", Timeout = 90_000)]
     public async Task CpuSampler_ResolvesMethodLevelClosedGenerics_OnlyWhenOptInEnabled()
     {
         EnsureSampleRunning();
