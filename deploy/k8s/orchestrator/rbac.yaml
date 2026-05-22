@@ -2,7 +2,7 @@
 #
 # This is the safer default: the orchestrator's ServiceAccount only has
 # pods get/list/watch, pods/ephemeralcontainers update/patch, and
-# pods/portforward create within `diagnosticsmcp-system`. If you need
+# pods/portforward get/create within `diagnosticsmcp-system`. If you need
 # multi-namespace observation / attach, apply `rbac-cluster.yaml` instead.
 #
 # Update both metadata.namespace fields below if you install into a different
@@ -28,7 +28,7 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

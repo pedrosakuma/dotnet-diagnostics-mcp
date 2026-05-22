@@ -5,9 +5,10 @@
 {{- end }}
 {{- /*
 H2 (issue #162): default to namespace-scoped Role/RoleBinding. Cluster-wide
-RBAC is opt-in via `--set rbac.scope=cluster`. The `pods/portforward` `get`
-verb has been dropped — only `create` is exercised by the in-process
-WebSocket port-forward path in KubernetesPortForwardManager.
+RBAC is opt-in via `--set rbac.scope=cluster`. `pods/portforward` requires
+both `get` and `create` — Kubernetes uses an HTTP GET that is upgraded to a
+WebSocket (HTTP 101) for the in-process port-forward stream in
+KubernetesPortForwardManager.
 */ -}}
 {{- if eq $scope "cluster" }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -25,7 +26,7 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -58,7 +59,7 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

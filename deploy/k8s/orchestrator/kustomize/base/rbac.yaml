@@ -1,8 +1,9 @@
 # Central orchestrator RBAC — namespace-scoped (default, recommended).
 # Single-namespace tenants get a Role+RoleBinding. For multi-namespace
 # observation, swap this file for a ClusterRole+ClusterRoleBinding overlay.
-# The `pods/portforward` verb is `create` only — `get` is not exercised
-# by KubernetesPortForwardManager and is dropped per issue #162.
+# `pods/portforward` requires both `get` and `create`: the Kubernetes API
+# uses an HTTP GET that upgrades to a WebSocket (HTTP 101) for the
+# in-process port-forward stream in KubernetesPortForwardManager.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -23,7 +24,7 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

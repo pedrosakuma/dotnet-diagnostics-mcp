@@ -85,6 +85,7 @@ jobs:
             --set bearerToken.value="${BEARER_TOKEN}" \
             --set orchestrator.enabled=true \
             --set orchestrator.ephemeralContainerImage="${ORCH_IMAGE}" \
+            --set rbac.scope=cluster \
             --set 'orchestrator.allowedNamespaces[0]'="${SAMPLE_NAMESPACE}" \
             --set 'orchestrator.labelKeyAllowlist[0]'=diagnostics.dotnet.io/prepared \
             --set 'orchestrator.labelKeyAllowlist[1]'=app \

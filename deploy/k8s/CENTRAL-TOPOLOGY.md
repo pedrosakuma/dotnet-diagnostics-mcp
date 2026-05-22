@@ -147,7 +147,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["get", "create"]
 ```
 
 Use a `RoleBinding` to grant this to a dedicated `ServiceAccount` that the

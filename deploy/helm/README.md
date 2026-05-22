@@ -76,15 +76,15 @@ insufficient against passive observers.
 
 The chart defaults to **namespace-scoped** `Role`+`RoleBinding`, granting
 `pods get/list/watch`, `pods/ephemeralcontainers update/patch`, and
-`pods/portforward create` only inside the chart's namespace. Use
+`pods/portforward get/create` only inside the chart's namespace. Use
 `--set rbac.scope=cluster` to fall back to the previous cluster-wide
 `ClusterRole`+`ClusterRoleBinding` when the orchestrator must observe / attach
 to Pods across multiple namespaces — at the cost of widening blast radius if
 the bearer is compromised.
 
-The `pods/portforward` verb is `create` only — `get` is not exercised by
-`KubernetesPortForwardManager` and was removed per the security audit (issue
-#162).
+The `pods/portforward` subresource needs BOTH `get` and `create`: the
+Kubernetes API uses an HTTP GET that is upgraded to a WebSocket (HTTP 101)
+for the port-forward stream that `KubernetesPortForwardManager` opens.
 
 ## Chart notes
 

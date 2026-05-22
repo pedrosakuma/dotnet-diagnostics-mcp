@@ -94,9 +94,10 @@ The shipped raw / Kustomize / Helm surfaces now **default to namespace-scoped
 - **Helm:** the chart defaults to `rbac.scope=namespace`; set `--set rbac.scope=cluster` to opt into cluster-wide.
 - **Kustomize base:** ships namespace-scoped; override the base with your own ClusterRole / ClusterRoleBinding overlay if you need cluster-wide.
 
-The `pods/portforward` verb is `create` only — `get` was dropped because
-`KubernetesPortForwardManager` only exercises `create` over the WebSocket
-port-forward path.
+The `pods/portforward` subresource requires BOTH `get` and `create` — the
+Kubernetes API uses an HTTP GET that is upgraded to a WebSocket (HTTP 101)
+for the in-process port-forward stream that `KubernetesPortForwardManager`
+opens.
 
 The required rule set when crafting a manual overlay:
 
@@ -111,7 +112,7 @@ verbs: ["update", "patch"]
 ---
 apiGroups: [""]
 resources: ["pods/portforward"]
-verbs: ["create"]
+verbs: ["get", "create"]
 ```
 
 Keep `Orchestrator__NamespaceAllowlist__*` aligned with the namespace you grant.

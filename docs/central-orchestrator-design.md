@@ -450,7 +450,7 @@ That is enough to make restart fallout visible without violating statelessness.
 The issue states the orchestrator's ServiceAccount needs the following RBAC:
 - `pods/ephemeralcontainers` (update/patch)
 - `pods` (get/list/watch)
-- `pods/portforward` (create)
+- `pods/portforward` (get/create)
 Those are the right minimum verbs for the architecture proposed here.
 ### 6.2 Security posture
 The repository already treats diagnostics access as highly privileged. For the orchestrator, that warning becomes stronger:
