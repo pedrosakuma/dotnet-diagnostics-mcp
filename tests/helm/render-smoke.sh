@@ -76,6 +76,32 @@ else
   pass=$((pass + 1))
 fi
 
+# (e/f) Negative validation cases — `helm template` must abort with a clear
+# message when a scoped entry has an empty secretKeyRef.name/key or an empty
+# scope string. These cover the gpt-5.5 review finding that empty strings would
+# otherwise render successfully and crash `BearerTokenRegistry` at startup
+# (BearerTokenRegistry.cs rejects empty scopes / tokens).
+run_negative() {
+  local label="$1" values="$2" want_substr="$3"
+  local out
+  if out="$("${HELM}" template diag "${CHART}" -f "${FIXTURES}/${values}" 2>&1)"; then
+    echo "FAIL [${label}] helm template succeeded; expected validation fail"
+    fail=$((fail + 1))
+    return
+  fi
+  if ! printf '%s\n' "${out}" | grep -qF "${want_substr}"; then
+    echo "FAIL [${label}] helm template aborted but error did not contain '${want_substr}'"
+    printf '%s\n' "${out}" | tail -5
+    fail=$((fail + 1))
+    return
+  fi
+  echo "PASS [${label}] validation fired"
+  pass=$((pass + 1))
+}
+
+run_negative invalid-scoped-secretref values-invalid-scoped.yaml "non-empty \`name\` and a non-empty \`key\`"
+run_negative invalid-scope-empty       values-invalid-scope.yaml  "scopes[0] is empty"
+
 echo
 echo "helm render smoke: ${pass} passed, ${fail} failed"
 exit $(( fail == 0 ? 0 : 1 ))

@@ -82,19 +82,27 @@ spec:
             {{- if not $entry.valueFrom.secretKeyRef }}
             {{- fail (printf "bearerTokens[%d] (%s) requires `valueFrom.secretKeyRef` (literal token values are not accepted — store them in a Kubernetes Secret)" $i $entry.name) }}
             {{- end }}
-            {{- if or (not (hasKey $entry.valueFrom.secretKeyRef "name")) (not (hasKey $entry.valueFrom.secretKeyRef "key")) }}
-            {{- fail (printf "bearerTokens[%d] (%s) `valueFrom.secretKeyRef` must set both `name` and `key`" $i $entry.name) }}
+            {{- $sref := $entry.valueFrom.secretKeyRef }}
+            {{- $srefName := default "" $sref.name }}
+            {{- $srefKey := default "" $sref.key }}
+            {{- if or (eq (toString $srefName | trim) "") (eq (toString $srefKey | trim) "") }}
+            {{- fail (printf "bearerTokens[%d] (%s) `valueFrom.secretKeyRef` must set both a non-empty `name` and a non-empty `key`" $i $entry.name) }}
             {{- end }}
             {{- if or (not $entry.scopes) (eq (len $entry.scopes) 0) }}
             {{- fail (printf "bearerTokens[%d] (%s) must declare at least one scope" $i $entry.name) }}
+            {{- end }}
+            {{- range $j, $scope := $entry.scopes }}
+            {{- if eq (toString (default "" $scope) | trim) "" }}
+            {{- fail (printf "bearerTokens[%d] (%s) scopes[%d] is empty; every scope must be a non-empty string (see RFC 0001 §2 for the taxonomy)" $i $entry.name $j) }}
+            {{- end }}
             {{- end }}
             - name: {{ printf "Auth__BearerTokens__%d__Name" $i }}
               value: {{ $entry.name | quote }}
             - name: {{ printf "Auth__BearerTokens__%d__Token" $i }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ $entry.valueFrom.secretKeyRef.name | quote }}
-                  key: {{ $entry.valueFrom.secretKeyRef.key | quote }}
+                  name: {{ $srefName | quote }}
+                  key: {{ $srefKey | quote }}
             {{- range $j, $scope := $entry.scopes }}
             - name: {{ printf "Auth__BearerTokens__%d__Scopes__%d" $i $j }}
               value: {{ $scope | quote }}
