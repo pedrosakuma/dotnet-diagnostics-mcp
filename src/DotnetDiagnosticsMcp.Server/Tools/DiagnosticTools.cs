@@ -1412,45 +1412,62 @@ public sealed class DiagnosticTools
         [Description("Defense-in-depth confirmation flag. Must be true to actually write a dump file; without it the tool returns a `confirmation_required` envelope describing what would have been written. See RFC 0001 §4.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var resolved = await ResolveContextAsync<DumpToolResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
-        if (resolved.Failure is not null) return resolved.Failure;
-        var pid = resolved.ProcessId;
-        var ctx = resolved.Context;
-
         if (!confirm)
         {
             // RFC 0001 §4 / §8: confirmation-required is a misuse signal, not an attack.
-            // Log at Information level with the token name (never the bearer value).
+            // Log at Information level with the token name (never the bearer value), the
+            // tool name and the reason as structured properties so audit consumers can
+            // filter on the RFC-mandated `tool` / `reason` fields.
+            //
+            // The confirmation gate runs BEFORE process-context resolution (#187 review):
+            // ResolveContextAsync would otherwise open an EventPipe session via
+            // CapabilityDetector to probe the target — that already counts as a process
+            // attach for the purpose of "writes NOTHING / no process attach". When the
+            // caller relied on auto-resolution we therefore echo a null TargetPid in the
+            // preview instead of touching the target.
             var logger = loggerFactory?.CreateLogger("DotnetDiagnosticsMcp.Server.Tools.CollectProcessDump");
             logger?.LogInformation(
-                "collect_process_dump rejected: confirmation_required. tokenName={TokenName} targetPid={TargetPid} dumpType={DumpType}",
+                "collect_process_dump rejected: confirmation_required. tokenName={TokenName} tool={Tool} reason={Reason} requestedPid={RequestedPid} dumpType={DumpType}",
                 principalAccessor.Current?.Name ?? "(none)",
-                pid,
+                "collect_process_dump",
+                "ConfirmationRequired",
+                processId,
                 dumpType);
 
             var preview = new DumpToolResult
             {
                 Kind = DumpToolResultKinds.ConfirmationRequired,
-                Message = "collect_process_dump writes a heap dump to disk. Pass confirm=true to proceed.",
-                TargetPid = pid,
+                Message = processId is null
+                    ? "collect_process_dump writes a heap dump to disk. Pass confirm=true to proceed. processId was not supplied — the server will auto-select a .NET process when you re-issue with confirm=true."
+                    : "collect_process_dump writes a heap dump to disk. Pass confirm=true to proceed.",
+                TargetPid = processId,
                 DumpType = dumpType,
                 OutputDirectory = outputDirectory,
             };
 
+            var retryArgs = new Dictionary<string, object?>
+            {
+                ["dumpType"] = dumpType.ToString(),
+                ["outputDirectory"] = outputDirectory,
+                ["confirm"] = true,
+            };
+            if (processId is not null) retryArgs["processId"] = processId;
+
             var retryHint = new NextActionHint(
                 "collect_process_dump",
                 "Re-issue the call with confirm=true after explicit human approval. Required scopes: dump-write + ptrace.",
-                new Dictionary<string, object?>
-                {
-                    ["processId"] = pid,
-                    ["dumpType"] = dumpType.ToString(),
-                    ["outputDirectory"] = outputDirectory,
-                    ["confirm"] = true,
-                });
+                retryArgs);
 
-            var summary = $"confirmation_required: collect_process_dump would write a {dumpType} dump for pid {pid}. Pass confirm=true to proceed.";
-            return WithContext(DiagnosticResult.Ok(preview, summary, retryHint), ctx);
+            var summary = processId is null
+                ? $"confirmation_required: collect_process_dump would write a {dumpType} dump for the auto-selected .NET process. Pass confirm=true to proceed."
+                : $"confirmation_required: collect_process_dump would write a {dumpType} dump for pid {processId}. Pass confirm=true to proceed.";
+            return DiagnosticResult.Ok(preview, summary, retryHint);
         }
+
+        var resolved = await ResolveContextAsync<DumpToolResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+        var ctx = resolved.Context;
 
         return await GuardAttachAsync("collect_process_dump", pid, async () =>
         {
