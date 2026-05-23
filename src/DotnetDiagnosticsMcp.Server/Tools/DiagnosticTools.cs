@@ -1395,19 +1395,62 @@ public sealed class DiagnosticTools
         "Writes a process dump for the target .NET application to disk. The dump file remains on the " +
         "server's filesystem (path returned) so it can be analyzed offline with dotnet-dump or WinDbg. " +
         "Dump types in increasing size/cost: Mini < Triage < WithHeap < Full. " +
-        "Heavyweight — use only when live collectors are insufficient.")]
-    public static async Task<DiagnosticResult<DumpResult>> CollectProcessDump(
+        "Heavyweight — use only when live collectors are insufficient. " +
+        "**Requires `confirm=true` (defense in depth — RFC 0001 §4 / B5.6).** Without it the tool " +
+        "returns a `confirmation_required` envelope describing what would have been written and " +
+        "writes nothing to disk; the operator-facing client should surface this preview to a human " +
+        "and only retry with `confirm=true` after explicit approval. The `dump-write` + `ptrace` " +
+        "scopes are still required on top of `confirm=true`.")]
+    public static async Task<DiagnosticResult<DumpToolResult>> CollectProcessDump(
         IProcessDumper dumper,
         IProcessContextResolver resolver,
+        IPrincipalAccessor principalAccessor,
+        ILoggerFactory? loggerFactory = null,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Dump type: 'Mini', 'Triage', 'WithHeap' or 'Full'. Defaults to Mini.")] ProcessDumpType dumpType = ProcessDumpType.Mini,
         [Description("Optional sub-path under the artifact root (MCP_ARTIFACT_ROOT, default <temp>/dotnet-diagnostics-mcp). MUST be relative — absolute paths and '..' traversal are rejected (InvalidArtifactPath). Dump files are written with POSIX mode 0600.")] string? outputDirectory = null,
+        [Description("Defense-in-depth confirmation flag. Must be true to actually write a dump file; without it the tool returns a `confirmation_required` envelope describing what would have been written. See RFC 0001 §4.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var resolved = await ResolveContextAsync<DumpResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        var resolved = await ResolveContextAsync<DumpToolResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
         var pid = resolved.ProcessId;
         var ctx = resolved.Context;
+
+        if (!confirm)
+        {
+            // RFC 0001 §4 / §8: confirmation-required is a misuse signal, not an attack.
+            // Log at Information level with the token name (never the bearer value).
+            var logger = loggerFactory?.CreateLogger("DotnetDiagnosticsMcp.Server.Tools.CollectProcessDump");
+            logger?.LogInformation(
+                "collect_process_dump rejected: confirmation_required. tokenName={TokenName} targetPid={TargetPid} dumpType={DumpType}",
+                principalAccessor.Current?.Name ?? "(none)",
+                pid,
+                dumpType);
+
+            var preview = new DumpToolResult
+            {
+                Kind = DumpToolResultKinds.ConfirmationRequired,
+                Message = "collect_process_dump writes a heap dump to disk. Pass confirm=true to proceed.",
+                TargetPid = pid,
+                DumpType = dumpType,
+                OutputDirectory = outputDirectory,
+            };
+
+            var retryHint = new NextActionHint(
+                "collect_process_dump",
+                "Re-issue the call with confirm=true after explicit human approval. Required scopes: dump-write + ptrace.",
+                new Dictionary<string, object?>
+                {
+                    ["processId"] = pid,
+                    ["dumpType"] = dumpType.ToString(),
+                    ["outputDirectory"] = outputDirectory,
+                    ["confirm"] = true,
+                });
+
+            var summary = $"confirmation_required: collect_process_dump would write a {dumpType} dump for pid {pid}. Pass confirm=true to proceed.";
+            return WithContext(DiagnosticResult.Ok(preview, summary, retryHint), ctx);
+        }
 
         return await GuardAttachAsync("collect_process_dump", pid, async () =>
         {
@@ -1419,8 +1462,16 @@ public sealed class DiagnosticTools
                 : new NextActionHint("inspect_dump",
                     "Inspect the dump's managed heap for top-retained types + handoff payload to dotnet-assembly-mcp.",
                     new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath, ["topTypes"] = 20 });
+            var payload = new DumpToolResult
+            {
+                Kind = DumpToolResultKinds.DumpWritten,
+                TargetPid = dump.ProcessId,
+                DumpType = dump.DumpType,
+                OutputDirectory = outputDirectory,
+                Dump = dump,
+            };
             return WithContext(DiagnosticResult.Ok(
-                dump,
+                payload,
                 $"Wrote {dumpType} dump for pid {dump.ProcessId} to {dump.FilePath} ({dump.FileSizeBytes:N0} bytes).",
                 hint), ctx);
         }, cancellationToken).ConfigureAwait(false);

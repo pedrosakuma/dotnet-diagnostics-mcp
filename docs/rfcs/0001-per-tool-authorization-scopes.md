@@ -549,6 +549,17 @@ reflexively, which destroys its value when it actually matters.
 The parameter rejects with a structured `ConfirmationRequired` envelope when omitted,
 and the rejection is logged at Info (it's a misuse signal, not an attack).
 
+> **Status — B5.6 shipped.** `collect_process_dump` now carries a `confirm: bool = false`
+> parameter (PR closing #187). Without `confirm=true` the tool returns a
+> `{ kind: "confirmation_required", ... }` envelope describing the dump that *would*
+> have been written (`targetPid`, `dumpType`, `outputDirectory`) and writes nothing to
+> disk — no process attach, no `createdump` invocation. With `confirm=true` the
+> behaviour is identical to before, still gated by the `dump-write` + `ptrace` scope
+> stack from §2.6. The other ptrace-stack tools (`capture_method_bytes`,
+> `inspect_live_heap`, `collect_thread_snapshot`) deliberately remain confirmation-free
+> per the decision matrix above — adding `confirm=true` to read-only tools would
+> condition callers to set it reflexively and destroy its signal.
+
 ## 5. Default policy by transport
 
 The non-loopback bind guard already exists at `Program.cs:97-113`. This RFC widens it in

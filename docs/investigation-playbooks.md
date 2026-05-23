@@ -66,7 +66,12 @@ growing is more like fragmentation or unmanaged growth.
 doesn't drop, you have surviving objects (leak or long-lived cache).
 
 ### Step 3
-`collect_process_dump` with `dumpType = "WithHeap"`. Analyze offline:
+`collect_process_dump` with `dumpType = "WithHeap"`. **Defense in depth (B5.6 / RFC
+0001 §4):** call it once first *without* `confirm` to preview the dump that would be
+written (returns a `{ kind: "confirmation_required", targetPid, dumpType,
+outputDirectory }` envelope and writes nothing); then re-issue with `confirm=true`
+once a human has approved. The `dump-write` + `ptrace` scopes are still required on
+top of `confirm=true`. Analyze offline:
 
 ```bash
 dotnet dump analyze /tmp/dotnet-diagnostics-mcp/dump_pid12345_WithHeap_*.dmp

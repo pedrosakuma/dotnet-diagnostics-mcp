@@ -661,16 +661,74 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                     ["processId"] = Environment.ProcessId,
                     ["dumpType"] = "Mini",
                     ["outputDirectory"] = relativeSub,
+                    // B5.6 / RFC 0001 §4: confirm=true is now required for the dump to actually be written.
+                    ["confirm"] = true,
                 },
                 cancellationToken: CancellationToken.None);
 
             result.IsError.Should().NotBe(true);
-            var dump = DeserializeStructured<DumpResult>(result);
-            dump.Should().NotBeNull();
-            dump!.ProcessId.Should().Be(Environment.ProcessId);
+            var payload = DeserializeStructured<DumpToolResult>(result);
+            payload.Should().NotBeNull();
+            payload!.Kind.Should().Be(DumpToolResultKinds.DumpWritten);
+            payload.Dump.Should().NotBeNull();
+            var dump = payload.Dump!;
+            dump.ProcessId.Should().Be(Environment.ProcessId);
             dump.FilePath.Should().StartWith(absoluteRoot);
             File.Exists(dump.FilePath).Should().BeTrue();
             dump.FileSizeBytes.Should().BeGreaterThan(0);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(absoluteRoot))
+                {
+                    Directory.Delete(absoluteRoot, recursive: true);
+                }
+            }
+            catch (Exception)
+            {
+                // best effort cleanup
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CollectProcessDump_WithoutConfirm_ReturnsConfirmationRequired_AndWritesNothing()
+    {
+        // B5.6 / RFC 0001 §4: omitting confirm must return a structured preview envelope
+        // and MUST NOT write anything to disk. The preview echoes back the resolved pid,
+        // the dump type, and the requested output directory.
+        await using var client = await ConnectAsync();
+
+        var relativeSub = $"diagnosticsmcp-confirm-{Guid.NewGuid():N}";
+        var absoluteRoot = Path.Combine(Path.GetTempPath(), "dotnet-diagnostics-mcp", relativeSub);
+        try
+        {
+            var result = await client.CallToolAsync(
+                "collect_process_dump",
+                new Dictionary<string, object?>
+                {
+                    ["processId"] = Environment.ProcessId,
+                    ["dumpType"] = "Mini",
+                    ["outputDirectory"] = relativeSub,
+                    // confirm intentionally omitted (defaults to false).
+                },
+                cancellationToken: CancellationToken.None);
+
+            result.IsError.Should().NotBe(true, "confirmation_required is a misuse signal, not an error");
+            var payload = DeserializeStructured<DumpToolResult>(result);
+            payload.Should().NotBeNull();
+            payload!.Kind.Should().Be(DumpToolResultKinds.ConfirmationRequired);
+            payload.Dump.Should().BeNull("no dump must be written when confirm is omitted");
+            payload.TargetPid.Should().Be(Environment.ProcessId);
+            payload.DumpType.Should().Be(ProcessDumpType.Mini);
+            payload.OutputDirectory.Should().Be(relativeSub);
+            payload.Message.Should().Contain("confirm=true");
+
+            // Absolutely no file should have been created under the target directory.
+            Directory.Exists(absoluteRoot).Should().BeFalse(
+                "confirmation_required must short-circuit before any disk write");
         }
         finally
         {
@@ -701,6 +759,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                 ["processId"] = Environment.ProcessId,
                 ["dumpType"] = "Mini",
                 ["outputDirectory"] = absolute,
+                // B5.6: confirm=true so the request makes it past the confirmation gate and
+                // exercises the sandbox path validation we want to assert here.
+                ["confirm"] = true,
             },
             cancellationToken: CancellationToken.None);
 
