@@ -1028,26 +1028,47 @@ from the `Diagnostics:` configuration section and can be set via env vars
 (`Diagnostics__AllowSensitiveHeapValues=true`, `Diagnostics__EventSourceAllowlist__0=…`,
 `Diagnostics__SymbolServerAllowlist__0=msdl.microsoft.com`).
 
+> **B5.4 — modifier scopes preferred.** All three gates now accept an RFC 0001 modifier
+> scope on the bearer principal as an alternative authorisation path:
+> `sensitive-heap-read`, `eventsource-any`, `symbols-remote`. The scope-first predicate is
+> `principal.HasExplicitScope("<scope>") OR <legacy-flag-or-allowlist-allows>` — either
+> path is sufficient, so existing deployments keep working. The legacy paths now emit a
+> once-per-process deprecation warning when they are the mechanism that unlocked the call.
+>
+> Scope membership is **literal**: a `root`/`*` token does **not** auto-grant the modifier
+> scopes (this preserves least-surprise for the SSRF / sensitive-data gates — operators
+> must deliberately mint a scoped token). The
+> `Diagnostics:EventSourceAllowlist` and `Diagnostics:SymbolServerAllowlist` policies
+> themselves are **retained** as fallback value-shaping. Only
+> `Diagnostics:AllowSensitiveHeapValues` is slated for removal in a future release —
+> prefer minting a token with the `sensitive-heap-read` scope today.
+
 ### H4 — heap drilldown defaults to metadata-only
 
 `query_heap_snapshot` with `view=duplicate-strings` and `view=object` no longer returns raw
 string previews or field/array element values by default. Instead each value site is replaced
 with `<redacted:metadata-only>` and the LLM gets length / type / address metadata only.
 
-To opt-in:
+To opt-in (**scope-first path, recommended**):
+
+1. mint a bearer token with the `sensitive-heap-read` scope (RFC 0001 §2.3 — see
+   `deploy/helm/README.md` for the chart-level shape), **and**
+2. pass `includeSensitiveValues=true` on the per-call invocation.
+
+Legacy fallback (deprecated — emits a once-per-process warning):
 
 1. set `Diagnostics:AllowSensitiveHeapValues=true` on the server, **and**
 2. pass `includeSensitiveValues=true` on the per-call invocation.
 
-When both are present the values flow through `SensitiveDataRedactor`, which replaces any
-substring matching the default patterns (Bearer/Basic tokens, JWT-shaped triples,
-`password=`/`secret=`/`api_key=` query-string syntax, AWS access keys, GitHub PATs, PEM
-blocks) with `<redacted:sensitive>`. Add custom patterns via
+When the gate opens via either path, values flow through `SensitiveDataRedactor`, which
+replaces any substring matching the default patterns (Bearer/Basic tokens, JWT-shaped
+triples, `password=`/`secret=`/`api_key=` query-string syntax, AWS access keys, GitHub PATs,
+PEM blocks) with `<redacted:sensitive>`. Add custom patterns via
 `Diagnostics:RedactionPatterns[]`.
 
 The `heap-snapshot://` MCP resource projection is **always metadata-only** — it has no
-per-call opt-in surface, so the server flag alone cannot unlock raw values through that
-path. Operators who need the redacted-but-present view should call
+per-call opt-in surface, so neither the scope nor the server flag can unlock raw values
+through that path. Operators who need the redacted-but-present view should call
 `query_heap_snapshot view=duplicate-strings includeSensitiveValues=true` (which honours
 both gates).
 
@@ -1063,19 +1084,32 @@ Microsoft-Windows-DotNETRuntime, System.Threading.Tasks.TplEventSource, …) or 
 
 To capture a custom provider:
 
-- add it to `Diagnostics:EventSourceAllowlist[]` (preferred — survives across calls), or
-- set `Diagnostics:AllowSensitiveHeapValues=true` on the server **and** pass
-  `unsafeProvider=true` on the call. On that path `keywords=-1` is clamped to `0` and
-  `eventLevel>4` is clamped to `Informational` unless the caller passed explicit safer values.
+- **Scope-first path (recommended).** Grant the bearer the `eventsource-any` scope; the
+  tool will then accept any `providerName` regardless of the curated allowlist when the
+  caller passes `unsafeProvider=true`. The keyword/level clamping below still applies.
+- Add the provider to `Diagnostics:EventSourceAllowlist[]` (preferred over the legacy
+  flag — survives across calls). When a call is authorised by the allowlist alone (no
+  `eventsource-any` scope on the bearer) the tool emits a once-per-process deprecation
+  warning so operators see they should be distinguishing callers with scopes rather
+  than relying on a deployment-wide allowlist.
+- Legacy fallback (deprecated — emits a once-per-process warning): set
+  `Diagnostics:AllowSensitiveHeapValues=true` on the server **and** pass
+  `unsafeProvider=true` on the call.
+
+On any `unsafeProvider=true` path `keywords=-1` is clamped to `0` and `eventLevel>4` is
+clamped to `Informational` unless the caller passed explicit safer values.
 
 ### M3 — symbol-server SSRF guard
 
 `symbolPath` historically accepted any `srv*http(s)://…` segment, which let a malicious
 caller turn the sidecar into an outbound HTTP client to any host on the cluster network.
 Caller-supplied `symbolPath` values are now parsed and every `srv*` / `symsrv*` segment's
-`http://` / `https://` URL must host-match `Diagnostics:SymbolServerAllowlist[]`. Local
-filesystem paths and bare directory entries always pass through. The deny path returns a
-`SymbolServerNotAllowed` envelope. Tools covered:
+`http://` / `https://` URL must host-match `Diagnostics:SymbolServerAllowlist[]`, **or**
+the principal must hold the `symbols-remote` modifier scope (scope-first path —
+recommended). Local filesystem paths and bare directory entries always pass through. The
+deny path returns a `SymbolServerNotAllowed` envelope. When a call is authorised by the
+allowlist alone (no `symbols-remote` scope on the bearer) the tool emits a once-per-process
+deprecation warning. Tools covered:
 
 - `collect_cpu_sample`
 - `collect_off_cpu_sample`

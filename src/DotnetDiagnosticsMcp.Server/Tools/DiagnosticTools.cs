@@ -473,6 +473,7 @@ public sealed class DiagnosticTools
         [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous).")] bool runAsJob = false,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 hotspots inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full sample is always retained behind the issued handle — drill in with get_call_tree.")]
         SamplingDepth depth = SamplingDepth.Summary,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<CpuSample>(nameof(durationSeconds), "must be >= 1");
@@ -486,7 +487,7 @@ public sealed class DiagnosticTools
         // surface. Default deny; operators allowlist hosts via Diagnostics:SymbolServerAllowlist.
         if (resolveSourceLines)
         {
-            var symbolDenial = ValidateSymbolPath<CpuSample>(symbolServerAllowlist, symbolPath, principalAccessor);
+            var symbolDenial = ValidateSymbolPath<CpuSample>(symbolServerAllowlist, symbolPath, principalAccessor, deprecation);
             if (symbolDenial is not null) return symbolDenial;
         }
 
@@ -745,13 +746,14 @@ public sealed class DiagnosticTools
         [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 blocking stacks inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full artifact is always retained behind the issued handle — drill in with query_off_cpu_snapshot.")]
         SamplingDepth depth = SamplingDepth.Summary,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<OffCpuSnapshot>(nameof(durationSeconds), "must be >= 1");
         if (topN < 1) return InvalidArg<OffCpuSnapshot>(nameof(topN), "must be >= 1");
 
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<OffCpuSnapshot>(symbolServerAllowlist, symbolPath, principalAccessor);
+        var symbolDenial = ValidateSymbolPath<OffCpuSnapshot>(symbolServerAllowlist, symbolPath, principalAccessor, deprecation);
         if (symbolDenial is not null) return symbolDenial;
 
         var resolved = await ResolveContextAsync<OffCpuSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -1306,7 +1308,7 @@ public sealed class DiagnosticTools
         EventSourceAllowlist allowlist,
         SensitiveValueGate sensitiveGate,
         IPrincipalAccessor principalAccessor,
-        [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'. Must be on the curated allowlist (see `Diagnostics:EventSourceAllowlist`) unless `unsafeProvider=true` AND the server has `Diagnostics:AllowSensitiveHeapValues=true` (issue #165 / M2).")] string providerName,
+        [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'. Must be on the curated allowlist (see `Diagnostics:EventSourceAllowlist`) unless the bearer principal holds the 'eventsource-any' scope (RFC 0001 §2.3 / B5.4) — or, on legacy deployments, `unsafeProvider=true` AND the server has `Diagnostics:AllowSensitiveHeapValues=true` (issue #165 / M2).")] string providerName,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the capture window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("EventSource keyword mask. -1 (default) means all keywords. For non-allowlisted providers (when opted in via unsafeProvider=true) this is clamped to a safer default when left at -1; pass an explicit positive mask to override.")] long keywords = -1,
@@ -1315,6 +1317,7 @@ public sealed class DiagnosticTools
         [Description("Verbosity (summary|detail|raw). Default 'summary' drops the Events[] list inline (keeps the Total count and metadata). 'detail' includes Events up to maxEvents. 'raw' is equivalent to detail. The full capture is always retained behind the issued handle — drill in with query_collection(handle, view=byEventName|events).")]
         SamplingDepth depth = SamplingDepth.Summary,
         [Description("Opt-in switch for non-allowlisted EventSource providers (issue #165 / M2). Only honoured when the server has `Diagnostics:AllowSensitiveHeapValues=true`. Defaults to false; deny path returns an `EventSourceProviderNotAllowed` envelope.")] bool unsafeProvider = false,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(providerName)) return InvalidArg<EventSourceCapture>(nameof(providerName), "is required");
@@ -1324,13 +1327,21 @@ public sealed class DiagnosticTools
         // B4 / issue #165 / M2: gate non-curated providers behind the sensitive-value flag.
         // Custom EventSources frequently log user ids, auth-failure context, etc.
         var allowedByDefault = allowlist.IsAllowed(providerName);
+        // RFC 0001 §2.3 / B5.4: scope-first predicate is
+        // 'principal.HasExplicitScope("eventsource-any") OR allowlist allows'.
+        // The principal-side check lets us emit a once-per-process deprecation warning
+        // when the allowlist (not the scope) was the bypass mechanism. The allowlist
+        // policy itself is retained — only the implicit deployment-wide "every caller
+        // can capture allowlisted providers" pattern is deprecated for caller-level
+        // distinction.
+        var principalAllowsAny = principalAccessor.Current?.HasExplicitScope("eventsource-any") == true;
         if (!allowedByDefault)
         {
-            // RFC 0001 §2.3 / §2.6: caller can use unsafeProvider when EITHER the server has the
-            // legacy AllowSensitiveHeapValues flag set, OR their bearer principal holds the
-            // 'eventsource-any' modifier scope (B5.2). Either path bypasses the curated allowlist
-            // for THIS call only; the warn-on-allow audit line is emitted by the tool filter.
-            var principalAllowsAny = principalAccessor.Current?.HasExplicitScope("eventsource-any") == true;
+            // Caller can use unsafeProvider when EITHER the server has the legacy
+            // AllowSensitiveHeapValues flag set, OR their bearer principal holds the
+            // 'eventsource-any' modifier scope. Either path bypasses the curated
+            // allowlist for THIS call only; the warn-on-allow audit line is emitted
+            // by the tool filter.
             if (!unsafeProvider || (!sensitiveGate.IsAllowedByServer && !principalAllowsAny))
             {
                 var preview = string.Join(", ", allowlist.AllowedProviders.Take(8));
@@ -1338,14 +1349,30 @@ public sealed class DiagnosticTools
                     $"EventSource provider '{providerName}' is not on the allowlist.",
                     new DiagnosticError(
                         "EventSourceProviderNotAllowed",
-                        "Add the provider to `Diagnostics:EventSourceAllowlist` (env: `Diagnostics__EventSourceAllowlist__0=<provider>`), or set `Diagnostics:AllowSensitiveHeapValues=true` on the server AND pass `unsafeProvider=true` per call. Curated allowlist includes: " + preview + (allowlist.AllowedProviders.Count > 8 ? ", …" : "") + ". Tracked by issue #165 (B4); the per-tool scope mechanism in #166 (B5) will replace this flag.",
+                        "Add the provider to `Diagnostics:EventSourceAllowlist` (env: `Diagnostics__EventSourceAllowlist__0=<provider>`), grant the caller the 'eventsource-any' scope (RFC 0001 §2.3), or — on legacy deployments — set `Diagnostics:AllowSensitiveHeapValues=true` on the server AND pass `unsafeProvider=true` per call. Curated allowlist includes: " + preview + (allowlist.AllowedProviders.Count > 8 ? ", …" : "") + ". Tracked by issue #165 (B4); subsumed into the 'eventsource-any' modifier scope by B5.4.",
                         providerName));
+            }
+
+            // unsafeProvider path was taken. If the principal lacks the scope, the
+            // AllowSensitiveHeapValues flag is the bypass mechanism — surface the
+            // sensitive-heap deprecation (that flag is the one truly going away).
+            if (deprecation is not null && !principalAllowsAny && sensitiveGate.IsAllowedByServer)
+            {
+                deprecation.NotifySensitiveHeapValuesFlagBypass();
             }
 
             // Opt-in path: clamp the dangerous defaults (verbose + every-keyword) so the
             // capture doesn't accidentally pull every payload field at full verbosity.
             if (keywords == -1) keywords = 0;
             if (eventLevel > 4) eventLevel = 4;
+        }
+        else if (deprecation is not null && !principalAllowsAny)
+        {
+            // The curated allowlist (not the scope) authorised this call. Fire the
+            // once-per-process deprecation telemetry so operators see they should be
+            // distinguishing capable callers with the 'eventsource-any' scope rather
+            // than relying on the deployment-wide allowlist alone.
+            deprecation.NotifyEventSourceAllowlistBypass();
         }
 
         var resolved = await ResolveContextAsync<EventSourceCapture>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -1455,10 +1482,11 @@ public sealed class DiagnosticTools
         [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<DumpInspection>(symbolServerAllowlist, symbolPath, principalAccessor);
+        var symbolDenial = ValidateSymbolPath<DumpInspection>(symbolServerAllowlist, symbolPath, principalAccessor, deprecation);
         if (symbolDenial is not null) return symbolDenial;
 
         return await GuardAttachAsync("inspect_dump", processId: null, async () =>
@@ -1554,10 +1582,11 @@ public sealed class DiagnosticTools
         [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
         [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<LiveHeapInspection>(symbolServerAllowlist, symbolPath, principalAccessor);
+        var symbolDenial = ValidateSymbolPath<LiveHeapInspection>(symbolServerAllowlist, symbolPath, principalAccessor, deprecation);
         if (symbolDenial is not null) return symbolDenial;
 
         var resolved = await ResolveContextAsync<LiveHeapInspection>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -1634,6 +1663,7 @@ public sealed class DiagnosticTools
         [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null,
         [Description("For view='object', 'gcroot' and 'objsize': managed object address (decimal or 0x-prefixed hex).")] string? address = null,
         [Description("Opt-in to return raw string content / field value previews on the 'duplicate-strings' and 'object' views (issue #165 / H4). Defaults to false — those fields are returned as metadata-only placeholders unless the server enables `Diagnostics:AllowSensitiveHeapValues=true` AND the caller passes `includeSensitiveValues=true`. Any string surfaced even in that mode still runs through the SensitiveDataRedactor (Bearer/PEM/JWT/connection-string/AWS-key patterns).")] bool includeSensitiveValues = false,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<HeapSnapshotQueryResult>(nameof(handle), "is required");
@@ -1654,6 +1684,13 @@ public sealed class DiagnosticTools
         // caller still has to pass includeSensitiveValues=true to actually receive raw content.
         var principalUnlocksSensitive = principalAccessor.Current?.HasExplicitScope("sensitive-heap-read") == true;
         var emitSensitive = sensitiveGate.ShouldEmit(includeSensitiveValues, principalUnlocksSensitive);
+
+        // B5.4: warn once per process if the legacy server flag (rather than the
+        // 'sensitive-heap-read' scope) is what unlocked sensitive-value emission.
+        if (emitSensitive && !principalUnlocksSensitive && sensitiveGate.IsAllowedByServer)
+        {
+            deprecation?.NotifySensitiveHeapValuesFlagBypass();
+        }
 
         var normalizedView = view.Trim().ToLowerInvariant();
         switch (normalizedView)
@@ -2069,6 +2106,7 @@ public sealed class DiagnosticTools
         [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns only the top-3 blocked threads inline and drops the SyncBlock lock-graph (use query_thread_snapshot(view=lock-graph) for the full graph). 'detail' returns the historical top-25 threads + top-25 locks. 'raw' is equivalent to detail. The full snapshot is always retained behind the issued handle.")]
         SamplingDepth depth = SamplingDepth.Summary,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
         var hasExplicitPid = processId.HasValue && processId.Value != 0;
@@ -2081,7 +2119,7 @@ public sealed class DiagnosticTools
         if (maxFramesPerThread > ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), $"must be <= {ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap} (bounds the live-attach suspend window)");
 
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<ThreadSnapshotQueryResult>(symbolServerAllowlist, symbolPath, principalAccessor);
+        var symbolDenial = ValidateSymbolPath<ThreadSnapshotQueryResult>(symbolServerAllowlist, symbolPath, principalAccessor, deprecation);
         if (symbolDenial is not null) return symbolDenial;
 
         int livePid = 0;
@@ -2898,24 +2936,48 @@ public sealed class DiagnosticTools
     /// principal-side modifier scope on top: callers holding <c>symbols-remote</c>
     /// (RFC 0001 §2.5) bypass the allowlist entirely. The legacy server-wide allowlist
     /// keeps working byte-for-byte for principals without the scope.
+    ///
+    /// B5.4 / RFC 0001 §7.3: when the allowlist (not the scope) was the path that allowed
+    /// a remote host through, fires a once-per-process deprecation warning via
+    /// <paramref name="deprecation"/>. The allowlist policy itself is retained — only the
+    /// pattern of relying on a single deployment-wide allowlist for caller-level
+    /// distinction is deprecated.
     /// </summary>
     private static DiagnosticResult<T>? ValidateSymbolPath<T>(
         SymbolServerAllowlist allowlist,
         string? symbolPath,
-        IPrincipalAccessor? principalAccessor = null)
+        IPrincipalAccessor? principalAccessor = null,
+        LegacyDiagnosticsFlagDeprecation? deprecation = null)
     {
         if (principalAccessor?.Current?.HasExplicitScope("symbols-remote") == true)
         {
             return null;
         }
         var validation = allowlist.Validate(symbolPath);
-        if (validation.IsAllowed) return null;
+        if (validation.IsAllowed)
+        {
+            // RFC 0001 §7.3: only emit when a remote host was actually accepted (not for
+            // null / empty / pure local paths). PathContainsRemoteUrl is a cheap heuristic;
+            // exact correctness is unnecessary because the warning is once-per-process.
+            if (deprecation is not null && PathContainsRemoteUrl(symbolPath))
+            {
+                deprecation.NotifySymbolServerAllowlistBypass();
+            }
+            return null;
+        }
         return DiagnosticResult.Fail<T>(
             $"symbolPath references remote symbol server host '{validation.DeniedHost}' which is not on the allowlist.",
             new DiagnosticError(
                 "SymbolServerNotAllowed",
                 "Remote symbol servers are denied by default. Add the host to `Diagnostics:SymbolServerAllowlist` (env: `Diagnostics__SymbolServerAllowlist__0=<host>`), grant the caller the `symbols-remote` scope, or drop the `srv*http(s)://…` segment and rely on the local symbol cache. Tracked by issue #165.",
                 validation.DeniedSegment));
+    }
+
+    private static bool PathContainsRemoteUrl(string? symbolPath)
+    {
+        if (string.IsNullOrWhiteSpace(symbolPath)) return false;
+        return symbolPath.Contains("http://", StringComparison.OrdinalIgnoreCase)
+            || symbolPath.Contains("https://", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

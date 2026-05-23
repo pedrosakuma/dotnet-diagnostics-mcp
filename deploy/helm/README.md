@@ -92,6 +92,58 @@ for the port-forward stream that `KubernetesPortForwardManager` opens.
 - `orchestrator.allowedNamespaces` maps to `Orchestrator__NamespaceAllowlist__*`. When omitted, the chart defaults to the Helm release namespace so the deployment stays fail-closed.
 - `orchestrator.ephemeralContainerImage` defaults to the chart image. Pin a digest or release tag in production so the orchestrator and injected ephemeral container stay aligned.
 
+### Scoped bearer tokens (RFC 0001)
+
+The single-bearer model above maps the configured token to a synthetic root scope
+(`root` / `*`) that satisfies every `[RequireScope]` gate. RFC 0001 (per-tool
+authorization scopes) adds an `Auth:BearerTokens` map so operators can mint
+several bearers, each with a precise scope set — useful when a junior operator
+should be able to read counters and CPU samples but not unlock
+`query_heap_snapshot view=duplicate-strings includeSensitiveValues=true`.
+
+In `values.yaml`-style configuration (a future chart slice — B5.5 — will surface
+this as first-class chart values; for now layer it in as raw `extraEnv`):
+
+```yaml
+extraEnv:
+  # Junior operator — read-only diagnostics, metadata-only heap previews.
+  - name: Auth__BearerTokens__junior__Token
+    valueFrom: { secretKeyRef: { name: dotnet-diag-tokens, key: junior } }
+  - name: Auth__BearerTokens__junior__Scopes__0
+    value: counters-read
+  - name: Auth__BearerTokens__junior__Scopes__1
+    value: cpu-sample
+  - name: Auth__BearerTokens__junior__Scopes__2
+    value: heap-read
+
+  # Incident-response operator — same baseline plus the three modifier scopes
+  # subsumed from the legacy Diagnostics__Allow* flags (B5.4).
+  - name: Auth__BearerTokens__incident__Token
+    valueFrom: { secretKeyRef: { name: dotnet-diag-tokens, key: incident } }
+  - name: Auth__BearerTokens__incident__Scopes__0
+    value: heap-read
+  - name: Auth__BearerTokens__incident__Scopes__1
+    value: sensitive-heap-read   # raw string previews on heap drilldowns
+  - name: Auth__BearerTokens__incident__Scopes__2
+    value: event-source-collect
+  - name: Auth__BearerTokens__incident__Scopes__3
+    value: eventsource-any       # any provider, not just the curated allowlist
+  - name: Auth__BearerTokens__incident__Scopes__4
+    value: cpu-sample
+  - name: Auth__BearerTokens__incident__Scopes__5
+    value: symbols-remote        # remote symbol servers (`srv*https://…`)
+```
+
+Modifier scopes (`sensitive-heap-read`, `eventsource-any`, `symbols-remote`)
+are deliberately **literal** — a `root`/`*` bearer does NOT auto-grant them, so
+the deployment-wide gates still apply unless the operator explicitly layers the
+scope on top of a privileged token. The matching legacy paths
+(`Diagnostics:AllowSensitiveHeapValues`, `Diagnostics:EventSourceAllowlist`,
+`Diagnostics:SymbolServerAllowlist`) remain available as fallback; they now log
+a once-per-process deprecation warning when they are what unlocked a call. See
+`docs/tool-reference.md` § "Security gates (B4)" and
+`docs/rfcs/0001-per-tool-authorization-scopes.md` for the full scope table.
+
 ## Operations and security
 
 - **Token rotation:** update the Secret, then restart the Deployment (`kubectl rollout restart deploy/<release>-dotnet-diagnostics-orchestrator`). Existing in-memory investigation handles are intentionally lost on restart; clients re-run `attach_to_pod` per the stateless design.

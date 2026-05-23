@@ -43,6 +43,11 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<SensitiveValueGate>(_ => new SensitiveValueGate(securityOptions));
         services.AddSingleton<EventSourceAllowlist>(_ => new EventSourceAllowlist(securityOptions));
         services.AddSingleton<SymbolServerAllowlist>(_ => new SymbolServerAllowlist(securityOptions));
+        // B5.4 / RFC 0001 §7.3 — once-per-process deprecation warnings when a legacy
+        // Diagnostics:Allow* flag is the path that unlocks a sensitive operation for a
+        // principal lacking the matching modifier scope. Singleton so the once-flags
+        // survive across requests.
+        services.AddSingleton<Security.LegacyDiagnosticsFlagDeprecation>();
 
         services.AddSingleton(new SymbolPathBuilder(configuredSymbolPath));
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Artifacts.IArtifactRootProvider, DotnetDiagnosticsMcp.Core.Artifacts.EnvironmentArtifactRootProvider>();

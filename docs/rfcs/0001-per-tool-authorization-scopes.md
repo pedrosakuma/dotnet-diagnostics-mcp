@@ -717,16 +717,27 @@ The compatibility contract has three levels.
 | **v1 of this RFC** | Both mechanisms work. If the flag is `true`, an `orchestrator-admin` synthetic grant is added to every registered token (preserving current behaviour) and a `Warning` log fires: *"`Orchestrator:AllowCrossSessionAdmin=true` is deprecated; grant `orchestrator-admin` scope to specific tokens instead. See RFC 0001 §2.9."* |
 | **v2** (one release later) | Flag removed. Cross-session admin only via `orchestrator-admin` scope. |
 
-### 7.3 B4 `Diagnostics:AllowSensitiveHeapValues`
+### 7.3 B4 `Diagnostics:AllowSensitiveHeapValues` (and the two B4 allowlists)
+
+The three B4 gates have **different fates** in v2:
+
+| Gate | v2 disposition |
+|---|---|
+| `Diagnostics:AllowSensitiveHeapValues` | **Removed.** This is the only B4 flag truly going away. Sensitive output is only available via the `sensitive-heap-read` modifier scope. |
+| `Diagnostics:EventSourceAllowlist` | **Retained** as a content allowlist. Independent of `eventsource-any` (callers without the scope can still capture allowlisted providers). |
+| `Diagnostics:SymbolServerAllowlist` | **Retained** as an SSRF allowlist. Independent of `symbols-remote` (callers without the scope can still use allowlisted hosts). |
+
+What's deprecated is the **pattern of relying on a deployment-wide setting for
+caller-level distinction**. Operators should mint scoped bearers when they need
+to authorise one caller (the incident-response operator) above the baseline
+without granting the privilege to every other consumer of the same MCP
+endpoint.
 
 | Release | Behaviour |
 |---|---|
-| **v1 of this RFC** | Both mechanisms work. If the flag is `true`, a `sensitive-heap-read` synthetic grant is added to every registered token, and a `Warning` log fires referencing this RFC §2.4. The `unsafeProvider=true` path on `collect_event_source` (`DiagnosticTools.cs:1297`) continues to honour the flag *and* the scope (either is sufficient in v1). |
-| **v2** | Flag removed. Sensitive output only via `sensitive-heap-read` scope. The `collect_event_source` help text already announces this transition. |
-
-The B4 allowlists (`Diagnostics:EventSourceAllowlist`, `Diagnostics:SymbolServerAllowlist`)
-are **not** deprecated — they are content filters orthogonal to scope, and the RFC keeps
-them as-is.
+| **v1 of this RFC (B5.2)** | Scope path added. Predicate is `principal.HasExplicitScope(<scope>) OR <legacy-flag-or-allowlist-allows>` — either is sufficient. No deprecation telemetry yet. |
+| **v1.x (B5.4 — this section)** | When the legacy flag / allowlist is the path that actually unlocked a call (the principal did NOT hold the matching modifier scope), the server emits a `Warning`-level log entry once per process per gate. The three messages are verbatim: <ul><li>`Diagnostics:AllowSensitiveHeapValues is deprecated. Grant the 'sensitive-heap-read' scope to the operator token instead. The flag will be removed in a future release.`</li><li>`Diagnostics:EventSourceAllowlist is bypassed by the 'eventsource-any' scope; configure scoped tokens instead of relying on the allowlist alone for caller-level distinction. The allowlist policy itself is retained.`</li><li>`Diagnostics:SymbolServerAllowlist is bypassed by the 'symbols-remote' scope; configure scoped tokens instead of relying on the allowlist alone for caller-level distinction. The allowlist policy itself is retained.`</li></ul> Modifier scopes are matched via `BearerPrincipal.HasExplicitScope` (literal — root/`*` does NOT auto-grant), so a privileged root token using an allowlisted resource will also trigger the corresponding warning. |
+| **v2 (one release later)** | `Diagnostics:AllowSensitiveHeapValues` is removed. The two allowlist policies stay; the deprecation warnings on them are demoted to `Information` (or removed entirely) once the helm/manifest examples no longer mention the legacy pattern. |
 
 ## 8. Audit logging
 
