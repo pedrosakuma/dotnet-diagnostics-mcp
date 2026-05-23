@@ -1,0 +1,6 @@
+# Smoke fixture: legacy single-bearer only (back-compat path).
+# Mirrors the pre-B5.5 invocation: operators override `bearerToken.value` and
+# don't touch `bearerTokens`. The chart must render the legacy Secret + the
+# `MCP_BEARER_TOKEN` env var exactly as before.
+bearerToken:
+  value: legacy-only-abc123def456

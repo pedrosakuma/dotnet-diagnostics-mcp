@@ -91,3 +91,28 @@ jobs:
             **/TestResults.attempt1/*.trx
             **/TestResults.attempt1/**/*.dmp
           if-no-files-found: ignore
+
+  # B5.5 (issue #186): make sure the Helm chart still renders for all three
+  # bearer-token shapes (legacy single-bearer, scoped `bearerTokens` list, and
+  # both set together during migration). Tiny job — `helm template` + a few
+  # greps — kept separate from the .NET matrix so it doesn't block the slow
+  # live-process tests above and so a Helm-only regression has an obvious
+  # owner in the checks list.
+  helm-render-smoke:
+    name: Helm render smoke (B5.5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+
+      - name: helm lint (default values)
+        run: helm lint deploy/helm/dotnet-diagnostics-orchestrator
+
+      - name: helm render smoke (legacy + scoped + both)
+        run: tests/helm/render-smoke.sh

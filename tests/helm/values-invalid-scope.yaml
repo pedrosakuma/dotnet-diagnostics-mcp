@@ -1,0 +1,10 @@
+# Negative smoke: scoped entry with an empty scope string.
+# `helm template` must abort before rendering.
+bearerTokens:
+  - name: bad-scope
+    valueFrom:
+      secretKeyRef:
+        name: x
+        key: y
+    scopes:
+      - ""

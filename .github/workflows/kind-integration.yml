@@ -77,6 +77,16 @@ jobs:
       - name: Install orchestrator (Helm)
         run: |
           kubectl create namespace "${ORCH_NAMESPACE}"
+          # TODO(B5.3 / #184): swap `--set orchestrator.allowCrossSessionAdmin=true`
+          # below for a scoped admin token once the `orchestrator-admin` scope path
+          # has merged. The scoped equivalent is roughly:
+          #   --set 'bearerTokens[0].name=ci-admin' \
+          #   --set 'bearerTokens[0].valueFrom.secretKeyRef.name=ci-tokens' \
+          #   --set 'bearerTokens[0].valueFrom.secretKeyRef.key=admin' \
+          #   --set 'bearerTokens[0].scopes[0]=*'
+          # The current flag-based path is intentionally left intact in this PR
+          # (B5.5 / #186) so we don't risk breaking the kind-integration smoke
+          # test before B5.3 is in.
           helm install dotnet-dbg-mcp deploy/helm/dotnet-diagnostics-orchestrator \
             --namespace "${ORCH_NAMESPACE}" \
             --set image.repository=dotnet-diagnostics-mcp \
