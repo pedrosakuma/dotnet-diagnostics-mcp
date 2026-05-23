@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using Microsoft.Extensions.Hosting;
@@ -33,17 +34,20 @@ public sealed class InvestigationHandleReaperBackgroundService : BackgroundServi
 {
     private readonly IInvestigationStore _store;
     private readonly InvestigationCloser _closer;
+    private readonly OrchestratorObservability _observability;
     private readonly ILogger<InvestigationHandleReaperBackgroundService> _logger;
     private readonly TimeSpan _interval;
 
     public InvestigationHandleReaperBackgroundService(
         IInvestigationStore store,
         InvestigationCloser closer,
+        OrchestratorObservability observability,
         ILogger<InvestigationHandleReaperBackgroundService>? logger = null,
         TimeSpan? interval = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _closer = closer ?? throw new ArgumentNullException(nameof(closer));
+        _observability = observability ?? throw new ArgumentNullException(nameof(observability));
         _logger = logger ?? NullLogger<InvestigationHandleReaperBackgroundService>.Instance;
         _interval = interval ?? TimeSpan.FromSeconds(30);
     }
@@ -86,6 +90,12 @@ public sealed class InvestigationHandleReaperBackgroundService : BackgroundServi
             if (outcome.Found && !outcome.AlreadyTerminal)
             {
                 reaped++;
+                _observability.RecordReaperEviction("ttl");
+                if (outcome.CleanupErrorCount > 0)
+                {
+                    _observability.RecordReaperEviction("cleanup-error");
+                }
+                _observability.RecordDetach(principal: null, handle.HandleId, "ttl", "success");
                 _logger.LogInformation(
                     "Expired investigation {HandleId} ({Namespace}/{Pod} container={Container}); unbound {SessionCount} session(s).",
                     handle.HandleId, handle.Namespace, handle.PodName, handle.TargetContainerName,

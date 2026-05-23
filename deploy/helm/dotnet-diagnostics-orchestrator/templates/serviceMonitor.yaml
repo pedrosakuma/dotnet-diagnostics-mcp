@@ -1,0 +1,40 @@
+{{- /*
+Prometheus Operator ServiceMonitor (issue #198).
+
+This template is opt-in AND capability-gated so clusters without the CRD keep
+rendering cleanly. Either:
+  * set metrics.open=true and let the in-cluster scraper hit /metrics anonymously, or
+  * provide serviceMonitor.bearerTokenSecret.{name,key} referencing a bearer that has
+    the metrics-read scope.
+*/ -}}
+{{- if and .Values.metrics.enabled .Values.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "dotnet-diagnostics-orchestrator.fullname" . }}
+  namespace: {{ default (include "dotnet-diagnostics-orchestrator.namespace" .) .Values.serviceMonitor.namespace }}
+  labels:
+    {{- include "dotnet-diagnostics-orchestrator.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "dotnet-diagnostics-orchestrator.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "dotnet-diagnostics-orchestrator.namespace" . }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | quote }}
+      {{- with .Values.serviceMonitor.bearerTokenSecret }}
+      {{- if and .name .key }}
+      bearerTokenSecret:
+        name: {{ .name | quote }}
+        key: {{ .key | quote }}
+      {{- end }}
+      {{- end }}
+{{- end }}

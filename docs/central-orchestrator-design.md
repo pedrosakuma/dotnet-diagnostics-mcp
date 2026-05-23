@@ -558,6 +558,16 @@ P5 ships the first production deployment surface under:
 
 Those assets intentionally keep the orchestrator itself non-root and ptrace-free while the per-investigation ephemeral diagnostics container is expected to retain the pod-local UID / `/tmp` / capability contract described in §4 and [`deploy/k8s/CENTRAL-TOPOLOGY.md`](../deploy/k8s/CENTRAL-TOPOLOGY.md). The current P5 deployment docs call out that the attach implementation still needs a code follow-up to inject the shared `/tmp` volume mount automatically on Linux targets.
 ---
+## Operational observability
+
+Wave 1 of Phase 8 adds a first-class operations surface for the central orchestrator:
+
+- **Prometheus metrics** at `/metrics` for attach success/failure, attach latency, active investigations, proxied tool calls, and TTL reaper evictions. The endpoint is scope-protected by default (`metrics-read`) and only becomes unauthenticated when `MCP_METRICS_OPEN=true` is set explicitly.
+- **Structured audit events** on stdout for `audit.orchestrator.attach`, `audit.orchestrator.detach`, and `audit.orchestrator.proxy_call`. These records log principal name, target identity, handle id, outcome, and latency where relevant, but never tool arguments or bearer values.
+- **Opt-in OpenTelemetry export** by wiring the orchestrator meter/activity source into OTLP only when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured. Without that environment variable the server still serves local Prometheus scraping, but it does not push telemetry anywhere.
+
+Operationally this closes three gaps that the original design intentionally deferred: SREs can alert on attach failures and latency regressions, auditors can answer "who attached to which pod when", and platform teams can scrape orchestrator health without parsing free-form logs.
+---
 ## 8. Phased implementation plan
 This feature should land as a sequence of small, reviewable PRs.
 ### P2 — server-side multi-target abstraction

@@ -1,9 +1,11 @@
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using DotnetDiagnosticsMcp.Core;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using DotnetDiagnosticsMcp.Server.Security;
@@ -158,6 +160,8 @@ public sealed class OrchestratorTools
         OrchestratorOptions options,
         IInvestigationSessionBinder sessionBinder,
         IInvestigationStore store,
+        IPrincipalAccessor principalAccessor,
+        OrchestratorObservability observability,
         McpServer server,
         ILoggerFactory? loggerFactory = null,
         [Description("Pod namespace. Falls back to the orchestrator's DefaultNamespace when omitted.")]
@@ -174,9 +178,17 @@ public sealed class OrchestratorTools
         bool allowReuseExistingSession = true,
         CancellationToken cancellationToken = default)
     {
+        var resolvedNamespace = @namespace ?? options.DefaultNamespace ?? string.Empty;
+        var stopwatch = Stopwatch.StartNew();
+        using var activity = observability.StartAttachActivity(resolvedNamespace, podName ?? string.Empty, containerName);
+
         if (string.IsNullOrWhiteSpace(podName))
         {
-            var ex = new OrchestratorException(OrchestratorErrorKinds.InvalidArgument, "podName is required.");
+            const string reason = OrchestratorErrorKinds.InvalidArgument;
+            activity?.SetTag("event.outcome", "failure");
+            activity?.SetTag("error.type", reason);
+            observability.RecordAttach(principalAccessor.Current, resolvedNamespace, string.Empty, containerName, null, "failure", reason, stopwatch.Elapsed);
+            var ex = new OrchestratorException(reason, "podName is required.");
             return DiagnosticResult.Fail<AttachSession>(
                 $"attach_to_pod failed: {ex.Message}",
                 new DiagnosticError(ex.ErrorKind, ex.Message),
@@ -184,17 +196,12 @@ public sealed class OrchestratorTools
         }
 
         var request = new AttachRequest(
-            Namespace: @namespace ?? string.Empty,
+            Namespace: resolvedNamespace,
             PodName: podName!,
             ContainerName: containerName,
             TtlSeconds: ttlSeconds,
             RequirePreparedTarget: requirePreparedTarget,
             AllowReuseExistingSession: allowReuseExistingSession,
-            // H6 (issue #164): stamp the caller's MCP session id onto the request
-            // so the handle the orchestrator mints is bound to this session and
-            // /proxy/{handleId} can later enforce per-owner authorization.
-            // TryGetServerSessionId returns null on stdio / framework calls without
-            // a session — those handles intentionally remain un-scoped.
             OwnerSessionId: TryGetServerSessionId(server));
 
         InvestigationHandle handle;
@@ -204,30 +211,19 @@ public sealed class OrchestratorTools
         }
         catch (OrchestratorException ex)
         {
+            activity?.SetTag("event.outcome", "failure");
+            activity?.SetTag("error.type", ex.ErrorKind);
+            observability.RecordAttach(principalAccessor.Current, resolvedNamespace, podName!, containerName, null, "failure", ex.ErrorKind, stopwatch.Elapsed);
             return DiagnosticResult.Fail<AttachSession>(
                 $"attach_to_pod failed: {ex.Message}",
                 new DiagnosticError(ex.ErrorKind, ex.Message),
                 BuildAttachRecoveryHint(ex.ErrorKind));
         }
 
-        // Project to the client-safe shape so PodLocalBearerToken never leaves the server.
-        // The proxy URL is a relative path the client appends to its MCP base; the
-        // orchestrator's reverse proxy at /proxy/{handleId}/... will swap the bearer for
-        // the per-attach Pod-local secret before forwarding.
         var proxyUrl = handle.State == InvestigationState.Active
             ? options.ProxyBasePath.TrimEnd('/') + "/" + handle.HandleId
             : null;
 
-        // Bind the MCP session to the handle so future server-side machinery (P3b-4 /
-        // intercept slice) can route subsequent tool calls through the proxy without the
-        // client having to rewrite URLs. We only bind on Active handles — Attaching /
-        // Failed states are not yet usable and would mislead any session-aware resolver.
-        //
-        // We re-read the store right before binding to close the
-        // attach-vs-concurrent-detach/reaper window: AttachAsync may have returned an
-        // Active handle that a concurrent detach_from_pod / TTL reaper has since flipped
-        // terminal. In that case we MUST NOT bind (the proxy/port-forward is already
-        // torn down) and we MUST NOT report Active to the caller.
         InvestigationHandle observedHandle = handle;
         if (handle.State == InvestigationState.Active)
         {
@@ -235,6 +231,9 @@ public sealed class OrchestratorTools
             if (observedHandle.State != InvestigationState.Active)
             {
                 var msg = $"Investigation {handle.HandleId} was closed during attach (observed {observedHandle.State}).";
+                activity?.SetTag("event.outcome", "failure");
+                activity?.SetTag("error.type", OrchestratorErrorKinds.AttachFailed);
+                observability.RecordAttach(principalAccessor.Current, resolvedNamespace, podName!, containerName, handle.HandleId, "failure", OrchestratorErrorKinds.AttachFailed, stopwatch.Elapsed);
                 return DiagnosticResult.Fail<AttachSession>(
                     $"attach_to_pod failed: {msg}",
                     new DiagnosticError(OrchestratorErrorKinds.AttachFailed, msg),
@@ -256,6 +255,9 @@ public sealed class OrchestratorTools
         }
 
         var session = AttachSession.FromHandle(observedHandle, proxyUrl);
+        observability.RecordAttach(principalAccessor.Current, session.Namespace, session.PodName, session.TargetContainerName, session.HandleId, "success", "none", stopwatch.Elapsed);
+        activity?.SetTag("event.outcome", "success");
+        activity?.SetTag("mcp.investigation.handle", session.HandleId);
 
         var summary = $"Investigation {session.HandleId} {(session.State == InvestigationState.Active ? "attached" : session.State.ToString().ToLowerInvariant())} " +
                       $"to {session.Namespace}/{session.PodName} container={session.TargetContainerName} " +
@@ -346,6 +348,7 @@ public sealed class OrchestratorTools
         IInvestigationStore store,
         OrchestratorOptions options,
         IPrincipalAccessor principalAccessor,
+        OrchestratorObservability observability,
         McpServer server,
         ILoggerFactory? loggerFactory = null,
         [Description("Investigation handle id returned by attach_to_pod. When omitted, defaults to the handle currently bound to this MCP session.")]
@@ -370,6 +373,7 @@ public sealed class OrchestratorTools
                 PreviousState: null,
                 NewState: null,
                 UnboundSessionIds: System.Array.Empty<string>());
+            observability.RecordDetach(principalAccessor.Current, string.Empty, "manual", "success");
             return DiagnosticResult.Ok(
                 result,
                 "detach_from_pod: no handleId was supplied and this MCP session has no investigation binding. Nothing to detach.",
@@ -393,6 +397,7 @@ public sealed class OrchestratorTools
             !string.Equals(existing.OwnerSessionId, sessionId, StringComparison.Ordinal) &&
             !adminBypass)
         {
+            observability.RecordDetach(principalAccessor.Current, resolvedHandleId, "manual", "failure");
             return DiagnosticResult.Fail<DetachResult>(
                 summary: $"detach_from_pod: handle '{resolvedHandleId}' is owned by a different MCP session.",
                 error: new DiagnosticError(
@@ -426,6 +431,8 @@ public sealed class OrchestratorTools
         {
             summary = $"detach_from_pod: handle '{resolvedHandleId}' transitioned {outcome.PreviousState?.ToString().ToLowerInvariant()}→closed; unbound {outcome.UnboundSessionIds.Count} MCP session(s); ephemeral container remains on the Pod spec.";
         }
+
+        observability.RecordDetach(principalAccessor.Current, outcome.HandleId, "manual", "success");
 
         return DiagnosticResult.Ok(
             detach,

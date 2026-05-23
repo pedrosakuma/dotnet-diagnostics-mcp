@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using DotnetDiagnosticsMcp.Server.Hosting;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using Xunit;
 
@@ -82,8 +85,15 @@ public sealed class InvestigationHandleReaperBackgroundServiceTests
 
         public Fixture()
         {
+            var services = new ServiceCollection();
+            services.AddMetrics();
+            var provider = services.BuildServiceProvider();
+            var observability = new OrchestratorObservability(
+                provider.GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
+                Store,
+                new AuditLogWriter(TextWriter.Null));
             var closer = new InvestigationCloser(Store, Proxy, PortForward, Binder);
-            Reaper = new InvestigationHandleReaperBackgroundService(Store, closer);
+            Reaper = new InvestigationHandleReaperBackgroundService(Store, closer, observability);
         }
     }
 

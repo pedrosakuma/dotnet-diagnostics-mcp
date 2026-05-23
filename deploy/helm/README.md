@@ -69,6 +69,32 @@ networkPolicy:
 TLS-terminating + authenticating proxy in front of it.** The bearer alone is
 insufficient against passive observers.
 
+## Metrics and Prometheus scraping
+
+The chart exposes the orchestrator's Prometheus endpoint on the same Service port at
+`/metrics`.
+
+- `metrics.enabled=true` (default) keeps the endpoint mapped.
+- `metrics.open=false` (default) keeps `/metrics` **scope-protected** — callers need a bearer with the `metrics-read` scope.
+- `metrics.open=true` makes `/metrics` unauthenticated for the common "cluster-local scrape behind mTLS / NetworkPolicy" posture.
+- `serviceMonitor.enabled=true` renders `templates/serviceMonitor.yaml` when the Prometheus Operator CRD is installed.
+- If you keep `metrics.open=false`, set `serviceMonitor.bearerTokenSecret.{name,key}` to a Secret containing a bearer with `metrics-read`.
+
+Example values:
+
+```yaml
+metrics:
+  enabled: true
+  open: false
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  bearerTokenSecret:
+    name: dotnet-diag-tokens
+    key: metrics
+```
+
 ## RBAC scope
 
 The chart defaults to **namespace-scoped** `Role`+`RoleBinding`, granting
@@ -98,7 +124,7 @@ for the port-forward stream that `KubernetesPortForwardManager` opens.
 > tools by its `scopes` list (see RFC §2 for the taxonomy: `read-counters`,
 > `eventpipe`, `heap-read`, `sensitive-heap-read`, `ptrace`, `dump-write`,
 > `orchestrator-list`, `orchestrator-attach`, `orchestrator-admin`,
-> `investigation-export`, `job-control`, or `*` for root).
+> `investigation-export`, `job-control`, `metrics-read`, or `*` for root).
 
 ### `values.yaml` example — viewer + admin pair
 

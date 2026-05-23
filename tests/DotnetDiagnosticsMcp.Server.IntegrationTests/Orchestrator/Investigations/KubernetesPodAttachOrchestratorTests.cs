@@ -1,15 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using FluentAssertions;
 using k8s.Autorest;
 using k8s.Models;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -398,9 +401,17 @@ public class KubernetesPodAttachOrchestratorTests
         };
         options.NamespaceAllowlist.Add(Ns);
         var store = new MemoryInvestigationStore();
+        var services = new ServiceCollection();
+        services.AddMetrics();
+        var provider = services.BuildServiceProvider();
+        var observability = new OrchestratorObservability(
+            provider.GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
+            store,
+            new AuditLogWriter(TextWriter.Null));
+        var closer = new InvestigationCloser(store, new NoOpProxyClient(), new NoOpPortForwardManager(), new MemoryInvestigationSessionBinder());
         var time = new FakeTimeProvider();
         var orch = new KubernetesPodAttachOrchestrator(
-            api, store, options, time, TimeSpan.FromMilliseconds(1),
+            api, store, closer, observability, options, time, TimeSpan.FromMilliseconds(1),
             NullLogger<KubernetesPodAttachOrchestrator>.Instance);
         return (orch, store, options);
     }
@@ -483,6 +494,22 @@ public class KubernetesPodAttachOrchestratorTests
 
         public Task<k8s.IStreamDemuxer> OpenPortForwardAsync(string namespaceName, string name, int podPort, CancellationToken cancellationToken)
             => throw new NotSupportedException("StubAttachApi does not exercise port-forward; use the dedicated KubernetesPortForwardManager tests.");
+    }
+
+    private sealed class NoOpProxyClient : IInvestigationProxyClient
+    {
+        public Task<ModelContextProtocol.Protocol.CallToolResult> CallToolAsync(InvestigationHandle handle, ModelContextProtocol.Protocol.CallToolRequestParams request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DisposeForHandleAsync(string handleId) => Task.CompletedTask;
+    }
+
+    private sealed class NoOpPortForwardManager : IPortForwardManager
+    {
+        public Task<HttpClient> GetOrCreateClientAsync(InvestigationHandle handle, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task CloseAsync(string handleId) => Task.CompletedTask;
     }
 
     /// <summary>

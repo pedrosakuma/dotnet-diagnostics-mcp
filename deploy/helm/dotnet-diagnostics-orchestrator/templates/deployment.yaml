@@ -45,6 +45,10 @@ spec:
           env:
             - name: ASPNETCORE_URLS
               value: {{ printf "http://0.0.0.0:%v" .Values.service.port | quote }}
+            - name: Observability__MetricsEnabled
+              value: {{ ternary "true" "false" .Values.metrics.enabled | quote }}
+            - name: MCP_METRICS_OPEN
+              value: {{ ternary "true" "false" .Values.metrics.open | quote }}
             {{- /*
             Legacy single-bearer wiring. Rendered only when the operator has
             opted into the legacy `bearerToken` block (existingSecret set, or

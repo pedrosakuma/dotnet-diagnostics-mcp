@@ -29,23 +29,27 @@ internal sealed class BearerTokenMiddleware
     private readonly IPrincipalResolver _resolver;
     private readonly OidcJwtAuthOptions _oidcJwtAuthOptions;
     private readonly ILogger<BearerTokenMiddleware> _logger;
+    private readonly DotnetDiagnosticsMcp.Server.Hosting.OrchestratorObservabilityOptions _observabilityOptions;
 
     public BearerTokenMiddleware(
         RequestDelegate next,
         IPrincipalResolver resolver,
         OidcJwtAuthOptions oidcJwtAuthOptions,
-        ILogger<BearerTokenMiddleware> logger)
+        ILogger<BearerTokenMiddleware> logger,
+        DotnetDiagnosticsMcp.Server.Hosting.OrchestratorObservabilityOptions observabilityOptions)
     {
         _next = next;
         _resolver = resolver;
         _oidcJwtAuthOptions = oidcJwtAuthOptions;
         _logger = logger;
+        _observabilityOptions = observabilityOptions;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
         var path = context.Request.Path;
-        if (path.StartsWithSegments("/health"))
+        if (path.StartsWithSegments("/health") ||
+            path.StartsWithSegments("/metrics") && (_observabilityOptions.MetricsOpen || !_observabilityOptions.MetricsEnabled))
         {
             await _next(context).ConfigureAwait(false);
             return;

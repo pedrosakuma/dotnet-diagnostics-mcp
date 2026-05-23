@@ -52,6 +52,22 @@ service:
   type: ClusterIP
   port: 5130
 
+metrics:
+  enabled: true
+  # Default deny: /metrics requires a bearer token with the metrics-read scope.
+  # Set true only when the scrape path is already fenced by mTLS / NetworkPolicy.
+  open: false
+
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  bearerTokenSecret:
+    name: ""
+    key: ""
+
 resources:
   requests:
     cpu: 100m
@@ -76,7 +92,7 @@ bearerToken:
 # one or more scopes (see RFC §2 for the taxonomy:
 # `read-counters`, `eventpipe`, `heap-read`, `sensitive-heap-read`, `ptrace`,
 # `dump-write`, `orchestrator-list`, `orchestrator-attach`, `orchestrator-admin`,
-# `investigation-export`, `job-control`, or `*` for root).
+# `investigation-export`, `job-control`, `metrics-read`, or `*` for root).
 #
 # Each entry renders into the deployment as:
 #   - name: Auth__BearerTokens__{i}__Name      (literal value)

@@ -5,6 +5,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using DotnetDiagnosticsMcp.Server.Observability;
 using k8s.Autorest;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
@@ -32,6 +33,8 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
 
     private readonly IKubernetesPodsApi _podsApi;
     private readonly IInvestigationStore _store;
+    private readonly InvestigationCloser _closer;
+    private readonly OrchestratorObservability _observability;
     private readonly OrchestratorOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<KubernetesPodAttachOrchestrator> _logger;
@@ -40,15 +43,19 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
     public KubernetesPodAttachOrchestrator(
         IKubernetesPodsApi podsApi,
         IInvestigationStore store,
+        InvestigationCloser closer,
+        OrchestratorObservability observability,
         OrchestratorOptions options,
         ILogger<KubernetesPodAttachOrchestrator> logger)
-        : this(podsApi, store, options, TimeProvider.System, DefaultPollInterval, logger)
+        : this(podsApi, store, closer, observability, options, TimeProvider.System, DefaultPollInterval, logger)
     {
     }
 
     internal KubernetesPodAttachOrchestrator(
         IKubernetesPodsApi podsApi,
         IInvestigationStore store,
+        InvestigationCloser closer,
+        OrchestratorObservability observability,
         OrchestratorOptions options,
         TimeProvider timeProvider,
         TimeSpan pollInterval,
@@ -56,6 +63,8 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
     {
         _podsApi = podsApi;
         _store = store;
+        _closer = closer;
+        _observability = observability;
         _options = options;
         _timeProvider = timeProvider;
         _pollInterval = pollInterval;
@@ -132,12 +141,12 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
         }
         catch (OperationCanceledException)
         {
-            MarkFailed(handle, "Attach canceled by caller before the ephemeral container patch completed.");
+            await MarkFailedAsync(handle, "Attach canceled by caller before the ephemeral container patch completed.").ConfigureAwait(false);
             throw;
         }
         catch (Exception ex)
         {
-            MarkFailed(handle, ex.Message);
+            await MarkFailedAsync(handle, ex.Message).ConfigureAwait(false);
             throw;
         }
 
@@ -147,12 +156,12 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
         }
         catch (OperationCanceledException)
         {
-            MarkFailed(handle, "Attach canceled by caller while waiting for ephemeral container readiness.");
+            await MarkFailedAsync(handle, "Attach canceled by caller while waiting for ephemeral container readiness.").ConfigureAwait(false);
             throw;
         }
         catch (Exception ex)
         {
-            MarkFailed(handle, ex.Message);
+            await MarkFailedAsync(handle, ex.Message).ConfigureAwait(false);
             throw;
         }
 
@@ -164,10 +173,10 @@ internal sealed class KubernetesPodAttachOrchestrator : IPodAttachOrchestrator
         return active;
     }
 
-    private void MarkFailed(InvestigationHandle handle, string reason)
+    private async Task MarkFailedAsync(InvestigationHandle handle, string reason)
     {
-        var failed = handle with { State = InvestigationState.Failed, FailureReason = reason };
-        _store.Update(failed);
+        await _closer.CloseAsync(handle.HandleId, InvestigationState.Failed, reason).ConfigureAwait(false);
+        _observability.RecordDetach(principal: null, handle.HandleId, "error", "success");
     }
 
     private string ResolveAndValidateNamespace(string? requested)

@@ -1,9 +1,11 @@
 using System.Collections.Generic;
 using DotnetDiagnosticsMcp.Server.Hosting;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace DotnetDiagnosticsMcp.Server.IntegrationTests.Orchestrator;
@@ -48,5 +50,21 @@ public sealed class OrchestratorServiceRegistrationTests
 
         using var provider = services.BuildServiceProvider();
         provider.GetService<IInvestigationSessionBinder>().Should().BeNull();
+    }
+
+    [Fact]
+    public void AddOrchestratorObservability_HostBuilder_RegistersObserverForStdio()
+    {
+        var builder = Host.CreateApplicationBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Orchestrator:Enabled"] = "true",
+        });
+
+        var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Configuration);
+        builder.AddOrchestratorObservability(orchestratorEnabled);
+
+        using var provider = builder.Services.BuildServiceProvider();
+        provider.GetRequiredService<OrchestratorObservability>().Should().NotBeNull();
     }
 }

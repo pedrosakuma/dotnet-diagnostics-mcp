@@ -42,6 +42,7 @@ var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.
 builder.Services.AddDiagnosticCoreServices(configuredSymbolPath, builder.Configuration);
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.StaleBinaryWatcher>();
 var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Configuration);
+builder.AddOrchestratorObservability(orchestratorEnabled);
 
 // B5.2 (RFC 0001 §5): the [RequireScope] filter reads the bearer principal off
 // HttpContext.Items. Register the typed accessor so the filter is decoupled from
@@ -168,6 +169,7 @@ app.UseMiddleware<BearerTokenMiddleware>((IPrincipalResolver)registry);
 app.UseRateLimiter();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapOrchestratorObservability();
 if (orchestratorEnabled)
 {
     app.MapInvestigationProxy();
@@ -210,6 +212,7 @@ static async Task<int> RunStdioAsync(string[] args)
     var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.McpSymbolPathEnvironmentVariable);
     hostBuilder.Services.AddDiagnosticCoreServices(configuredSymbolPath, hostBuilder.Configuration);
     var orchestratorEnabled = hostBuilder.Services.AddOrchestratorServices(hostBuilder.Configuration);
+    hostBuilder.AddOrchestratorObservability(orchestratorEnabled);
 
     // B5.2 / RFC 0001 §5: stdio has no HTTP context — the local MCP client owns the
     // process so authorization degrades to root scope. Registering the stdio accessor

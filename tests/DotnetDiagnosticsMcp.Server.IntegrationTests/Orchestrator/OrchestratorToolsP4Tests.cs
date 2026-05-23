@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using DotnetDiagnosticsMcp.Server.Security;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using Xunit;
 
@@ -44,7 +47,7 @@ public sealed class OrchestratorToolsP4Tests
 
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
-            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
+            TestPrincipalAccessors.Root, fx.Observability, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         result.Data.Should().NotBeNull();
@@ -61,7 +64,7 @@ public sealed class OrchestratorToolsP4Tests
         var fx = new Fixture();
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
-            TestPrincipalAccessors.Root, server: null!, handleId: "missing");
+            TestPrincipalAccessors.Root, fx.Observability, server: null!, handleId: "missing");
 
         result.IsError.Should().BeFalse();
         result.Data!.Found.Should().BeFalse();
@@ -74,7 +77,7 @@ public sealed class OrchestratorToolsP4Tests
         var fx = new Fixture();
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
-            TestPrincipalAccessors.Root, server: null!, handleId: null);
+            TestPrincipalAccessors.Root, fx.Observability, server: null!, handleId: null);
 
         result.IsError.Should().BeFalse();
         result.Data!.HandleId.Should().BeEmpty();
@@ -93,7 +96,7 @@ public sealed class OrchestratorToolsP4Tests
 
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
-            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
+            TestPrincipalAccessors.Root, fx.Observability, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         result.Data!.AlreadyTerminal.Should().BeTrue();
@@ -112,7 +115,7 @@ public sealed class OrchestratorToolsP4Tests
 
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
-            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
+            TestPrincipalAccessors.Root, fx.Observability, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -128,7 +131,7 @@ public sealed class OrchestratorToolsP4Tests
 
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
-            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
+            TestPrincipalAccessors.Root, fx.Observability, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         fx.Store.GetById(h.HandleId)!.State.Should().Be(InvestigationState.Closed);
@@ -147,6 +150,7 @@ public sealed class OrchestratorToolsP4Tests
         var result = await OrchestratorTools.DetachFromPod(
             fx.Closer, fx.Binder, fx.Store, fx.Options,
             TestPrincipalAccessors.WithScopes("orchestrator-attach", "orchestrator-admin"),
+            fx.Observability,
             server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
@@ -344,10 +348,18 @@ public sealed class OrchestratorToolsP4Tests
         public NoopProxy Proxy { get; } = new();
         public NoopPortForward PortForward { get; } = new();
         public OrchestratorOptions Options { get; } = new();
+        public OrchestratorObservability Observability { get; }
         public InvestigationCloser Closer { get; }
 
         public Fixture()
         {
+            var services = new ServiceCollection();
+            services.AddMetrics();
+            var provider = services.BuildServiceProvider();
+            Observability = new OrchestratorObservability(
+                provider.GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
+                Store,
+                new AuditLogWriter(TextWriter.Null));
             Closer = new InvestigationCloser(Store, Proxy, PortForward, Binder);
         }
     }

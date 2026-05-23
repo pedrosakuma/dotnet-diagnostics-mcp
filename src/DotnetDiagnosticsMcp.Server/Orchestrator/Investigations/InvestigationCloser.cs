@@ -74,7 +74,8 @@ public sealed class InvestigationCloser
                 AlreadyTerminal: false,
                 PreviousState: null,
                 NewState: null,
-                UnboundSessionIds: Array.Empty<string>());
+                UnboundSessionIds: Array.Empty<string>(),
+                CleanupErrorCount: 0);
         }
 
         var transition = _store.TryTransitionToTerminal(
@@ -91,14 +92,16 @@ public sealed class InvestigationCloser
                 AlreadyTerminal: false,
                 PreviousState: null,
                 NewState: null,
-                UnboundSessionIds: Array.Empty<string>());
+                UnboundSessionIds: Array.Empty<string>(),
+                CleanupErrorCount: 0);
         }
 
         // For AlreadyTerminal we still drain the cleanup pipeline idempotently — a
         // partial prior close (process restart, exception mid-pipeline, racing closer
         // that lost) may have left a port-forward or session binding behind.
-        await SafeDisposeProxyAsync(handleId).ConfigureAwait(false);
-        await SafeClosePortForwardAsync(handleId).ConfigureAwait(false);
+        var cleanupErrors = 0;
+        cleanupErrors += await SafeDisposeProxyAsync(handleId).ConfigureAwait(false);
+        cleanupErrors += await SafeClosePortForwardAsync(handleId).ConfigureAwait(false);
         var unbound = _sessionBinder.UnbindAllForHandle(handleId);
 
         var alreadyTerminal = transition == InvestigationTerminalTransition.AlreadyTerminal;
@@ -108,30 +111,35 @@ public sealed class InvestigationCloser
             AlreadyTerminal: alreadyTerminal,
             PreviousState: previousState,
             NewState: alreadyTerminal ? previousState : targetState,
-            UnboundSessionIds: unbound);
+            UnboundSessionIds: unbound,
+            CleanupErrorCount: cleanupErrors);
     }
 
-    private async Task SafeDisposeProxyAsync(string handleId)
+    private async Task<int> SafeDisposeProxyAsync(string handleId)
     {
         try
         {
             await _proxyClient.DisposeForHandleAsync(handleId).ConfigureAwait(false);
+            return 0;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Disposing proxy MCP client for handle {HandleId} threw; continuing close pipeline.", handleId);
+            return 1;
         }
     }
 
-    private async Task SafeClosePortForwardAsync(string handleId)
+    private async Task<int> SafeClosePortForwardAsync(string handleId)
     {
         try
         {
             await _portForwardManager.CloseAsync(handleId).ConfigureAwait(false);
+            return 0;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Closing port-forward for handle {HandleId} threw; continuing close pipeline.", handleId);
+            return 1;
         }
     }
 }
@@ -147,4 +155,5 @@ public sealed record InvestigationCloseOutcome(
     bool AlreadyTerminal,
     InvestigationState? PreviousState,
     InvestigationState? NewState,
-    IReadOnlyCollection<string> UnboundSessionIds);
+    IReadOnlyCollection<string> UnboundSessionIds,
+    int CleanupErrorCount);

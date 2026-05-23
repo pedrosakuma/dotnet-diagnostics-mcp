@@ -1,12 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DotnetDiagnosticsMcp.Server.IntegrationTests;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
+using DotnetDiagnosticsMcp.Server.Security;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using Xunit;
@@ -256,7 +261,20 @@ public sealed class InvestigationProxyCallToolFilterTests
         public InMemorySessionBinder Binder { get; } = new();
         public InMemoryInvestigationStore Store { get; } = new();
         public FakeProxyClient ProxyClient { get; } = new();
+        public IPrincipalAccessor PrincipalAccessor { get; } = TestPrincipalAccessors.Root;
+        public OrchestratorObservability Observability { get; }
         public int LocalInvocations;
+
+        public Fixture()
+        {
+            var services = new ServiceCollection();
+            services.AddMetrics();
+            var provider = services.BuildServiceProvider();
+            Observability = new OrchestratorObservability(
+                provider.GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>(),
+                Store,
+                new AuditLogWriter(TextWriter.Null));
+        }
 
         public ValueTask<CallToolResult> Invoke(
             CallToolRequestParams? request, string? sessionId, CancellationToken token = default)
@@ -272,6 +290,8 @@ public sealed class InvestigationProxyCallToolFilterTests
                 Binder,
                 Store,
                 ProxyClient,
+                PrincipalAccessor,
+                Observability,
                 loggerAccessor: () => null,
                 token);
         }

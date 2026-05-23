@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using DotnetDiagnosticsMcp.Server.Auth;
+using DotnetDiagnosticsMcp.Server.Hosting;
 using DotnetDiagnosticsMcp.Server.Security;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
@@ -52,7 +53,8 @@ public sealed class BearerTokenMiddlewareTests
             ctx => { nextCalled = true; return Task.CompletedTask; },
             resolver,
             OidcJwtAuthOptions.Disabled,
-            logger ?? NullLogger<BearerTokenMiddleware>.Instance);
+            logger ?? NullLogger<BearerTokenMiddleware>.Instance,
+            new OrchestratorObservabilityOptions());
 
         var ctx = new DefaultHttpContext();
         ctx.Request.Path = path;

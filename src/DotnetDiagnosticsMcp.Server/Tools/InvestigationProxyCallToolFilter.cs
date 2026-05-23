@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
+using DotnetDiagnosticsMcp.Server.Security;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -60,12 +63,16 @@ internal static class InvestigationProxyCallToolFilter
         IInvestigationSessionBinder sessionBinder,
         IInvestigationStore investigationStore,
         IInvestigationProxyClient proxyClient,
+        IPrincipalAccessor principalAccessor,
+        OrchestratorObservability observability,
         Func<ILogger?> loggerAccessor,
         Func<RequestContext<CallToolRequestParams>, string?>? sessionIdResolver = null)
     {
         ArgumentNullException.ThrowIfNull(sessionBinder);
         ArgumentNullException.ThrowIfNull(investigationStore);
         ArgumentNullException.ThrowIfNull(proxyClient);
+        ArgumentNullException.ThrowIfNull(principalAccessor);
+        ArgumentNullException.ThrowIfNull(observability);
         ArgumentNullException.ThrowIfNull(loggerAccessor);
 
         sessionIdResolver ??= static ctx => TryGetServerSessionId(ctx.Server);
@@ -77,7 +84,12 @@ internal static class InvestigationProxyCallToolFilter
                 request.Params,
                 sessionId,
                 next: (p, ct) => next(request, ct),
-                sessionBinder, investigationStore, proxyClient, loggerAccessor,
+                sessionBinder,
+                investigationStore,
+                proxyClient,
+                principalAccessor,
+                observability,
+                loggerAccessor,
                 cancellationToken);
         };
     }
@@ -95,6 +107,8 @@ internal static class InvestigationProxyCallToolFilter
         IInvestigationSessionBinder sessionBinder,
         IInvestigationStore investigationStore,
         IInvestigationProxyClient proxyClient,
+        IPrincipalAccessor principalAccessor,
+        OrchestratorObservability observability,
         Func<ILogger?> loggerAccessor,
         CancellationToken cancellationToken)
     {
@@ -143,6 +157,7 @@ internal static class InvestigationProxyCallToolFilter
             loggerAccessor()?.LogWarning(
                 "Refusing to forward '{ToolName}' from session {SessionId} via investigation {HandleId}: handle is owned by a different session.",
                 toolName, sessionId, handle.HandleId);
+            observability.RecordProxyCall(principalAccessor.Current, handle.HandleId, MetricToolLabel(toolName), "failure");
             return new CallToolResult
             {
                 IsError = true,
@@ -162,11 +177,16 @@ internal static class InvestigationProxyCallToolFilter
         // silently demoted to local execution (which would mask "this tool doesn't
         // make sense in a Pod-attached context" misuse from the LLM); it surfaces
         // a structured error so the LLM can self-correct.
+        using var activity = observability.StartProxyActivity(handle.HandleId, toolName);
+
         if (!InvestigationProxyToolAllowlist.IsAllowed(toolName))
         {
             loggerAccessor()?.LogWarning(
                 "Refusing to forward '{ToolName}' from session {SessionId} via investigation {HandleId}: tool is not on the proxy allowlist.",
                 toolName, sessionId, handle.HandleId);
+            observability.RecordProxyCall(principalAccessor.Current, handle.HandleId, MetricToolLabel(toolName), "failure");
+            activity?.SetTag("event.outcome", "failure");
+            activity?.SetTag("error.type", "ToolNotAllowed");
             return BuildToolNotAllowedResult(toolName, handle.HandleId);
         }
 
@@ -175,7 +195,10 @@ internal static class InvestigationProxyCallToolFilter
             loggerAccessor()?.LogDebug(
                 "Forwarding '{ToolName}' from session {SessionId} via investigation {HandleId} ({Namespace}/{Pod}).",
                 toolName, sessionId, handle.HandleId, handle.Namespace, handle.PodName);
-            return await proxyClient.CallToolAsync(handle, requestParams!, cancellationToken).ConfigureAwait(false);
+            var result = await proxyClient.CallToolAsync(handle, requestParams!, cancellationToken).ConfigureAwait(false);
+            observability.RecordProxyCall(principalAccessor.Current, handle.HandleId, toolName, result.IsError == true ? "failure" : "success");
+            activity?.SetTag("event.outcome", result.IsError == true ? "failure" : "success");
+            return result;
         }
         catch (Exception ex) when (!IsRethrowable(ex, cancellationToken))
         {
@@ -183,6 +206,9 @@ internal static class InvestigationProxyCallToolFilter
                 ex,
                 "Forwarding '{ToolName}' via investigation {HandleId} failed; returning structured error.",
                 toolName, handle.HandleId);
+            observability.RecordProxyCall(principalAccessor.Current, handle.HandleId, toolName, "failure");
+            activity?.SetTag("event.outcome", "failure");
+            activity?.SetTag("error.type", ex.GetType().Name);
             return new CallToolResult
             {
                 IsError = true,
@@ -258,6 +284,9 @@ internal static class InvestigationProxyCallToolFilter
             },
         };
     }
+
+    private static string MetricToolLabel(string toolName)
+        => InvestigationProxyToolAllowlist.IsAllowed(toolName) ? toolName : "__disallowed__";
 
     // Mirror of OrchestratorTools.TryGetServerSessionId / DiagnosticTools.TryGetServerSessionId.
     // Reflection is used for consistency with the other call sites — though SessionId is

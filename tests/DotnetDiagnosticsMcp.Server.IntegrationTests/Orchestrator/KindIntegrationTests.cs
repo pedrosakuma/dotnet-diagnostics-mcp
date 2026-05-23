@@ -154,6 +154,12 @@ public sealed class KindIntegrationTests
         var proxyBase = attachEnvelope.ProxyBaseUrl!.TrimStart('/');
         _output.WriteLine($"Attached: handleId={attachEnvelope.HandleId} proxy={attachEnvelope.ProxyBaseUrl}");
 
+        using var metricsClient = new HttpClient { BaseAddress = activation.OrchestratorBaseUrl };
+        metricsClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", activation.BearerToken);
+        var metricsText = await metricsClient.GetStringAsync("/metrics", ct).ConfigureAwait(false);
+        metricsText.Should().Contain("mcp_orchestrator_attach_total",
+            "a successful attach must increment the orchestrator metrics surface");
+
         try
         {
             // ------------------------------------------------------------
