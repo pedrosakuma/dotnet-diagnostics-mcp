@@ -1,53 +1,41 @@
-using System.Security.Cryptography;
+using DotnetDiagnosticsMcp.Server.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 
 namespace DotnetDiagnosticsMcp.Server.Auth;
 
-internal sealed class BearerTokenOptions
-{
-    public required string Token { get; init; }
-
-    public static BearerTokenOptions LoadOrGenerate(ILogger logger, bool allowEphemeralFallback = true)
-    {
-        var token = Environment.GetEnvironmentVariable("MCP_BEARER_TOKEN");
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            if (!allowEphemeralFallback)
-            {
-                // H9 (issue #162): refuse to keep running when bound to a
-                // non-loopback address with no operator-supplied bearer. The
-                // caller has already logged a fatal error; throw so app.Run()
-                // never gets a chance to bind.
-                throw new InvalidOperationException(
-                    "MCP_BEARER_TOKEN must be set when the server is bound to a non-loopback address. Refusing to generate an ephemeral token for a network-exposed listener.");
-            }
-
-            var bytes = RandomNumberGenerator.GetBytes(32);
-            token = Convert.ToHexString(bytes).ToLowerInvariant();
-            logger.LogWarning(
-                "MCP_BEARER_TOKEN not set. Generated ephemeral token for this run: {Token}",
-                token);
-        }
-        else
-        {
-            logger.LogInformation("Bearer token loaded from MCP_BEARER_TOKEN environment variable.");
-        }
-
-        return new BearerTokenOptions { Token = token };
-    }
-}
-
+/// <summary>
+/// Scoped bearer-token auth middleware (RFC 0001 §3 / §5). Replaces the previous
+/// single-bearer string-compare with an <see cref="IPrincipalResolver"/> lookup and
+/// stamps the resolved <see cref="BearerPrincipal"/> on
+/// <see cref="HttpContext.Items"/> so the upcoming <c>[RequireScope]</c> filter
+/// (B5.2) can authorize per-tool.
+/// </summary>
+/// <remarks>
+/// <para><c>/health</c> is allow-listed (same as before) so K8s/Docker probes do not
+/// need a token.</para>
+/// <para>The 401 response body is a structured JSON envelope (per task spec). The
+/// presented bearer value is never echoed back, logged, or included in any audit
+/// record — only the remote IP and whether the header was missing.</para>
+/// </remarks>
 internal sealed class BearerTokenMiddleware
 {
-    private readonly RequestDelegate _next;
-    private readonly BearerTokenOptions _options;
+    private const string UnauthenticatedEnvelope =
+        "{\"error\":{\"kind\":\"unauthenticated\",\"message\":\"invalid bearer token\"}}";
 
-    public BearerTokenMiddleware(RequestDelegate next, BearerTokenOptions options)
+    private readonly RequestDelegate _next;
+    private readonly IPrincipalResolver _resolver;
+    private readonly ILogger<BearerTokenMiddleware> _logger;
+
+    public BearerTokenMiddleware(
+        RequestDelegate next,
+        IPrincipalResolver resolver,
+        ILogger<BearerTokenMiddleware> logger)
     {
         _next = next;
-        _options = options;
+        _resolver = resolver;
+        _logger = logger;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -55,24 +43,43 @@ internal sealed class BearerTokenMiddleware
         var path = context.Request.Path;
         if (path.StartsWithSegments("/health"))
         {
-            await _next(context);
+            await _next(context).ConfigureAwait(false);
             return;
         }
 
         if (!context.Request.Headers.TryGetValue("Authorization", out StringValues header) ||
             header.Count == 0 ||
-            !TryExtractToken(header[0], out var presented) ||
-            !CryptographicOperations.FixedTimeEquals(
-                System.Text.Encoding.UTF8.GetBytes(presented),
-                System.Text.Encoding.UTF8.GetBytes(_options.Token)))
+            !TryExtractToken(header[0], out var presented))
         {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            context.Response.Headers.WWWAuthenticate = "Bearer";
-            await context.Response.WriteAsync("Unauthorized");
+            _logger.LogWarning(
+                "Bearer auth denied: missing or malformed Authorization header. remoteIp={RemoteIp} missingHeader=true",
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+            await WriteUnauthorizedAsync(context).ConfigureAwait(false);
             return;
         }
 
-        await _next(context);
+        var principal = _resolver.TryResolve(presented);
+        if (principal is null)
+        {
+            _logger.LogWarning(
+                "Bearer auth denied: presented token did not match any registered entry. remoteIp={RemoteIp} missingHeader=false",
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+            await WriteUnauthorizedAsync(context).ConfigureAwait(false);
+            return;
+        }
+
+        context.SetBearerPrincipal(principal);
+        _logger.LogInformation("Bearer auth allowed for principal {TokenName}.", principal.Name);
+
+        await _next(context).ConfigureAwait(false);
+    }
+
+    private static async Task WriteUnauthorizedAsync(HttpContext context)
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        context.Response.Headers.WWWAuthenticate = "Bearer";
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsync(UnauthenticatedEnvelope).ConfigureAwait(false);
     }
 
     private static bool TryExtractToken(string? header, out string token)
