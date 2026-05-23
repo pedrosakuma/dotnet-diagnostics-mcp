@@ -8,6 +8,7 @@
 | [`local-docker-sidecar.md`](./local-docker-sidecar.md) | Reproducing the K8s sidecar topology locally with plain Docker (`--pid=container:` + shared `/tmp`) |
 | [`bad-code-scenarios.md`](./bad-code-scenarios.md) | The 7 anti-patterns in `samples/BadCodeSample/` and the MCP investigation flow each one exercises |
 | [`../deploy/k8s/README.md`](../deploy/k8s/README.md) | Sidecar topology for Kubernetes, including the required pod-level settings |
+| [`rfcs/`](./rfcs/README.md) | Numbered design documents for cross-cutting changes (e.g. [RFC 0001 — per-tool authorization scopes](./rfcs/0001-per-tool-authorization-scopes.md)) |
 
 Planned but not yet written:
 
