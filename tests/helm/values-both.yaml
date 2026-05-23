@@ -1,0 +1,23 @@
+# Smoke fixture: BOTH legacy `bearerToken` AND scoped `bearerTokens` set.
+# `helm template` must succeed; at runtime the server logs a warning that
+# the scoped registry wins and the legacy MCP_BEARER_TOKEN is ignored
+# (RFC 0001 §7.1, B5.1 #188).
+bearerToken:
+  value: legacy-during-migration-abc123def456
+bearerTokens:
+  - name: ops-viewer
+    valueFrom:
+      secretKeyRef:
+        name: dotnet-diag-tokens
+        key: viewer
+    scopes:
+      - read-counters
+      - eventpipe
+      - investigation-export
+  - name: ops-admin
+    valueFrom:
+      secretKeyRef:
+        name: dotnet-diag-tokens
+        key: admin
+    scopes:
+      - "*"

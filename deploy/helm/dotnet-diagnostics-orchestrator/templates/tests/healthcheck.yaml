@@ -13,18 +13,16 @@ spec:
   containers:
     - name: curl
       image: curlimages/curl:8.7.1
-      env:
-        - name: MCP_BEARER_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "dotnet-diagnostics-orchestrator.secretName" . }}
-              key: token
+      # The server allow-lists `/health` from bearer auth (see
+      # `BearerTokenMiddleware`), so this probe deliberately does not present
+      # a token. This keeps the test working for both the legacy single-bearer
+      # shape and the scoped `bearerTokens` shape (RFC 0001 §6), where there
+      # may be no chart-managed Secret to read a token from.
       command:
         - /bin/sh
         - -ec
       args:
         - >-
           curl -fsS
-          -H "Authorization: Bearer ${MCP_BEARER_TOKEN}"
           http://{{ include "dotnet-diagnostics-orchestrator.fullname" . }}:{{ .Values.service.port }}/health
           >/dev/null

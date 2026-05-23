@@ -61,10 +61,51 @@ resources:
     memory: 1Gi
 
 bearerToken:
+  # DEPRECATED for new deployments — prefer the scoped `bearerTokens` list
+  # below (see RFC 0001 §6 — `docs/rfcs/0001-per-tool-authorization-scopes.md`).
+  # The legacy single-bearer keeps working unchanged for backward compatibility;
+  # if BOTH `bearerToken.value`/`bearerToken.existingSecret` AND `bearerTokens`
+  # are set, the scoped list wins at runtime and the server logs a startup
+  # warning naming the ignored legacy variable (see RFC §7.1, B5.1 #188).
   # Use an existing Secret with key `token` when set.
   existingSecret: ""
   # Replace before production, or prefer existingSecret.
   value: replace-me-with-a-strong-random-token
+
+# Per-RFC 0001 §6.2 — list of scoped bearer tokens. Each entry binds a token to
+# one or more scopes (see RFC §2 for the taxonomy:
+# `read-counters`, `eventpipe`, `heap-read`, `sensitive-heap-read`, `ptrace`,
+# `dump-write`, `orchestrator-list`, `orchestrator-attach`, `orchestrator-admin`,
+# `investigation-export`, `job-control`, or `*` for root).
+#
+# Each entry renders into the deployment as:
+#   - name: Auth__BearerTokens__{i}__Name      (literal value)
+#   - name: Auth__BearerTokens__{i}__Token     (valueFrom: secretKeyRef)
+#   - name: Auth__BearerTokens__{i}__Scopes__{j}  (literal value, one per scope)
+#
+# The recommended Secret layout is a single multi-key Secret (RFC §6.3); see
+# `deploy/helm/README.md` for a copy-paste example.
+#
+# When this list is non-empty it takes precedence over `bearerToken` above.
+# Leave as `[]` to keep the legacy single-bearer path.
+bearerTokens: []
+# bearerTokens:
+#   - name: ops-viewer
+#     valueFrom:
+#       secretKeyRef:
+#         name: dotnet-diag-tokens
+#         key: viewer
+#     scopes:
+#       - read-counters
+#       - eventpipe
+#       - investigation-export
+#   - name: ops-admin
+#     valueFrom:
+#       secretKeyRef:
+#         name: dotnet-diag-tokens
+#         key: admin
+#     scopes:
+#       - "*"
 
 orchestrator:
   enabled: true

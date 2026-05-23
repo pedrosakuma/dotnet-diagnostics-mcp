@@ -921,6 +921,23 @@ name and captures the events it emits in the window. Use for HTTP activity
 
 Writes a process dump to disk via the diagnostic IPC channel.
 
+> **Defense in depth — `confirm=true` required (B5.6 / RFC 0001 §4).** Without
+> `confirm=true` the tool returns a `{ "kind": "confirmation_required", ... }`
+> envelope describing the dump that *would* have been written (`targetPid`,
+> `dumpType`, `outputDirectory`) and writes nothing to disk. The
+> `dump-write` + `ptrace` scopes are still required on top of `confirm=true`.
+> Two-call pattern from an LLM:
+>
+> ```text
+> # 1. Preview — no dump written.
+> collect_process_dump(processId=12345, dumpType="WithHeap")
+> # → { "kind": "confirmation_required", "targetPid": 12345, "dumpType": "WithHeap", ... }
+>
+> # 2. Surface the preview to a human, then re-issue with confirm=true.
+> collect_process_dump(processId=12345, dumpType="WithHeap", confirm=true)
+> # → { "kind": "dump_written", "dump": { "filePath": "...", ... } }
+> ```
+
 > **Sandbox (issue #163).** `outputDirectory` is interpreted as a **relative**
 > sub-path under the operator-configured artifact root. The root is set by the
 > `MCP_ARTIFACT_ROOT` environment variable (default
@@ -935,16 +952,33 @@ Writes a process dump to disk via the diagnostic IPC channel.
 | `processId` | `int` | — | Target process id |
 | `dumpType` | `string` | `"Mini"` | `Mini` / `Triage` / `WithHeap` / `Full` |
 | `outputDirectory` | `string?` | artifact root | **Relative** sub-path under `MCP_ARTIFACT_ROOT`. Must not be absolute. |
+| `confirm` | `bool` | `false` | **Required `true` to actually write the dump.** Without it, the tool returns a `confirmation_required` preview and writes nothing. See RFC 0001 §4. |
 
-**Returns:** `DumpResult`:
+**Returns:** `DumpToolResult` — a discriminated envelope:
 
 ```json
+// confirm=false (default) — no file written:
 {
-  "processId": 12345,
+  "kind": "confirmation_required",
+  "message": "collect_process_dump writes a heap dump to disk. Pass confirm=true to proceed.",
+  "targetPid": 12345,
   "dumpType": "Mini",
-  "filePath": "/tmp/dotnet-diagnostics-mcp/dump_pid12345_Mini_20260518T200000Z.dmp",
-  "fileSizeBytes": 28311552,
-  "createdAt": "2026-05-18T20:00:00Z"
+  "outputDirectory": "dumps/oncall-20260518"
+}
+
+// confirm=true — file written:
+{
+  "kind": "dump_written",
+  "targetPid": 12345,
+  "dumpType": "Mini",
+  "outputDirectory": "dumps/oncall-20260518",
+  "dump": {
+    "processId": 12345,
+    "dumpType": "Mini",
+    "filePath": "/tmp/dotnet-diagnostics-mcp/dumps/oncall-20260518/dump_pid12345_Mini_20260518T200000Z.dmp",
+    "fileSizeBytes": 28311552,
+    "createdAt": "2026-05-18T20:00:00Z"
+  }
 }
 ```
 
