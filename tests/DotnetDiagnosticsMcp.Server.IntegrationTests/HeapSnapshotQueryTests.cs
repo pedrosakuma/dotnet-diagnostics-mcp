@@ -1,5 +1,6 @@
 using System.Threading;
 using DotnetDiagnosticsMcp.Core.Drilldown;
+using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
@@ -52,7 +53,7 @@ public sealed class HeapSnapshotQueryTests
 
         var handle = store.Register(snapshot.ProcessId, "heap-snapshot", snapshot, TimeSpan.FromMinutes(10));
 
-        var result = await DiagnosticTools.QueryHeapSnapshot(store, new StubDumpInspector(), handle.Id, view: "async", topN: 10);
+        var result = await DiagnosticTools.QueryHeapSnapshot(store, new StubDumpInspector(), new SensitiveDataRedactor(null), new SensitiveValueGate(null), handle.Id, view: "async", topN: 10);
 
         result.IsError.Should().BeFalse();
         result.Data.Should().NotBeNull();

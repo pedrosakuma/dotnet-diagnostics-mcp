@@ -18,6 +18,7 @@ using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.OffCpu;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
+using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Threads;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol;
@@ -451,11 +452,12 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of hotspots to return. Must be >= 1. Defaults to 25.")] int topN = 25,
         [Description("If true, attempts to resolve top hotspots to file:line via PDB / SourceLink and stamps the resolved SourceLocation onto each MethodIdentity payload (issue #28 — makes dotnet-assembly-mcp.get_method_source optional when PDBs are reachable). Defaults to true; set to false to skip PDB I/O when symbols are known to be unreachable.")] bool resolveSourceLines = true,
-        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to the symbol reader (e.g. '/symbols;srv*https://msdl.microsoft.com/download/symbols'). Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule/module directory. Ignored when resolveSourceLines=false.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to the symbol reader (e.g. '/symbols' or 'srv*c:\\symcache*https://msdl.microsoft.com/download/symbols'). Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule/module directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on the `Diagnostics:SymbolServerAllowlist` allowlist or the call is rejected with a `SymbolServerNotAllowed` envelope. Local file paths always pass through. Ignored when resolveSourceLines=false.")] string? symbolPath = null,
         [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to the requested topN so every emitted MethodIdentity carries its resolved SourceLocation when available.")] int? maxResolvedSources = null,
         [Description("If true, performs an opt-in ClrMD attach after sampling to recover closed generic instantiations for the hottest managed frames (displayed on MethodIdentity as ClosedSignature + GenericTypeArguments.Method). CoreCLR only. On Linux this requires CAP_SYS_PTRACE (or ptrace_scope=0) and briefly suspends the target during the attach. Defaults to false to keep the EventPipe-only path lightweight.")] bool resolveMethodInstantiations = false,
         [Description("Cap on how many top hotspots get ClrMD generic-instantiation enrichment. Must be >= 1. Defaults to the requested topN so the enrichment work stays bounded to the hottest frames.")] int? maxResolvedMethodInstantiations = null,
@@ -470,6 +472,14 @@ public sealed class DiagnosticTools
         if (effectiveMaxResolved < 1) return InvalidArg<CpuSample>(nameof(maxResolvedSources), "must be >= 1");
         var effectiveMaxResolvedInstantiations = maxResolvedMethodInstantiations ?? topN;
         if (effectiveMaxResolvedInstantiations < 1) return InvalidArg<CpuSample>(nameof(maxResolvedMethodInstantiations), "must be >= 1");
+
+        // B4 / issue #165 / M3: caller-supplied srv*http(s):// symbol paths are an SSRF
+        // surface. Default deny; operators allowlist hosts via Diagnostics:SymbolServerAllowlist.
+        if (resolveSourceLines)
+        {
+            var symbolDenial = ValidateSymbolPath<CpuSample>(symbolServerAllowlist, symbolPath);
+            if (symbolDenial is not null) return symbolDenial;
+        }
 
         var resolved = await ResolveContextAsync<CpuSample>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
@@ -715,16 +725,21 @@ public sealed class DiagnosticTools
         IOffCpuSampler sampler,
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of blocking stacks returned inline (the full set lives behind the handle). Defaults to 25.")] int topN = 25,
-        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 blocking stacks inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full artifact is always retained behind the issued handle — drill in with query_off_cpu_snapshot.")]
         SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<OffCpuSnapshot>(nameof(durationSeconds), "must be >= 1");
         if (topN < 1) return InvalidArg<OffCpuSnapshot>(nameof(topN), "must be >= 1");
+
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<OffCpuSnapshot>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
 
         var resolved = await ResolveContextAsync<OffCpuSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
@@ -1269,19 +1284,44 @@ public sealed class DiagnosticTools
         IEventSourceCollector collector,
         IProcessContextResolver resolver,
         IDiagnosticHandleStore handles,
-        [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'.")] string providerName,
+        EventSourceAllowlist allowlist,
+        SensitiveValueGate sensitiveGate,
+        [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'. Must be on the curated allowlist (see `Diagnostics:EventSourceAllowlist`) unless `unsafeProvider=true` AND the server has `Diagnostics:AllowSensitiveHeapValues=true` (issue #165 / M2).")] string providerName,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the capture window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
-        [Description("EventSource keyword mask. -1 (default) means all keywords.")] long keywords = -1,
-        [Description("Event verbosity level (0=LogAlways, 1=Critical, 2=Error, 3=Warning, 4=Informational, 5=Verbose). Defaults to 5.")] int eventLevel = 5,
+        [Description("EventSource keyword mask. -1 (default) means all keywords. For non-allowlisted providers (when opted in via unsafeProvider=true) this is clamped to a safer default when left at -1; pass an explicit positive mask to override.")] long keywords = -1,
+        [Description("Event verbosity level (0=LogAlways, 1=Critical, 2=Error, 3=Warning, 4=Informational, 5=Verbose). Defaults to 5. For non-allowlisted providers (when opted in via unsafeProvider=true) this is clamped to Informational unless explicitly set lower.")] int eventLevel = 5,
         [Description("Maximum number of captured events to return. Must be >= 1. Defaults to 200.")] int maxEvents = 200,
         [Description("Verbosity (summary|detail|raw). Default 'summary' drops the Events[] list inline (keeps the Total count and metadata). 'detail' includes Events up to maxEvents. 'raw' is equivalent to detail. The full capture is always retained behind the issued handle — drill in with query_collection(handle, view=byEventName|events).")]
         SamplingDepth depth = SamplingDepth.Summary,
+        [Description("Opt-in switch for non-allowlisted EventSource providers (issue #165 / M2). Only honoured when the server has `Diagnostics:AllowSensitiveHeapValues=true`. Defaults to false; deny path returns an `EventSourceProviderNotAllowed` envelope.")] bool unsafeProvider = false,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(providerName)) return InvalidArg<EventSourceCapture>(nameof(providerName), "is required");
         if (durationSeconds < 1) return InvalidArg<EventSourceCapture>(nameof(durationSeconds), "must be >= 1");
         if (maxEvents < 1) return InvalidArg<EventSourceCapture>(nameof(maxEvents), "must be >= 1");
+
+        // B4 / issue #165 / M2: gate non-curated providers behind the sensitive-value flag.
+        // Custom EventSources frequently log user ids, auth-failure context, etc.
+        var allowedByDefault = allowlist.IsAllowed(providerName);
+        if (!allowedByDefault)
+        {
+            if (!unsafeProvider || !sensitiveGate.IsAllowedByServer)
+            {
+                var preview = string.Join(", ", allowlist.AllowedProviders.Take(8));
+                return DiagnosticResult.Fail<EventSourceCapture>(
+                    $"EventSource provider '{providerName}' is not on the allowlist.",
+                    new DiagnosticError(
+                        "EventSourceProviderNotAllowed",
+                        "Add the provider to `Diagnostics:EventSourceAllowlist` (env: `Diagnostics__EventSourceAllowlist__0=<provider>`), or set `Diagnostics:AllowSensitiveHeapValues=true` on the server AND pass `unsafeProvider=true` per call. Curated allowlist includes: " + preview + (allowlist.AllowedProviders.Count > 8 ? ", …" : "") + ". Tracked by issue #165 (B4); the per-tool scope mechanism in #166 (B5) will replace this flag.",
+                        providerName));
+            }
+
+            // Opt-in path: clamp the dangerous defaults (verbose + every-keyword) so the
+            // capture doesn't accidentally pull every payload field at full verbosity.
+            if (keywords == -1) keywords = 0;
+            if (eventLevel > 4) eventLevel = 4;
+        }
 
         var resolved = await ResolveContextAsync<EventSourceCapture>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
@@ -1378,6 +1418,7 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<DumpInspection>> InspectDump(
         IDumpInspector inspector,
         IDiagnosticHandleStore handles,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Absolute path to a previously-captured .dmp file. Required.")] string dumpFilePath,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower.")] bool includeRetentionPaths = false,
@@ -1385,9 +1426,13 @@ public sealed class DiagnosticTools
         [Description("When true, enumerate every loaded type's static reference fields ranked by directly-referenced object size — surfaces 'singleton that grew forever' leaks. Off by default; adds an extra pass over AppDomains × Modules × Types.")] bool includeStaticFields = false,
         [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
-        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         CancellationToken cancellationToken = default)
     {
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<DumpInspection>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
+
         return await GuardAttachAsync("inspect_dump", processId: null, async () =>
         {
             var snapshot = await inspector.InspectAsync(
@@ -1470,6 +1515,7 @@ public sealed class DiagnosticTools
         IDumpInspector inspector,
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower and lengthens the suspend window.")] bool includeRetentionPaths = false,
@@ -1477,9 +1523,13 @@ public sealed class DiagnosticTools
         [Description("When true, enumerate every loaded type's static reference fields ranked by directly-referenced object size — surfaces 'singleton that grew forever' leaks. Off by default; lengthens the suspend window.")] bool includeStaticFields = false,
         [Description("When true, detect MulticastDelegate instances during the heap walk and group their invocation list by (target type, method) — surfaces 'event handler never unsubscribed' leaks. Cheap (folded into the existing heap pass).")] bool includeDelegateTargets = false,
         [Description("When true, hash every System.String during the heap walk and rank by aggregate retained bytes — surfaces missing string-interning. Cheap (folded into the existing heap pass) but allocates one hash per unique string.")] bool includeDuplicateStrings = false,
-        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path reserved for symbol-resolving heap drilldowns. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         CancellationToken cancellationToken = default)
     {
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<LiveHeapInspection>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
+
         var resolved = await ResolveContextAsync<LiveHeapInspection>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
         var pid = resolved.ProcessId;
@@ -1543,12 +1593,15 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<HeapSnapshotQueryResult>> QueryHeapSnapshot(
         IDiagnosticHandleStore handles,
         IDumpInspector inspector,
+        SensitiveDataRedactor redactor,
+        SensitiveValueGate sensitiveGate,
         [Description("Snapshot handle returned by inspect_dump or inspect_live_heap.")] string handle,
         [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot', 'objsize' or 'async'.")] string view = "top-types",
         [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'async'). Ignored by 'roots-by-kind', 'retention-paths', 'object', 'gcroot' and 'objsize'.")] int topN = 50,
         [Description("For view='top-types': ranking — 'bytes' (default) or 'instances'.")] string rankBy = "bytes",
         [Description("For view='retention-paths': case-insensitive substring matched against TypeFullName to narrow the returned chains.")] string? typeFullName = null,
         [Description("For view='object', 'gcroot' and 'objsize': managed object address (decimal or 0x-prefixed hex).")] string? address = null,
+        [Description("Opt-in to return raw string content / field value previews on the 'duplicate-strings' and 'object' views (issue #165 / H4). Defaults to false — those fields are returned as metadata-only placeholders unless the server enables `Diagnostics:AllowSensitiveHeapValues=true` AND the caller passes `includeSensitiveValues=true`. Any string surfaced even in that mode still runs through the SensitiveDataRedactor (Bearer/PEM/JWT/connection-string/AWS-key patterns).")] bool includeSensitiveValues = false,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<HeapSnapshotQueryResult>(nameof(handle), "is required");
@@ -1563,6 +1616,8 @@ public sealed class DiagnosticTools
                 new NextActionHint("inspect_live_heap", "Re-attach and re-walk to issue a fresh handle.",
                     new Dictionary<string, object?> { ["processId"] = "<pid>" }));
         }
+
+        var emitSensitive = sensitiveGate.ShouldEmit(includeSensitiveValues);
 
         var normalizedView = view.Trim().ToLowerInvariant();
         switch (normalizedView)
@@ -1582,7 +1637,7 @@ public sealed class DiagnosticTools
             case "delegate-targets":
                 return QueryDelegateTargets(snapshot, handle, topN);
             case "duplicate-strings":
-                return QueryDuplicateStrings(snapshot, handle, topN);
+                return QueryDuplicateStrings(snapshot, handle, topN, redactor, emitSensitive);
             case "async":
                 return QueryAsync(snapshot, handle, topN);
             case "object":
@@ -1599,7 +1654,7 @@ public sealed class DiagnosticTools
                     snapshot.Origin == HeapSnapshotOrigin.Live ? snapshot.ProcessId : null,
                     async () => normalizedView switch
                     {
-                        "object" => QueryObject(snapshot, handle, await inspector.InspectObjectAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false)),
+                        "object" => QueryObject(snapshot, handle, await inspector.InspectObjectAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false), redactor, emitSensitive),
                         "gcroot" => QueryGcRoot(snapshot, handle, await inspector.InspectGcRootAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false)),
                         _ => QueryObjectSize(snapshot, handle, await inspector.InspectObjectSizeAsync(snapshot, parsedAddress, cancellationToken).ConfigureAwait(false)),
                     },
@@ -1610,10 +1665,15 @@ public sealed class DiagnosticTools
     }
 
     private static DiagnosticResult<HeapSnapshotQueryResult> QueryObject(
-        HeapSnapshotArtifact snapshot, string handle, HeapObjectInspection inspection)
+        HeapSnapshotArtifact snapshot, string handle, HeapObjectInspection inspection, SensitiveDataRedactor redactor, bool emitSensitive)
     {
         var origin = snapshot.Origin.ToString();
-        var summary = $"Returning object 0x{inspection.Address:x} from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}) — `{inspection.TypeFullName}` ({inspection.Size:N0} bytes, {inspection.Generation}/{inspection.SegmentKind}).";
+        var sanitized = SanitizeObjectInspection(inspection, redactor, emitSensitive);
+        var summary = $"Returning object 0x{sanitized.Address:x} from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}) — `{sanitized.TypeFullName}` ({sanitized.Size:N0} bytes, {sanitized.Generation}/{sanitized.SegmentKind}).";
+        if (!emitSensitive && (inspection.IsString || (inspection.Fields is { Count: > 0 })))
+        {
+            summary += " String/field value previews are redacted (issue #165 / H4); pass includeSensitiveValues=true on a server with Diagnostics:AllowSensitiveHeapValues=true to opt in.";
+        }
         if (snapshot.Origin == HeapSnapshotOrigin.Live)
         {
             summary += " Live-object addresses can move after a GC; re-run inspect_live_heap if this address stops resolving.";
@@ -1621,10 +1681,67 @@ public sealed class DiagnosticTools
 
         var result = new HeapSnapshotQueryResult(handle, "object", origin, snapshot.ProcessId, snapshot.CapturedAt)
         {
-            Address = inspection.Address,
-            ObjectDetails = inspection,
+            Address = sanitized.Address,
+            ObjectDetails = sanitized,
         };
         return DiagnosticResult.Ok(result, summary);
+    }
+
+    // B4 / issue #165 / H4: rewrite an inspector-produced HeapObjectInspection so that
+    // (a) when the sensitive-value gate is closed, every string preview and field value
+    // is replaced with a metadata-only placeholder; (b) when the gate is open, every
+    // string still passes through the redactor pattern set.
+    private static HeapObjectInspection SanitizeObjectInspection(HeapObjectInspection inspection, SensitiveDataRedactor redactor, bool emitSensitive)
+    {
+        IReadOnlyList<HeapObjectField>? fields = inspection.Fields;
+        if (fields is { Count: > 0 })
+        {
+            var sanitizedFields = new List<HeapObjectField>(fields.Count);
+            foreach (var f in fields)
+            {
+                var value = emitSensitive ? (redactor.Redact(f.Value) ?? f.Value) : SensitiveDataRedactor.MetadataOnlyPlaceholder;
+                sanitizedFields.Add(new HeapObjectField(f.Name, f.TypeFullName, value)
+                {
+                    ObjectAddress = f.ObjectAddress,
+                    ReferencedTypeFullName = f.ReferencedTypeFullName,
+                });
+            }
+            fields = sanitizedFields;
+        }
+
+        IReadOnlyList<HeapArrayElement>? array = inspection.ArraySample;
+        if (array is { Count: > 0 })
+        {
+            var sanitizedArray = new List<HeapArrayElement>(array.Count);
+            foreach (var a in array)
+            {
+                var value = emitSensitive ? (redactor.Redact(a.Value) ?? a.Value) : SensitiveDataRedactor.MetadataOnlyPlaceholder;
+                sanitizedArray.Add(new HeapArrayElement(a.Index, a.TypeFullName, value)
+                {
+                    ObjectAddress = a.ObjectAddress,
+                    ReferencedTypeFullName = a.ReferencedTypeFullName,
+                });
+            }
+            array = sanitizedArray;
+        }
+
+        string? stringValue = inspection.StringValue;
+        if (inspection.IsString)
+        {
+            stringValue = emitSensitive ? redactor.Redact(stringValue) : SensitiveDataRedactor.MetadataOnlyPlaceholder;
+        }
+
+        return new HeapObjectInspection(inspection.Address, inspection.TypeFullName, inspection.Size, inspection.SegmentKind, inspection.Generation)
+        {
+            IsArray = inspection.IsArray,
+            ArrayLength = inspection.ArrayLength,
+            ArraySample = array,
+            IsString = inspection.IsString,
+            StringValue = stringValue,
+            StringValueTruncated = inspection.StringValueTruncated,
+            Fields = fields,
+            Warnings = inspection.Warnings,
+        };
     }
 
     private static DiagnosticResult<HeapSnapshotQueryResult> QueryGcRoot(
@@ -1823,7 +1940,7 @@ public sealed class DiagnosticTools
     }
 
     private static DiagnosticResult<HeapSnapshotQueryResult> QueryDuplicateStrings(
-        HeapSnapshotArtifact snapshot, string handle, int topN)
+        HeapSnapshotArtifact snapshot, string handle, int topN, SensitiveDataRedactor redactor, bool emitSensitive)
     {
         var origin = snapshot.Origin.ToString();
         if (snapshot.DuplicateStrings is null)
@@ -1832,10 +1949,28 @@ public sealed class DiagnosticTools
                 $"Snapshot '{handle}' was captured without duplicate-string aggregation.",
                 new DiagnosticError("ViewNotCaptured", "Re-run inspect_dump / inspect_live_heap with includeDuplicateStrings=true.", handle));
         }
-        var slice = snapshot.DuplicateStrings.Take(topN).ToArray();
+        // B4 / issue #165 / H4: previews routinely contain secrets. Default to metadata-only
+        // (StringLength + InstanceCount + TotalBytes survive — they're enough to identify
+        // string-interning opportunities). When the caller opts in and the server gate is
+        // open, redact known secret shapes before returning the preview.
+        var slice = snapshot.DuplicateStrings.Take(topN).Select(s =>
+        {
+            string preview;
+            if (emitSensitive)
+            {
+                preview = redactor.Redact(s.Preview) ?? s.Preview;
+            }
+            else
+            {
+                preview = SensitiveDataRedactor.MetadataOnlyPlaceholder;
+            }
+            return new DuplicateStringStat(preview, s.StringLength, s.InstanceCount, s.TotalBytes, s.PreviewTruncated);
+        }).ToArray();
         var summary = slice.Length == 0
             ? $"Snapshot '{handle}' has no duplicated System.String contents."
-            : $"Returning {slice.Length} duplicated string(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top waste: `{slice[0].Preview}` — {slice[0].InstanceCount:N0} copies, {slice[0].TotalBytes:N0} bytes. Consider string.Intern() / a cache for the hottest entries.";
+            : (emitSensitive
+                ? $"Returning {slice.Length} duplicated string(s) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top waste: {slice[0].InstanceCount:N0} copies, {slice[0].TotalBytes:N0} bytes (length {slice[0].StringLength}). Previews pass through the SensitiveDataRedactor (Bearer/PEM/JWT/conn-string patterns) — consider string.Intern() / a cache for the hottest entries."
+                : $"Returning {slice.Length} duplicated string(s) (metadata-only — string previews redacted per issue #165 / H4) from snapshot '{handle}' ({origin}, pid {snapshot.ProcessId}). Top waste: {slice[0].InstanceCount:N0} copies, {slice[0].TotalBytes:N0} bytes (length {slice[0].StringLength}). Pass includeSensitiveValues=true on a server with Diagnostics:AllowSensitiveHeapValues=true to reveal previews.");
         var result = new HeapSnapshotQueryResult(handle, "duplicate-strings", origin, snapshot.ProcessId, snapshot.CapturedAt)
         {
             DuplicateStrings = slice,
@@ -1887,12 +2022,13 @@ public sealed class DiagnosticTools
         IThreadSnapshotInspector inspector,
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
+        SymbolServerAllowlist symbolServerAllowlist,
         [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath. Optional — when both processId and dumpFilePath are null/empty the server auto-selects a live .NET process.")] int? processId = null,
         [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
         [Description("Maximum stack frames captured per thread. Defaults to 64.")] int maxFramesPerThread = 64,
         [Description("Include runtime frames (PInvoke trampolines, etc.) without an associated managed method. Off by default.")] bool includeRuntimeFrames = false,
         [Description("Include pure native frames where ClrMD cannot resolve a method. Off by default.")] bool includeNativeFrames = false,
-        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory.")] string? symbolPath = null,
+        [Description("Optional NT_SYMBOL_PATH-style search path forwarded to symbol-resolving backends. Precedence: symbolPath > MCP_SYMBOL_PATH > _NT_SYMBOL_PATH > target MainModule directory. **Remote symbol servers are OFF by default (issue #165 / M3)** — any `srv*http(s)://…` segment must point at a host on `Diagnostics:SymbolServerAllowlist`.")] string? symbolPath = null,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns only the top-3 blocked threads inline and drops the SyncBlock lock-graph (use query_thread_snapshot(view=lock-graph) for the full graph). 'detail' returns the historical top-25 threads + top-25 locks. 'raw' is equivalent to detail. The full snapshot is always retained behind the issued handle.")]
         SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
@@ -1905,6 +2041,10 @@ public sealed class DiagnosticTools
         }
         if (maxFramesPerThread < 1) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), "must be >= 1");
         if (maxFramesPerThread > ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), $"must be <= {ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap} (bounds the live-attach suspend window)");
+
+        // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
+        var symbolDenial = ValidateSymbolPath<ThreadSnapshotQueryResult>(symbolServerAllowlist, symbolPath);
+        if (symbolDenial is not null) return symbolDenial;
 
         int livePid = 0;
         ProcessContext? liveCtx = null;
@@ -2702,6 +2842,26 @@ public sealed class DiagnosticTools
             $"Argument '{parameterName}' {requirement}.",
             new DiagnosticError("InvalidArgument", $"Argument '{parameterName}' {requirement}.", parameterName),
             new NextActionHint("get_diagnostic_capabilities", "Re-issue with valid arguments. See tool schema for ranges and defaults."));
+
+    /// <summary>
+    /// B4 / issue #165 / M3 helper: returns a denial envelope when the caller-supplied
+    /// <paramref name="symbolPath"/> references a remote symbol-server host that is not on
+    /// the configured allowlist. Returns <c>null</c> when the path is allowed (local path,
+    /// empty/null, or remote host on the allowlist) so the caller can early-return only on
+    /// denial. Must be invoked from every tool that forwards a caller-supplied
+    /// <c>symbolPath</c> into a SymbolReader / native symbolicator backend.
+    /// </summary>
+    private static DiagnosticResult<T>? ValidateSymbolPath<T>(SymbolServerAllowlist allowlist, string? symbolPath)
+    {
+        var validation = allowlist.Validate(symbolPath);
+        if (validation.IsAllowed) return null;
+        return DiagnosticResult.Fail<T>(
+            $"symbolPath references remote symbol server host '{validation.DeniedHost}' which is not on the allowlist.",
+            new DiagnosticError(
+                "SymbolServerNotAllowed",
+                "Remote symbol servers are denied by default. Add the host to `Diagnostics:SymbolServerAllowlist` (env: `Diagnostics__SymbolServerAllowlist__0=<host>`) or drop the `srv*http(s)://…` segment and rely on the local symbol cache. Tracked by issue #165.",
+                validation.DeniedSegment));
+    }
 
     /// <summary>
     /// Wraps a tool body that attaches to a live process via ClrMD / EventPipe / dotnet-diagnostics

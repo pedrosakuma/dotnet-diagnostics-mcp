@@ -34,7 +34,7 @@ builder.Logging.AddSimpleConsole(o =>
 });
 
 var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.McpSymbolPathEnvironmentVariable);
-builder.Services.AddDiagnosticCoreServices(configuredSymbolPath);
+builder.Services.AddDiagnosticCoreServices(configuredSymbolPath, builder.Configuration);
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.StaleBinaryWatcher>();
 var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Configuration);
 
@@ -103,7 +103,7 @@ static async Task<int> RunStdioAsync(string[] args)
     });
 
     var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.McpSymbolPathEnvironmentVariable);
-    hostBuilder.Services.AddDiagnosticCoreServices(configuredSymbolPath);
+    hostBuilder.Services.AddDiagnosticCoreServices(configuredSymbolPath, hostBuilder.Configuration);
     var orchestratorEnabled = hostBuilder.Services.AddOrchestratorServices(hostBuilder.Configuration);
 
     ILoggerFactory? stdioLoggerFactoryHolder = null;

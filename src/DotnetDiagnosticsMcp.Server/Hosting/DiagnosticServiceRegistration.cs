@@ -7,6 +7,7 @@ using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
+using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Symbols;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
@@ -29,9 +30,19 @@ internal static class DiagnosticServiceRegistration
     /// Registers every Core collector / planner / store the tool layer depends on. Idempotent
     /// per IServiceCollection; safe to call from both WebApplicationBuilder and HostApplicationBuilder.
     /// </summary>
-    public static IServiceCollection AddDiagnosticCoreServices(this IServiceCollection services, string? configuredSymbolPath = null)
+    public static IServiceCollection AddDiagnosticCoreServices(this IServiceCollection services, string? configuredSymbolPath = null, IConfiguration? configuration = null)
     {
         ArgumentNullException.ThrowIfNull(services);
+
+        // B4 security gates (issue #165). Bound from the `Diagnostics` configuration
+        // section; B5 (issue #166) will retrofit these into the per-tool scope system.
+        var securityOptions = new SecurityOptions();
+        configuration?.GetSection(SecurityOptions.SectionName).Bind(securityOptions);
+        services.AddSingleton(securityOptions);
+        services.AddSingleton<SensitiveDataRedactor>(_ => new SensitiveDataRedactor(securityOptions));
+        services.AddSingleton<SensitiveValueGate>(_ => new SensitiveValueGate(securityOptions));
+        services.AddSingleton<EventSourceAllowlist>(_ => new EventSourceAllowlist(securityOptions));
+        services.AddSingleton<SymbolServerAllowlist>(_ => new SymbolServerAllowlist(securityOptions));
 
         services.AddSingleton(new SymbolPathBuilder(configuredSymbolPath));
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Artifacts.IArtifactRootProvider, DotnetDiagnosticsMcp.Core.Artifacts.EnvironmentArtifactRootProvider>();

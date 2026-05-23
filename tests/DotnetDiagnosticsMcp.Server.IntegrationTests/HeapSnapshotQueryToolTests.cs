@@ -1,4 +1,5 @@
 using DotnetDiagnosticsMcp.Core.Drilldown;
+using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
@@ -22,7 +23,7 @@ public sealed class HeapSnapshotQueryToolTests
             },
         };
 
-        var result = await DiagnosticTools.QueryHeapSnapshot(store, inspector, handle.Id, view: "object", address: "0x1234");
+        var result = await DiagnosticTools.QueryHeapSnapshot(store, inspector, new SensitiveDataRedactor(null), new SensitiveValueGate(null), handle.Id, view: "object", address: "0x1234");
 
         result.Error.Should().BeNull();
         result.Data.Should().NotBeNull();
@@ -45,7 +46,7 @@ public sealed class HeapSnapshotQueryToolTests
             ], Truncated: false),
         };
 
-        var result = await DiagnosticTools.QueryHeapSnapshot(store, inspector, handle.Id, view: "gcroot", address: "4660");
+        var result = await DiagnosticTools.QueryHeapSnapshot(store, inspector, new SensitiveDataRedactor(null), new SensitiveValueGate(null), handle.Id, view: "gcroot", address: "4660");
 
         result.Error.Should().BeNull();
         result.Data.Should().NotBeNull();
@@ -65,7 +66,7 @@ public sealed class HeapSnapshotQueryToolTests
             ObjectSizeInspection = new HeapObjectSizeInspection(0x1234, "System.Byte[]", 4096, 3, Truncated: false),
         };
 
-        var result = await DiagnosticTools.QueryHeapSnapshot(store, inspector, handle.Id, view: "objsize", address: "0x1234");
+        var result = await DiagnosticTools.QueryHeapSnapshot(store, inspector, new SensitiveDataRedactor(null), new SensitiveValueGate(null), handle.Id, view: "objsize", address: "0x1234");
 
         result.Error.Should().BeNull();
         result.Data.Should().NotBeNull();

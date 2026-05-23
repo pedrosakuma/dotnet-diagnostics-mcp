@@ -271,7 +271,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`collect_activities`](#collect_activities) | window-bound | no | ✅ | EventPipe session |
 | [`collect_event_source`](#collect_event_source) | window-bound | no | ⚠️ provider must be embedded at publish | EventPipe session |
 | `collect_thread_snapshot` / `query_thread_snapshot` | seconds | no | ✅ via `linux-native-stack` / `etw-native-stack` | ptrace attach (Linux) / kernel logger (Windows) |
-| `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap |
+| `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap (heap drilldown values metadata-only by default — see [Security gates](#security-gates-b4)) |
 | [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | ✅ (native dump) | **writes a dump file to disk** |
 | [`capture_method_bytes`](#capture_method_bytes) | cheap | **yes** | ❌ (use `dotnet-native-mcp.disassemble`) | reads JIT code-heap |
 | `list_pods` (orchestrator) | cheap | n/a | n/a | Kubernetes `pods.list` only — **opt-in**, registered only when `Orchestrator:Enabled=true` |
@@ -525,7 +525,7 @@ top-N hotspots by inclusive and exclusive sample counts.
 | `durationSeconds` | `int` | `10` | Sampling window. ≥ 1. |
 | `topN` | `int` | `25` | Maximum hotspots returned. ≥ 1. |
 | `resolveSourceLines` | `bool` | `true` | Resolve top hotspots to source file:line via PDB / SourceLink. |
-| `symbolPath` | `string?` | `null` | Optional symbol search path used when `resolveSourceLines=true`. |
+| `symbolPath` | `string?` | `null` | Optional symbol search path used when `resolveSourceLines=true`. **Remote symbol servers are denied by default** (issue #165 / M3): any `srv*http(s)://…` segment must point at a host listed under `Diagnostics:SymbolServerAllowlist`, otherwise the call fails with a `SymbolServerNotAllowed` envelope. Local paths always pass through. See [Security gates](#security-gates-b4). |
 | `maxResolvedSources` | `int?` | `topN` | Cap on how many hotspots get source resolution. |
 | `resolveMethodInstantiations` | `bool` | `false` | Opt-in ClrMD attach after sampling to recover closed generic method signatures for the hottest managed frames. CoreCLR only; on Linux requires `CAP_SYS_PTRACE` (or `ptrace_scope=0`) and briefly suspends the target. |
 | `maxResolvedMethodInstantiations` | `int?` | `topN` | Cap on how many hotspots get ClrMD generic-instantiation enrichment. |
@@ -880,11 +880,12 @@ name and captures the events it emits in the window. Use for HTTP activity
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `processId` | `int` | — | Target process id |
-| `providerName` | `string` | — | EventSource provider name |
+| `providerName` | `string` | — | EventSource provider name. **Must be on the curated allowlist** (issue #165 / M2) — see [Security gates](#security-gates-b4); the deny path returns an `EventSourceProviderNotAllowed` envelope listing the curated set. |
 | `durationSeconds` | `int` | `10` | Window length |
-| `keywords` | `long` | `-1` | Keyword mask. `-1` = all |
-| `eventLevel` | `int` | `5` | 0=LogAlways…5=Verbose |
+| `keywords` | `long` | `-1` | Keyword mask. `-1` = all (clamped to `0` for opt-in non-allowlisted providers when left at `-1`). |
+| `eventLevel` | `int` | `5` | 0=LogAlways…5=Verbose (clamped to `4` for opt-in non-allowlisted providers when left above `4`). |
 | `maxEvents` | `int` | `200` | Cap on captured events |
+| `unsafeProvider` | `bool` | `false` | Opt-in for non-allowlisted providers (issue #165 / M2). Only honoured when the server has `Diagnostics:AllowSensitiveHeapValues=true`. |
 
 **Returns:** `EventSourceCapture`:
 
@@ -1016,3 +1017,71 @@ attach.
 **Side effects:** writes one `.bin` file per region (Hot, plus Cold when the
 JIT split the method). Suspend window on live attach is typically < 100 ms.
 **NativeAOT/R2R targets are rejected** with an explanatory error envelope.
+
+---
+
+## Security gates (B4)
+
+Issue #165 introduced three opt-in security gates that change the default behaviour of
+`query_heap_snapshot`, `collect_event_source` and `collect_cpu_sample`. All three are bound
+from the `Diagnostics:` configuration section and can be set via env vars
+(`Diagnostics__AllowSensitiveHeapValues=true`, `Diagnostics__EventSourceAllowlist__0=…`,
+`Diagnostics__SymbolServerAllowlist__0=msdl.microsoft.com`).
+
+### H4 — heap drilldown defaults to metadata-only
+
+`query_heap_snapshot` with `view=duplicate-strings` and `view=object` no longer returns raw
+string previews or field/array element values by default. Instead each value site is replaced
+with `<redacted:metadata-only>` and the LLM gets length / type / address metadata only.
+
+To opt-in:
+
+1. set `Diagnostics:AllowSensitiveHeapValues=true` on the server, **and**
+2. pass `includeSensitiveValues=true` on the per-call invocation.
+
+When both are present the values flow through `SensitiveDataRedactor`, which replaces any
+substring matching the default patterns (Bearer/Basic tokens, JWT-shaped triples,
+`password=`/`secret=`/`api_key=` query-string syntax, AWS access keys, GitHub PATs, PEM
+blocks) with `<redacted:sensitive>`. Add custom patterns via
+`Diagnostics:RedactionPatterns[]`.
+
+The `heap-snapshot://` MCP resource projection is **always metadata-only** — it has no
+per-call opt-in surface, so the server flag alone cannot unlock raw values through that
+path. Operators who need the redacted-but-present view should call
+`query_heap_snapshot view=duplicate-strings includeSensitiveValues=true` (which honours
+both gates).
+
+### M2 — `collect_event_source` provider allowlist
+
+Arbitrary user-defined EventSource providers were the easiest way for an attacker who
+gained MCP access to siphon application-defined logging (which routinely contains tokens,
+PII, SQL parameters). The tool now refuses any `providerName` that is not on the curated
+default allowlist (System.Net.Http, Microsoft.AspNetCore.Hosting,
+Microsoft-AspNetCore-Server-Kestrel, Microsoft-Extensions-Logging,
+Microsoft-Windows-DotNETRuntime, System.Threading.Tasks.TplEventSource, …) or under
+`Diagnostics:EventSourceAllowlist[]`.
+
+To capture a custom provider:
+
+- add it to `Diagnostics:EventSourceAllowlist[]` (preferred — survives across calls), or
+- set `Diagnostics:AllowSensitiveHeapValues=true` on the server **and** pass
+  `unsafeProvider=true` on the call. On that path `keywords=-1` is clamped to `0` and
+  `eventLevel>4` is clamped to `Informational` unless the caller passed explicit safer values.
+
+### M3 — symbol-server SSRF guard
+
+`symbolPath` historically accepted any `srv*http(s)://…` segment, which let a malicious
+caller turn the sidecar into an outbound HTTP client to any host on the cluster network.
+Caller-supplied `symbolPath` values are now parsed and every `srv*` / `symsrv*` segment's
+`http://` / `https://` URL must host-match `Diagnostics:SymbolServerAllowlist[]`. Local
+filesystem paths and bare directory entries always pass through. The deny path returns a
+`SymbolServerNotAllowed` envelope. Tools covered:
+
+- `collect_cpu_sample`
+- `collect_off_cpu_sample`
+- `collect_thread_snapshot`
+- `inspect_dump`
+- `inspect_live_heap`
+
+`MCP_SYMBOL_PATH` and `_NT_SYMBOL_PATH` from the **operator-set environment** are *not*
+validated — they are treated as trusted by the deployment.
