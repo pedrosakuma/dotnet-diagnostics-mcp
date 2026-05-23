@@ -201,6 +201,71 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Proxy_AdminBypass_AllowsCrossSessionCaller_WhenAllowCrossSessionAdminTrue()
+    {
+        // H6 + AllowCrossSessionAdmin: when the deployment opts into admin mode
+        // (operator / central orchestrator topology), the owner-session check is
+        // bypassed and the proxy forwards regardless of Mcp-Session-Id mismatch.
+        await DisposeAsync();
+        await InitializeAdminAsync();
+
+        _store.Add(NewHandleOwned("inv_admin", "owner-A", "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/proxy/inv_admin/mcp")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Add("Mcp-Session-Id", "owner-B");
+
+        var response = await _client.SendAsync(req);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull("admin mode must forward cross-session traffic");
+    }
+
+    private async Task InitializeAdminAsync()
+    {
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureWebHost(web =>
+        {
+            web.UseTestServer();
+            web.ConfigureServices(services =>
+            {
+                _store = new StubInvestigationStore();
+                _upstream = new CapturingUpstream();
+                _manager = new StubPortForwardManager(_upstream);
+                var opts = new OrchestratorOptions
+                {
+                    Enabled = true,
+                    ProxyBasePath = "/proxy",
+                    ProxyPodPort = 5130,
+                    AllowCrossSessionAdmin = true,
+                };
+                services.AddSingleton(opts);
+                services.AddSingleton<IInvestigationStore>(_store);
+                services.AddSingleton<IPortForwardManager>(_manager);
+                services.AddLogging();
+                services.AddRouting();
+                services.AddRateLimiter(o =>
+                {
+                    o.AddPolicy(InvestigationProxyEndpoints.RateLimiterPolicyName, _ =>
+                        System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("test"));
+                });
+            });
+            web.Configure(app =>
+            {
+                app.UseRouting();
+                app.UseRateLimiter();
+                app.UseEndpoints(e => e.MapInvestigationProxy());
+            });
+        });
+        _host = await builder.StartAsync();
+        _server = _host.GetTestServer();
+        _client = _server.CreateClient();
+    }
+
+    [Fact]
     public async Task Proxy_RejectsAnonymousCaller_WhenHandleHasOwner()
     {
         // H6: handle has an owner, caller omits the Mcp-Session-Id header entirely.

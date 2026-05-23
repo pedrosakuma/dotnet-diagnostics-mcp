@@ -153,7 +153,12 @@ internal static class InvestigationProxyEndpoints
         // session id in the Mcp-Session-Id header; we compare it to the handle's
         // OwnerSessionId. Handles minted without an owner (stdio attach, framework
         // calls with no session id) remain reachable by every authenticated caller.
-        if (handle.OwnerSessionId is not null)
+        // When the deployment has explicitly opted into AllowCrossSessionAdmin
+        // (Helm: orchestrator.allowCrossSessionAdmin=true), the check is bypassed
+        // — this is the operator/central-orchestrator topology where a single
+        // bearer is authoritative across MCP sessions.
+        var orchOptions = context.RequestServices.GetRequiredService<OrchestratorOptions>();
+        if (handle.OwnerSessionId is not null && !orchOptions.AllowCrossSessionAdmin)
         {
             var caller = ExtractCallerSessionId(context.Request);
             if (!string.Equals(caller, handle.OwnerSessionId, StringComparison.Ordinal))
