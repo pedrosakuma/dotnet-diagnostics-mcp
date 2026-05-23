@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
+using DotnetDiagnosticsMcp.Server.Security;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Server;
@@ -26,6 +27,7 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 [McpServerToolType]
 public sealed class OrchestratorTools
 {
+    [RequireScope("orchestrator-list")]
     [McpServerTool(
         Name = "list_pods",
         Title = "List candidate Pods for diagnostic attach",
@@ -135,6 +137,7 @@ public sealed class OrchestratorTools
             "Re-run with corrected arguments."),
     };
 
+    [RequireScope("orchestrator-attach")]
     [McpServerTool(
         Name = "attach_to_pod",
         Title = "Attach a diagnostic ephemeral container to a Pod",
@@ -321,6 +324,7 @@ public sealed class OrchestratorTools
                   .GetProperty("SessionId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                   ?.GetValue(server) as string;
 
+    [RequireScope("orchestrator-attach")]
     [McpServerTool(
         Name = "detach_from_pod",
         Title = "Close an active investigation handle",
@@ -341,6 +345,7 @@ public sealed class OrchestratorTools
         IInvestigationSessionBinder sessionBinder,
         IInvestigationStore store,
         OrchestratorOptions options,
+        IPrincipalAccessor principalAccessor,
         McpServer server,
         [Description("Investigation handle id returned by attach_to_pod. When omitted, defaults to the handle currently bound to this MCP session.")]
         string? handleId = null,
@@ -372,16 +377,18 @@ public sealed class OrchestratorTools
                     "Call list_active_investigations to enumerate known handles, then re-run detach_from_pod with an explicit handleId."));
         }
 
-        // B3 review (issue #164): require owner-session match before closing.
-        // Without this any authenticated caller who learns a handle id (e.g. via
-        // logs, a previous share, brute-forcing) could DoS another session's
-        // investigation. Unknown handles are still no-ops (idempotent close)
-        // and don't leak existence beyond what the caller already knows.
+        // B3 (issue #164): require owner-session match before closing — without this any
+        // authenticated caller who learns a handle id could DoS another session's
+        // investigation. B5.2 (RFC 0001 §2.7) adds an additive escape hatch: bearer
+        // principals holding 'orchestrator-admin' bypass the owner check, mirroring the
+        // deployment-wide AllowCrossSessionAdmin flag but scoped per-bearer.
+        var hasAdminScope = principalAccessor.Current?.HasExplicitScope("orchestrator-admin") == true;
         var existing = store.GetById(resolvedHandleId);
         if (existing is not null &&
             existing.OwnerSessionId is not null &&
             !string.Equals(existing.OwnerSessionId, sessionId, StringComparison.Ordinal) &&
-            !options.AllowCrossSessionAdmin)
+            !options.AllowCrossSessionAdmin &&
+            !hasAdminScope)
         {
             return DiagnosticResult.Fail<DetachResult>(
                 summary: $"detach_from_pod: handle '{resolvedHandleId}' is owned by a different MCP session.",
@@ -426,6 +433,7 @@ public sealed class OrchestratorTools
                 "Re-attach with attach_to_pod if you need to continue investigating the same Pod."));
     }
 
+    [RequireScope("orchestrator-attach")]
     [McpServerTool(
         Name = "list_active_investigations",
         Title = "List investigation handles known to the orchestrator",
@@ -444,6 +452,7 @@ public sealed class OrchestratorTools
     public static Task<DiagnosticResult<InvestigationListPage>> ListActiveInvestigations(
         IInvestigationStore store,
         OrchestratorOptions options,
+        IPrincipalAccessor principalAccessor,
         McpServer? server = null,
         [Description("When true, includes handles in terminal states (Closed/Expired/Failed). Default false — only Active/Attaching.")]
         bool includeTerminal = false,
@@ -463,7 +472,11 @@ public sealed class OrchestratorTools
         // handles created on the same un-scoped transport, so the secure
         // behavior degrades sensibly.
         var callerSessionId = TryGetServerSessionId(server!);
-        var adminListing = includeAllSessions && options.AllowCrossSessionAdmin;
+        // B5.2 (RFC 0001 §2.7): admin listing requires EITHER the legacy
+        // AllowCrossSessionAdmin deployment flag OR the per-bearer
+        // 'orchestrator-admin' modifier scope. Both are operator-grade.
+        var hasAdminScope = principalAccessor.Current?.HasExplicitScope("orchestrator-admin") == true;
+        var adminListing = includeAllSessions && (options.AllowCrossSessionAdmin || hasAdminScope);
 
         // B3 review (issue #164): when not in admin mode, counts and TotalKnown
         // must be computed over the *visible* set only. Returning a global

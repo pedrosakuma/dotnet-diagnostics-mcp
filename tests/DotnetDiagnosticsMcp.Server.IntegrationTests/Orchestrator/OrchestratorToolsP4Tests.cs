@@ -42,7 +42,8 @@ public sealed class OrchestratorToolsP4Tests
         fx.Binder.Bind("sess-a", h.HandleId);
 
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
+            fx.Closer, fx.Binder, fx.Store, fx.Options,
+            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         result.Data.Should().NotBeNull();
@@ -58,7 +59,8 @@ public sealed class OrchestratorToolsP4Tests
     {
         var fx = new Fixture();
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: "missing");
+            fx.Closer, fx.Binder, fx.Store, fx.Options,
+            TestPrincipalAccessors.Root, server: null!, handleId: "missing");
 
         result.IsError.Should().BeFalse();
         result.Data!.Found.Should().BeFalse();
@@ -70,7 +72,8 @@ public sealed class OrchestratorToolsP4Tests
     {
         var fx = new Fixture();
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: null);
+            fx.Closer, fx.Binder, fx.Store, fx.Options,
+            TestPrincipalAccessors.Root, server: null!, handleId: null);
 
         result.IsError.Should().BeFalse();
         result.Data!.HandleId.Should().BeEmpty();
@@ -88,7 +91,8 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(h);
 
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
+            fx.Closer, fx.Binder, fx.Store, fx.Options,
+            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         result.Data!.AlreadyTerminal.Should().BeTrue();
@@ -106,7 +110,8 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(h);
 
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
+            fx.Closer, fx.Binder, fx.Store, fx.Options,
+            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -121,7 +126,8 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(h);
 
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
+            fx.Closer, fx.Binder, fx.Store, fx.Options,
+            TestPrincipalAccessors.Root, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         fx.Store.GetById(h.HandleId)!.State.Should().Be(InvestigationState.Closed);
@@ -140,7 +146,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(Active("expired-1") with { State = InvestigationState.Expired });
         fx.Store.Add(Active("failed-1") with { State = InvestigationState.Failed });
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root);
 
         result.IsError.Should().BeFalse();
         result.Data.Should().NotBeNull();
@@ -161,7 +167,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(Active("active-1"));
         fx.Store.Add(Active("closed-1") with { State = InvestigationState.Closed });
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, includeTerminal: true);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root, includeTerminal: true);
 
         result.IsError.Should().BeFalse();
         result.Data!.Items.Should().HaveCount(2);
@@ -174,7 +180,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(Active("active-1"));
         fx.Store.Add(Active("attaching-1") with { State = InvestigationState.Attaching });
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root);
 
         var activeItem = result.Data!.Items.Single(i => i.HandleId == "active-1");
         var attachingItem = result.Data.Items.Single(i => i.HandleId == "attaching-1");
@@ -188,7 +194,7 @@ public sealed class OrchestratorToolsP4Tests
         var fx = new Fixture();
         fx.Store.Add(Active("h"));
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, includeTerminal: true);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root, includeTerminal: true);
 
         var json = System.Text.Json.JsonSerializer.Serialize(result.Data);
         json.Should().NotContain("secret"); // PodLocalBearerToken value
@@ -205,7 +211,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(Active("middle", attachedAt: t0.AddMinutes(10)));
         fx.Store.Add(Active("newest", attachedAt: t0.AddMinutes(20)));
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root);
 
         result.Data!.Items.Select(i => i.HandleId).Should().Equal("newest", "middle", "oldest");
     }
@@ -221,7 +227,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(Active("a2") with { OwnerSessionId = "sess-other", State = InvestigationState.Attaching });
         fx.Store.Add(Active("c1") with { OwnerSessionId = "sess-other", State = InvestigationState.Closed });
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, server: null!, includeTerminal: true);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root, server: null!, includeTerminal: true);
 
         result.IsError.Should().BeFalse();
         result.Data!.TotalKnown.Should().Be(0);
@@ -238,7 +244,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(Active("a1") with { OwnerSessionId = "sess-other" });
         fx.Store.Add(Active("a2") with { OwnerSessionId = "sess-other", State = InvestigationState.Closed });
 
-        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, server: null!, includeTerminal: true, includeAllSessions: true);
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, TestPrincipalAccessors.Root, server: null!, includeTerminal: true, includeAllSessions: true);
 
         result.IsError.Should().BeFalse();
         result.Data!.TotalKnown.Should().Be(2);

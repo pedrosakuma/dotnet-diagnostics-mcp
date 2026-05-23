@@ -20,6 +20,7 @@ public sealed class CollectCpuSampleSecurityTests
         var result = await DiagnosticTools.CollectCpuSample(
             sampler, store, jobs, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             processId: 4242,
             durationSeconds: 1,
             resolveSourceLines: true,
@@ -41,6 +42,7 @@ public sealed class CollectCpuSampleSecurityTests
         var result = await DiagnosticTools.CollectCpuSample(
             sampler, store, jobs, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(options),
+            TestPrincipalAccessors.Root,
             processId: 4242,
             durationSeconds: 1,
             resolveSourceLines: true,
@@ -60,6 +62,7 @@ public sealed class CollectCpuSampleSecurityTests
         var result = await DiagnosticTools.CollectCpuSample(
             sampler, store, jobs, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             processId: 4242,
             durationSeconds: 1,
             resolveSourceLines: true,

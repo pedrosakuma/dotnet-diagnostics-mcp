@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
+using DotnetDiagnosticsMcp.Server.Security;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -158,7 +159,10 @@ internal static class InvestigationProxyEndpoints
         // — this is the operator/central-orchestrator topology where a single
         // bearer is authoritative across MCP sessions.
         var orchOptions = context.RequestServices.GetRequiredService<OrchestratorOptions>();
-        if (handle.OwnerSessionId is not null && !orchOptions.AllowCrossSessionAdmin)
+        // B5.2 (RFC 0001 §2.7): also accept the per-bearer 'orchestrator-admin' modifier
+        // scope. The deployment-wide AllowCrossSessionAdmin flag keeps working byte-for-byte.
+        var principalIsAdmin = context.GetBearerPrincipal()?.HasExplicitScope("orchestrator-admin") == true;
+        if (handle.OwnerSessionId is not null && !orchOptions.AllowCrossSessionAdmin && !principalIsAdmin)
         {
             var caller = ExtractCallerSessionId(context.Request);
             if (!string.Equals(caller, handle.OwnerSessionId, StringComparison.Ordinal))
