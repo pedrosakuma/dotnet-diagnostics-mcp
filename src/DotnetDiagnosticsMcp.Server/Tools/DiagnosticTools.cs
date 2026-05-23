@@ -20,6 +20,7 @@ using DotnetDiagnosticsMcp.Core.OffCpu;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Threads;
+using DotnetDiagnosticsMcp.Server.Security;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -36,6 +37,7 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 [McpServerToolType]
 public sealed class DiagnosticTools
 {
+    [RequireScope("read-counters")]
     [McpServerTool(
         Name = "list_dotnet_processes",
         Title = "List local .NET processes",
@@ -68,6 +70,7 @@ public sealed class DiagnosticTools
                 new Dictionary<string, object?> { ["processId"] = processes[0].ProcessId }));
     }
 
+    [RequireScope("read-counters")]
     [McpServerTool(
         Name = "get_process_info",
         Title = "Get .NET process info",
@@ -106,6 +109,7 @@ public sealed class DiagnosticTools
         return WithContext(result, resolved.Context);
     }
 
+    [RequireScope("read-counters")]
     [McpServerTool(
         Name = "get_diagnostic_capabilities",
         Title = "Detect diagnostic capabilities",
@@ -153,6 +157,7 @@ public sealed class DiagnosticTools
         }
     }
 
+    [RequireScope("read-counters")]
     [McpServerTool(
         Name = "get_container_signals",
         Title = "Read cgroup v2 container signals (CPU throttling, memory, PSI)",
@@ -259,6 +264,7 @@ public sealed class DiagnosticTools
         };
     }
 
+    [RequireScope("read-counters")]
     [McpServerTool(
         Name = "get_memory_trend",
         Title = "Sample process memory growth over a window",
@@ -344,6 +350,7 @@ public sealed class DiagnosticTools
         return WithContext(ok, context);
     }
 
+    [RequireScope("read-counters")]
     [McpServerTool(
         Name = "snapshot_counters",
         Title = "Snapshot EventCounters",
@@ -431,6 +438,7 @@ public sealed class DiagnosticTools
         return WithContext(ok, resolved.Context);
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_cpu_sample",
         Title = "Collect CPU sample",
@@ -453,6 +461,7 @@ public sealed class DiagnosticTools
         DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
         IProcessContextResolver resolver,
         SymbolServerAllowlist symbolServerAllowlist,
+        IPrincipalAccessor principalAccessor,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of hotspots to return. Must be >= 1. Defaults to 25.")] int topN = 25,
@@ -477,7 +486,7 @@ public sealed class DiagnosticTools
         // surface. Default deny; operators allowlist hosts via Diagnostics:SymbolServerAllowlist.
         if (resolveSourceLines)
         {
-            var symbolDenial = ValidateSymbolPath<CpuSample>(symbolServerAllowlist, symbolPath);
+            var symbolDenial = ValidateSymbolPath<CpuSample>(symbolServerAllowlist, symbolPath, principalAccessor);
             if (symbolDenial is not null) return symbolDenial;
         }
 
@@ -565,6 +574,7 @@ public sealed class DiagnosticTools
         return WithContext(ok, ctx);
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_allocation_sample",
         Title = "Collect allocation sample",
@@ -643,6 +653,7 @@ public sealed class DiagnosticTools
         return WithContext(ok, ctx);
     }
 
+    [RequireScope("investigation-export")]
     [McpServerTool(
         Name = "get_call_tree",
         Title = "Drill into CPU sample call tree",
@@ -705,6 +716,7 @@ public sealed class DiagnosticTools
                 new Dictionary<string, object?> { ["handle"] = handle, ["rootMethodFilter"] = "<method substring>", ["maxDepth"] = 6 }));
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_off_cpu_sample",
         Title = "Collect off-CPU blocking stacks",
@@ -726,6 +738,7 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
         SymbolServerAllowlist symbolServerAllowlist,
+        IPrincipalAccessor principalAccessor,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Sampling window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
         [Description("Maximum number of blocking stacks returned inline (the full set lives behind the handle). Defaults to 25.")] int topN = 25,
@@ -738,7 +751,7 @@ public sealed class DiagnosticTools
         if (topN < 1) return InvalidArg<OffCpuSnapshot>(nameof(topN), "must be >= 1");
 
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<OffCpuSnapshot>(symbolServerAllowlist, symbolPath);
+        var symbolDenial = ValidateSymbolPath<OffCpuSnapshot>(symbolServerAllowlist, symbolPath, principalAccessor);
         if (symbolDenial is not null) return symbolDenial;
 
         var resolved = await ResolveContextAsync<OffCpuSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -824,6 +837,7 @@ public sealed class DiagnosticTools
     /// <summary>Canonical kind tag for handles backing an <see cref="OffCpuSnapshotArtifact"/>.</summary>
     public const string OffCpuHandleKind = "off-cpu-snapshot";
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "query_off_cpu_snapshot",
         Title = "Drill into an off-CPU snapshot",
@@ -931,6 +945,7 @@ public sealed class DiagnosticTools
     /// </summary>
     private static readonly TimeSpan CollectionHandleTtl = TimeSpan.FromMinutes(10);
 
+    [RequireAnyScope("read-counters", "eventpipe")]
     [McpServerTool(
         Name = "query_collection",
         Title = "Drill into a previously-collected artifact",
@@ -1067,6 +1082,7 @@ public sealed class DiagnosticTools
         }
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_exceptions",
         Title = "Collect managed exceptions",
@@ -1138,6 +1154,7 @@ public sealed class DiagnosticTools
             resolved.Context);
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_gc_events",
         Title = "Collect GC events",
@@ -1205,6 +1222,7 @@ public sealed class DiagnosticTools
             resolved.Context);
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_activities",
         Title = "Capture ActivitySource traces",
@@ -1268,6 +1286,7 @@ public sealed class DiagnosticTools
             resolved.Context);
     }
 
+    [RequireScope("eventpipe")]
     [McpServerTool(
         Name = "collect_event_source",
         Title = "Capture custom EventSource",
@@ -1286,6 +1305,7 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         EventSourceAllowlist allowlist,
         SensitiveValueGate sensitiveGate,
+        IPrincipalAccessor principalAccessor,
         [Description("EventSource provider name, e.g. 'System.Net.Http' or 'Microsoft.AspNetCore.Hosting'. Must be on the curated allowlist (see `Diagnostics:EventSourceAllowlist`) unless `unsafeProvider=true` AND the server has `Diagnostics:AllowSensitiveHeapValues=true` (issue #165 / M2).")] string providerName,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the capture window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
@@ -1306,7 +1326,12 @@ public sealed class DiagnosticTools
         var allowedByDefault = allowlist.IsAllowed(providerName);
         if (!allowedByDefault)
         {
-            if (!unsafeProvider || !sensitiveGate.IsAllowedByServer)
+            // RFC 0001 §2.3 / §2.6: caller can use unsafeProvider when EITHER the server has the
+            // legacy AllowSensitiveHeapValues flag set, OR their bearer principal holds the
+            // 'eventsource-any' modifier scope (B5.2). Either path bypasses the curated allowlist
+            // for THIS call only; the warn-on-allow audit line is emitted by the tool filter.
+            var principalAllowsAny = principalAccessor.Current?.HasExplicitScope("eventsource-any") == true;
+            if (!unsafeProvider || (!sensitiveGate.IsAllowedByServer && !principalAllowsAny))
             {
                 var preview = string.Join(", ", allowlist.AllowedProviders.Take(8));
                 return DiagnosticResult.Fail<EventSourceCapture>(
@@ -1358,6 +1383,7 @@ public sealed class DiagnosticTools
             resolved.Context);
     }
 
+    [RequireScope("dump-write", "ptrace")]
     [McpServerTool(
         Name = "collect_process_dump",
         Title = "Write process dump",
@@ -1400,6 +1426,7 @@ public sealed class DiagnosticTools
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [RequireScope("heap-read")]
     [McpServerTool(
         Name = "inspect_dump",
         Title = "Inspect a process dump's managed heap",
@@ -1419,6 +1446,7 @@ public sealed class DiagnosticTools
         IDumpInspector inspector,
         IDiagnosticHandleStore handles,
         SymbolServerAllowlist symbolServerAllowlist,
+        IPrincipalAccessor principalAccessor,
         [Description("Absolute path to a previously-captured .dmp file. Required.")] string dumpFilePath,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower.")] bool includeRetentionPaths = false,
@@ -1430,7 +1458,7 @@ public sealed class DiagnosticTools
         CancellationToken cancellationToken = default)
     {
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<DumpInspection>(symbolServerAllowlist, symbolPath);
+        var symbolDenial = ValidateSymbolPath<DumpInspection>(symbolServerAllowlist, symbolPath, principalAccessor);
         if (symbolDenial is not null) return symbolDenial;
 
         return await GuardAttachAsync("inspect_dump", processId: null, async () =>
@@ -1496,6 +1524,7 @@ public sealed class DiagnosticTools
             });
     }
 
+    [RequireScope("heap-read", "ptrace")]
     [McpServerTool(
         Name = "inspect_live_heap",
         Title = "Inspect a live .NET process's managed heap",
@@ -1516,6 +1545,7 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
         SymbolServerAllowlist symbolServerAllowlist,
+        IPrincipalAccessor principalAccessor,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Number of types to return in each top-N list (bytes / instances). Defaults to 20.")] int topTypes = 20,
         [Description("When true, walks a short GC retention chain for the top retained types. Off by default — slower and lengthens the suspend window.")] bool includeRetentionPaths = false,
@@ -1527,7 +1557,7 @@ public sealed class DiagnosticTools
         CancellationToken cancellationToken = default)
     {
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<LiveHeapInspection>(symbolServerAllowlist, symbolPath);
+        var symbolDenial = ValidateSymbolPath<LiveHeapInspection>(symbolServerAllowlist, symbolPath, principalAccessor);
         if (symbolDenial is not null) return symbolDenial;
 
         var resolved = await ResolveContextAsync<LiveHeapInspection>(resolver, processId, cancellationToken).ConfigureAwait(false);
@@ -1565,6 +1595,7 @@ public sealed class DiagnosticTools
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [RequireScope("heap-read")]
     [McpServerTool(
         Name = "query_heap_snapshot",
         Title = "Drill into a heap snapshot",
@@ -1595,6 +1626,7 @@ public sealed class DiagnosticTools
         IDumpInspector inspector,
         SensitiveDataRedactor redactor,
         SensitiveValueGate sensitiveGate,
+        IPrincipalAccessor principalAccessor,
         [Description("Snapshot handle returned by inspect_dump or inspect_live_heap.")] string handle,
         [Description("Which slice of the snapshot to return: 'top-types', 'retention-paths', 'roots-by-kind', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'object', 'gcroot', 'objsize' or 'async'.")] string view = "top-types",
         [Description("Maximum entries to return for any ranked view ('top-types', 'finalizer-queue', 'fragmentation', 'static-fields', 'delegate-targets', 'duplicate-strings', 'async'). Ignored by 'roots-by-kind', 'retention-paths', 'object', 'gcroot' and 'objsize'.")] int topN = 50,
@@ -1617,7 +1649,11 @@ public sealed class DiagnosticTools
                     new Dictionary<string, object?> { ["processId"] = "<pid>" }));
         }
 
-        var emitSensitive = sensitiveGate.ShouldEmit(includeSensitiveValues);
+        // RFC 0001 §2.4: the legacy AllowSensitiveHeapValues flag is the deployment-wide gate;
+        // a principal holding the 'sensitive-heap-read' scope opts in per-bearer (B5.2). The
+        // caller still has to pass includeSensitiveValues=true to actually receive raw content.
+        var principalUnlocksSensitive = principalAccessor.Current?.HasExplicitScope("sensitive-heap-read") == true;
+        var emitSensitive = sensitiveGate.ShouldEmit(includeSensitiveValues, principalUnlocksSensitive);
 
         var normalizedView = view.Trim().ToLowerInvariant();
         switch (normalizedView)
@@ -2002,6 +2038,7 @@ public sealed class DiagnosticTools
     private static readonly TimeSpan ThreadSnapshotHandleTtl = TimeSpan.FromMinutes(10);
     internal const string ThreadSnapshotKind = "thread-snapshot";
 
+    [RequireScope("ptrace")]
     [McpServerTool(
         Name = "collect_thread_snapshot",
         Title = "Capture managed threads + locks from a live process or dump",
@@ -2023,6 +2060,7 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         IProcessContextResolver resolver,
         SymbolServerAllowlist symbolServerAllowlist,
+        IPrincipalAccessor principalAccessor,
         [Description("Operating system process id of the target .NET process. Mutually exclusive with dumpFilePath. Optional — when both processId and dumpFilePath are null/empty the server auto-selects a live .NET process.")] int? processId = null,
         [Description("Absolute path to a previously-captured .dmp file. Mutually exclusive with processId.")] string? dumpFilePath = null,
         [Description("Maximum stack frames captured per thread. Defaults to 64.")] int maxFramesPerThread = 64,
@@ -2043,7 +2081,7 @@ public sealed class DiagnosticTools
         if (maxFramesPerThread > ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap) return InvalidArg<ThreadSnapshotQueryResult>(nameof(maxFramesPerThread), $"must be <= {ClrMdThreadSnapshotInspector.MaxFramesPerThreadHardCap} (bounds the live-attach suspend window)");
 
         // B4 / issue #165 / M3: same SSRF guard as collect_cpu_sample.
-        var symbolDenial = ValidateSymbolPath<ThreadSnapshotQueryResult>(symbolServerAllowlist, symbolPath);
+        var symbolDenial = ValidateSymbolPath<ThreadSnapshotQueryResult>(symbolServerAllowlist, symbolPath, principalAccessor);
         if (symbolDenial is not null) return symbolDenial;
 
         int livePid = 0;
@@ -2135,6 +2173,7 @@ public sealed class DiagnosticTools
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [RequireScope("ptrace")]
     [McpServerTool(
         Name = "capture_method_bytes",
         Title = "Capture JIT-emitted native code for a managed method",
@@ -2281,6 +2320,7 @@ public sealed class DiagnosticTools
         return ulong.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out result);
     }
 
+    [RequireScope("ptrace")]
     [McpServerTool(
         Name = "query_thread_snapshot",
         Title = "Drill into a thread + lock snapshot",
@@ -2461,6 +2501,7 @@ public sealed class DiagnosticTools
     }
 
 
+    [RequireScope("investigation-export")]
     [McpServerTool(
         Name = "start_investigation",
         Title = "Plan a diagnostic investigation",
@@ -2515,6 +2556,7 @@ public sealed class DiagnosticTools
             resolved.Context);
     }
 
+    [RequireScope("investigation-export")]
     [McpServerTool(
         Name = "export_investigation_summary",
         Title = "Export portable investigation summary",
@@ -2578,6 +2620,7 @@ public sealed class DiagnosticTools
                 new Dictionary<string, object?> { ["baselineSummaryJson"] = "<paste rendered JSON here>" }));
     }
 
+    [RequireScope("investigation-export")]
     [McpServerTool(
         Name = "compare_to_baseline",
         Title = "Compare investigation summary to baseline",
@@ -2651,6 +2694,7 @@ public sealed class DiagnosticTools
                 new Dictionary<string, object?> { ["durationSeconds"] = 20 }));
     }
 
+    [RequireScope("investigation-export")]
     [McpServerTool(
         Name = "get_collection_status",
         Title = "Get background collection status",
@@ -2772,6 +2816,7 @@ public sealed class DiagnosticTools
         return DiagnosticResult.Ok(taskReport, taskSummary, taskHints);
     }
 
+    [RequireScope("investigation-export")]
     [McpServerTool(
         Name = "cancel_collection",
         Title = "Cancel background collection",
@@ -2849,17 +2894,27 @@ public sealed class DiagnosticTools
     /// the configured allowlist. Returns <c>null</c> when the path is allowed (local path,
     /// empty/null, or remote host on the allowlist) so the caller can early-return only on
     /// denial. Must be invoked from every tool that forwards a caller-supplied
-    /// <c>symbolPath</c> into a SymbolReader / native symbolicator backend.
+    /// <c>symbolPath</c> into a SymbolReader / native symbolicator backend. B5.2 layers a
+    /// principal-side modifier scope on top: callers holding <c>symbols-remote</c>
+    /// (RFC 0001 §2.5) bypass the allowlist entirely. The legacy server-wide allowlist
+    /// keeps working byte-for-byte for principals without the scope.
     /// </summary>
-    private static DiagnosticResult<T>? ValidateSymbolPath<T>(SymbolServerAllowlist allowlist, string? symbolPath)
+    private static DiagnosticResult<T>? ValidateSymbolPath<T>(
+        SymbolServerAllowlist allowlist,
+        string? symbolPath,
+        IPrincipalAccessor? principalAccessor = null)
     {
+        if (principalAccessor?.Current?.HasExplicitScope("symbols-remote") == true)
+        {
+            return null;
+        }
         var validation = allowlist.Validate(symbolPath);
         if (validation.IsAllowed) return null;
         return DiagnosticResult.Fail<T>(
             $"symbolPath references remote symbol server host '{validation.DeniedHost}' which is not on the allowlist.",
             new DiagnosticError(
                 "SymbolServerNotAllowed",
-                "Remote symbol servers are denied by default. Add the host to `Diagnostics:SymbolServerAllowlist` (env: `Diagnostics__SymbolServerAllowlist__0=<host>`) or drop the `srv*http(s)://…` segment and rely on the local symbol cache. Tracked by issue #165.",
+                "Remote symbol servers are denied by default. Add the host to `Diagnostics:SymbolServerAllowlist` (env: `Diagnostics__SymbolServerAllowlist__0=<host>`), grant the caller the `symbols-remote` scope, or drop the `srv*http(s)://…` segment and rely on the local symbol cache. Tracked by issue #165.",
                 validation.DeniedSegment));
     }
 

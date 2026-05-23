@@ -19,6 +19,7 @@ public sealed class CollectEventSourceSecurityTests
             new MemoryDiagnosticHandleStore(),
             new EventSourceAllowlist(null),
             new SensitiveValueGate(null),
+            TestPrincipalAccessors.Root,
             providerName: "My.Custom.Source",
             processId: 4242,
             durationSeconds: 1);
@@ -38,6 +39,7 @@ public sealed class CollectEventSourceSecurityTests
             new MemoryDiagnosticHandleStore(),
             new EventSourceAllowlist(null),
             new SensitiveValueGate(null),
+            TestPrincipalAccessors.Root,
             providerName: "System.Net.Http",
             processId: 4242,
             durationSeconds: 1);

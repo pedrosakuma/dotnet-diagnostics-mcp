@@ -30,6 +30,7 @@ public sealed class SymbolPathSecurityTests
         var result = await DiagnosticTools.CollectOffCpuSample(
             sampler, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             processId: 42,
             durationSeconds: 1,
             symbolPath: RemotePath);
@@ -48,6 +49,7 @@ public sealed class SymbolPathSecurityTests
         var result = await DiagnosticTools.CollectOffCpuSample(
             sampler, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             processId: 42,
             durationSeconds: 1,
             symbolPath: LocalPath);
@@ -65,6 +67,7 @@ public sealed class SymbolPathSecurityTests
         var result = await DiagnosticTools.CollectThreadSnapshot(
             inspector, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             processId: 42,
             symbolPath: RemotePath);
 
@@ -83,6 +86,7 @@ public sealed class SymbolPathSecurityTests
         var result = await DiagnosticTools.CollectThreadSnapshot(
             inspector, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(options),
+            TestPrincipalAccessors.Root,
             processId: 42,
             symbolPath: RemotePath);
 
@@ -99,6 +103,7 @@ public sealed class SymbolPathSecurityTests
         var result = await DiagnosticTools.InspectDump(
             inspector, store,
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             dumpFilePath: "/tmp/x.dmp",
             symbolPath: RemotePath);
 
@@ -116,6 +121,7 @@ public sealed class SymbolPathSecurityTests
         var result = await DiagnosticTools.InspectLiveHeap(
             inspector, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root,
             processId: 42,
             symbolPath: RemotePath);
 

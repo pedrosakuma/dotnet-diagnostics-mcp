@@ -42,6 +42,13 @@ builder.Services.AddDiagnosticCoreServices(configuredSymbolPath, builder.Configu
 builder.Services.AddHostedService<DotnetDiagnosticsMcp.Server.Hosting.StaleBinaryWatcher>();
 var orchestratorEnabled = builder.Services.AddOrchestratorServices(builder.Configuration);
 
+// B5.2 (RFC 0001 §5): the [RequireScope] filter reads the bearer principal off
+// HttpContext.Items. Register the typed accessor so the filter is decoupled from
+// IHttpContextAccessor directly, easing the stdio fallback and unit-test isolation.
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<DotnetDiagnosticsMcp.Server.Security.IPrincipalAccessor,
+    DotnetDiagnosticsMcp.Server.Security.HttpContextPrincipalAccessor>();
+
 // M5 (issue #164): per-IP fixed-window rate limit applied to /mcp and the proxy
 // endpoints. Budget defaults come from OrchestratorOptions but the policy is
 // always registered so /mcp gets the same protection even when the orchestrator
@@ -193,6 +200,13 @@ static async Task<int> RunStdioAsync(string[] args)
     var configuredSymbolPath = Environment.GetEnvironmentVariable(SymbolPathBuilder.McpSymbolPathEnvironmentVariable);
     hostBuilder.Services.AddDiagnosticCoreServices(configuredSymbolPath, hostBuilder.Configuration);
     var orchestratorEnabled = hostBuilder.Services.AddOrchestratorServices(hostBuilder.Configuration);
+
+    // B5.2 / RFC 0001 §5: stdio has no HTTP context — the local MCP client owns the
+    // process so authorization degrades to root scope. Registering the stdio accessor
+    // here keeps the [RequireScope] filter graceful across transports without each
+    // tool body branching on transport kind.
+    hostBuilder.Services.AddSingleton<DotnetDiagnosticsMcp.Server.Security.IPrincipalAccessor>(
+        DotnetDiagnosticsMcp.Server.Security.StdioRootPrincipalAccessor.Instance);
 
     ILoggerFactory? stdioLoggerFactoryHolder = null;
     IServiceProvider? stdioServicesHolder = null;

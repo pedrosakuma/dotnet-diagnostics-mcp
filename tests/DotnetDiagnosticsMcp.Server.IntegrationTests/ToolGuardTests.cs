@@ -32,7 +32,8 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 1234, cancellationToken: default);
+            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 1234, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error.Should().NotBeNull();
@@ -49,7 +50,8 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 999, cancellationToken: default);
+            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 999, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("EndpointUnavailable");
@@ -64,7 +66,8 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.CollectThreadSnapshot(
-            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 42, cancellationToken: default);
+            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 42, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -79,7 +82,8 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.CollectThreadSnapshot(
-            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 42, cancellationToken: default);
+            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 42, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("ToolNotFound");
@@ -95,7 +99,8 @@ public sealed class ToolGuardTests
         var sampler = new ThrowingOffCpuSampler(new UnauthorizedAccessException(message));
 
         var result = await DiagnosticTools.CollectOffCpuSample(
-            sampler, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 1234, cancellationToken: default);
+            sampler, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 1234, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -118,7 +123,8 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 7, cancellationToken: default);
+            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 7, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");
@@ -136,7 +142,8 @@ public sealed class ToolGuardTests
         var handles = new MemoryDiagnosticHandleStore();
 
         var result = await DiagnosticTools.InspectLiveHeap(
-            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null), processId: 9, cancellationToken: default);
+            inspector, handles, EchoResolver(), new SymbolServerAllowlist(null),
+            TestPrincipalAccessors.Root, processId: 9, cancellationToken: default);
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be("PermissionDenied");

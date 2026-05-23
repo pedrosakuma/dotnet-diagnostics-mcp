@@ -154,6 +154,18 @@ internal static class DiagnosticServiceRegistration
                     ToolErrorSurfaceFilter.Create(
                         () => loggerFactoryAccessor()?.CreateLogger(typeof(ToolErrorSurfaceFilter).FullName!)));
 
+                // B5.2 / RFC 0001 §2 — per-tool authorization. Sits AFTER ToolErrorSurfaceFilter
+                // in the registration order, which means it runs BEFORE it in the dispatch
+                // pipeline (filters wrap last-in-first-out), so a forbidden envelope short-
+                // circuits before the surface filter and is returned verbatim. The scope index
+                // is built lazily on first call so unit tests that hit Build() without the
+                // full tool surface keep working.
+                options.Filters.Request.CallToolFilters.Add(
+                    BuildScopeAuthorizationFilter(
+                        servicesAccessor,
+                        loggerFactoryAccessor,
+                        enableOrchestratorTools));
+
                 if (enableOrchestratorTools && servicesAccessor is not null)
                 {
                     // Adds after ToolErrorSurfaceFilter so an exception escaping the proxy
@@ -192,6 +204,42 @@ internal static class DiagnosticServiceRegistration
         }
 
         return builder;
+    }
+
+    private static ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> BuildScopeAuthorizationFilter(
+        Func<IServiceProvider?>? servicesAccessor,
+        Func<ILoggerFactory?> loggerFactoryAccessor,
+        bool enableOrchestratorTools)
+    {
+        // Build the tool-scope index on first call. The set of scanned types must match
+        // the WithTools<>() chain below (DiagnosticTools always; OrchestratorTools when
+        // enabled) so the registry knows about every tool the SDK will dispatch.
+        Security.ToolScopeRegistry? cachedRegistry = null;
+        ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult>? cachedFilter = null;
+        var gate = new object();
+
+        return next =>
+        {
+            if (cachedFilter is null)
+            {
+                lock (gate)
+                {
+                    if (cachedFilter is null)
+                    {
+                        var surfaceTypes = enableOrchestratorTools
+                            ? new[] { typeof(DiagnosticTools), typeof(OrchestratorTools) }
+                            : new[] { typeof(DiagnosticTools) };
+                        cachedRegistry = Security.ToolScopeRegistry.Build(surfaceTypes);
+
+                        cachedFilter = Security.ToolScopeAuthorizationFilter.Create(
+                            cachedRegistry,
+                            () => servicesAccessor?.Invoke()?.GetService<Security.IPrincipalAccessor>(),
+                            () => loggerFactoryAccessor()?.CreateLogger(typeof(Security.ToolScopeAuthorizationFilter).FullName!));
+                    }
+                }
+            }
+            return cachedFilter(next);
+        };
     }
 
     private static ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> BuildInvestigationProxyFilter(

@@ -65,4 +65,19 @@ public sealed class BearerPrincipal
         ArgumentException.ThrowIfNullOrWhiteSpace(scope);
         return _hasWildcard || Scopes.Contains(scope);
     }
+
+    /// <summary>Like <see cref="HasScope"/> but does NOT honour the root/wildcard
+    /// shortcut — only literal membership in <see cref="Scopes"/> counts. Used for
+    /// the modifier scopes in RFC 0001 §2.3-§2.7 (<c>sensitive-heap-read</c>,
+    /// <c>eventsource-any</c>, <c>symbols-remote</c>, <c>orchestrator-admin</c>),
+    /// which are deliberately additive — operators must explicitly mint a bearer
+    /// with the modifier scope rather than getting it for free from a root token.
+    /// This preserves the principle of least surprise for the SSRF / sensitive-data
+    /// allowlists: a "do everything" token still respects the deployment-wide
+    /// gates unless the operator deliberately layers the modifier scope on top.</summary>
+    public bool HasExplicitScope(string scope)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
+        return Scopes.Contains(scope);
+    }
 }

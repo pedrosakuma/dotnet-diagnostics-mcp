@@ -18,6 +18,7 @@ public sealed class HeapSnapshotSecurityGateTests
 
         var result = await DiagnosticTools.QueryHeapSnapshot(
             store, inspector, new SensitiveDataRedactor(null), new SensitiveValueGate(null),
+            TestPrincipalAccessors.Root,
             handle.Id, view: "duplicate-strings", topN: 10);
 
         result.Error.Should().BeNull();
@@ -38,6 +39,7 @@ public sealed class HeapSnapshotSecurityGateTests
 
         var result = await DiagnosticTools.QueryHeapSnapshot(
             store, inspector, new SensitiveDataRedactor(options), new SensitiveValueGate(options),
+            TestPrincipalAccessors.Root,
             handle.Id, view: "duplicate-strings", topN: 10, includeSensitiveValues: true);
 
         result.Error.Should().BeNull();

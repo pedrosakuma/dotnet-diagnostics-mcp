@@ -2,7 +2,7 @@
 
 - **Audit batch:** B5 (gpt-5.5 security audit, finding H3)
 - **Tracking issue:** [#166](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/166)
-- **Status:** Draft (pending gpt-5.5 review)
+- **Status:** Approved; B5.1 (foundation) and B5.2 (per-tool decoration + enforcement filter) shipped. Per-handle §2.12 enforcement deferred — `query_collection` is the lone tool with a coarser `RequireAnyScope` approximation pending handle-store work.
 - **Depends on:** B3 (issue #164 — investigation proxy), B4 (issue #165 — heap secret/event source/symbol allowlists)
 - **Author:** Copilot (drafting on behalf of @pedrosakuma)
 
@@ -158,10 +158,9 @@ mint time.
 |---|---|
 | `collect_cpu_sample` | DiagnosticTools.cs:435 |
 | `collect_allocation_sample` | DiagnosticTools.cs:569 |
-| `get_call_tree` | DiagnosticTools.cs:647 |
 | `collect_off_cpu_sample` | DiagnosticTools.cs:709 |
 | `query_off_cpu_snapshot` | DiagnosticTools.cs:828 |
-| `query_collection` | DiagnosticTools.cs:935 |
+| `query_collection` | DiagnosticTools.cs:935 *(also satisfied by `read-counters` — see §2.12)* |
 | `collect_exceptions` | DiagnosticTools.cs:1071 |
 | `collect_gc_events` | DiagnosticTools.cs:1142 |
 | `collect_activities` | DiagnosticTools.cs:1209 |
@@ -304,32 +303,33 @@ investigation.
 | `start_investigation` | DiagnosticTools.cs:2465 |
 | `export_investigation_summary` | DiagnosticTools.cs:2519 |
 | `compare_to_baseline` | DiagnosticTools.cs:2582 |
-
-**Privilege rationale.** Read-only meta-tools — they consult planning state and emit
-JSON/Markdown summaries from handles the caller already owns. No new collection
-performed. Distinct scope because the *contents* of an investigation summary include the
-findings of every collector run during the session — granting export without
-`read-counters` makes little sense, but operators may want to gate export separately
-(e.g. forbid customer-support roles from emitting summaries containing exception text).
-
-**Risk if leaked.** Adversary can re-export prior findings (already in their possession
-if they were the original collector). Low marginal risk; included for completeness.
-
-### 2.11 `job-control`
-
-| Tool | file:line |
-|---|---|
+| `get_call_tree` | DiagnosticTools.cs:647 |
 | `get_collection_status` | DiagnosticTools.cs:2655 |
 | `cancel_collection` | DiagnosticTools.cs:2776 |
 
-**Privilege rationale.** Pure meta-control over background jobs the caller already
-started. The strawman in #166 omitted these; we add a tiny dedicated scope rather than
-folding them into `eventpipe` because (a) the same job-control surface will cover dump
-jobs once they go async, and (b) a watchdog process that *only* needs to cancel runaway
-collections should not also be able to start new ones.
+**Privilege rationale.** Read-only meta-tools — they consult planning state, emit
+JSON/Markdown summaries, and steer (`get_collection_status` / `cancel_collection`)
+background jobs the caller already minted as part of the investigation. No new
+collection is performed. The bucket also covers `get_call_tree`, which is a pure
+drilldown over an already-collected CPU sample handle (and so authorizes per the
+handle-ownership rule in §2.12 once that lands). Distinct scope because the *contents*
+of an investigation summary include the findings of every collector run during the
+session — granting export without `read-counters` makes little sense, but operators
+may want to gate export separately (e.g. forbid customer-support roles from emitting
+summaries containing exception text).
 
-**Risk if leaked.** Adversary can DoS in-flight collections by cancelling them, and can
-read collection state metadata (start time, kind, ETA).
+**Risk if leaked.** Adversary can re-export prior findings (already in their possession
+if they were the original collector) and cancel in-flight collections they minted. Low
+marginal risk; included for completeness.
+
+### 2.11 `job-control` *(reserved — no tools currently assigned)*
+
+The strawman in #166 proposed a dedicated `job-control` bucket for
+`get_collection_status` / `cancel_collection`. The B5.2 implementation folded both into
+`investigation-export` (§2.10) on the rationale that, until dump jobs go async, every
+job-control surface in the server is an investigation drilldown. The name is reserved
+here so a future PR can introduce it cleanly the moment a job-control-only surface
+appears (e.g. a watchdog token that can cancel but not enumerate prior findings).
 
 ### 2.12 Handle ownership and query authorization
 
@@ -378,41 +378,64 @@ A token granted `*` resolves to the union of every scope above. Used by:
 Every `[McpServerTool]` decoration in `src/DotnetDiagnosticsMcp.Server/Tools/` is
 assigned to exactly one *primary* scope (the scope a caller minimally needs).
 `inspect_live_heap` additionally requires `ptrace` (§2.3) and `collect_process_dump`
-additionally requires `ptrace` (§2.6). These are the only stacking cases for collector
-tools; query tools acquire effective scope requirements dynamically per §2.12. Coverage:
+additionally requires `ptrace` (§2.6). `query_collection` is the lone tool with
+`RequireAnyScope("read-counters", "eventpipe")` semantics (handle-ownership
+approximation pending §2.12 — see also §2.15). Coverage as implemented by B5.2:
 
 ```
 6  read-counters
-10 eventpipe
-3  heap-read   (inspect_live_heap also requires ptrace)
+8  eventpipe
+2  heap-read   (inspect_live_heap also requires ptrace)
 1  dump-write  (collect_process_dump also requires ptrace)
 3  ptrace
+1  any-of(read-counters, eventpipe)   query_collection
+6  investigation-export
 1  orchestrator-list
 3  orchestrator-attach
-3  investigation-export
-2  job-control
+0  job-control (reserved, see §2.11)
 ---
-32 tools total
+32 tools total (28 in DiagnosticTools.cs + 4 in OrchestratorTools.cs)
 ```
 
-This matches the 28 (`DiagnosticTools`) + 4 (`OrchestratorTools`) enumeration in §1.1.
-`sensitive-heap-read` and `orchestrator-admin` are *modifier* scopes that unlock
-additional output but do not appear in the coverage count — they do not gate any tool
-on their own.
+`sensitive-heap-read`, `eventsource-any`, `symbols-remote`, and `orchestrator-admin`
+are *modifier* scopes that unlock additional output but do not appear in the coverage
+count — they do not gate any tool on their own. They are checked via
+`BearerPrincipal.HasExplicitScope` (no wildcard honour) so a root token does not
+auto-acquire them; the operator must layer the modifier on top deliberately.
+
+The taxonomy is enforced at startup by `ToolScopeRegistry.Build` (fails fast if any
+`[McpServerTool]` is missing both `[RequireScope]` and `[RequireAnyScope]`) and at call
+time by `ToolScopeAuthorizationFilter`.
 
 ### 2.15 Strawman reconciliation
 
 The strawman in issue #166 listed nine scope buckets; this RFC lands ten primary scopes
-plus two modifier scopes. Differences:
+plus four modifier scopes. Differences:
 
 - **Added `sensitive-heap-read`** (modifier) — needed to subsume B4's
   `AllowSensitiveHeapValues` without conflating "topology" and "contents".
+- **Added `eventsource-any`** (modifier) — needed to subsume the
+  `collect_event_source` `unsafeProvider=true` gate.
+- **Added `symbols-remote`** (modifier) — needed to subsume B4's symbol-path SSRF
+  allowlist for the dotnet-symbols redirection branch.
 - **Added `orchestrator-admin`** (modifier) — needed to subsume B3's
   `AllowCrossSessionAdmin`.
-- **Added `job-control`** — strawman missed `get_collection_status` / `cancel_collection`.
+- **`job-control` reserved but unused** — strawman split `get_collection_status` /
+  `cancel_collection` into a dedicated bucket. B5.2 folded them into
+  `investigation-export` (along with `get_call_tree`) on the rationale that the only
+  current job-control surfaces are investigation drilldowns. The name is held in
+  reserve (§2.11) for a future watchdog-style role.
 - **Moved `start_investigation` into `investigation-export`** (strawman had it loose).
 - **Stacked `ptrace` on top of `heap-read` for `inspect_live_heap`** rather than minting
   a `heap-read-live` synonym.
+- **`query_collection` uses `RequireAnyScope("read-counters", "eventpipe")`** as a
+  coarse approximation of the §2.12 handle-ownership rule until the handle store grows
+  per-handle `RequiredScopes` metadata. Tracked as a follow-up to B5.2 (this is the
+  *only* divergence from §2.12 in the shipping implementation).
+- **Modifier scopes use literal-membership checks** (`HasExplicitScope`) rather than
+  honouring the `root`/`*` wildcard, so the legacy single-token `MCP_BEARER_TOKEN`
+  bearer keeps working for every primary scope but does **not** auto-acquire any
+  modifier — operators opt in deliberately.
 - **Strawman tools that don't exist:** none. All eight strawman names map to real
   `[McpServerTool]` decorations.
 
