@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -37,7 +38,9 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
     private StubPortForwardManager _manager = default!;
     private CapturingUpstream _upstream = default!;
 
-    public async Task InitializeAsync()
+    public Task InitializeAsync() => InitializeAsync(proxyBytesCap: null);
+
+    private async Task InitializeAsync(long? proxyBytesCap)
     {
         var builder = Host.CreateDefaultBuilder();
         builder.ConfigureWebHost(web =>
@@ -48,15 +51,25 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
                 _store = new StubInvestigationStore();
                 _upstream = new CapturingUpstream();
                 _manager = new StubPortForwardManager(_upstream);
-                services.AddSingleton(new OrchestratorOptions { Enabled = true, ProxyBasePath = "/proxy", ProxyPodPort = 5130 });
+                var opts = new OrchestratorOptions { Enabled = true, ProxyBasePath = "/proxy", ProxyPodPort = 5130 };
+                if (proxyBytesCap.HasValue) opts.ProxyRequestSizeLimitBytes = proxyBytesCap.Value;
+                services.AddSingleton(opts);
                 services.AddSingleton<IInvestigationStore>(_store);
                 services.AddSingleton<IPortForwardManager>(_manager);
                 services.AddLogging();
                 services.AddRouting();
+                // The proxy endpoint chains .RequireRateLimiting("mcp") so the test
+                // host must register a matching policy or the route is unreachable.
+                services.AddRateLimiter(o =>
+                {
+                    o.AddPolicy(InvestigationProxyEndpoints.RateLimiterPolicyName, _ =>
+                        System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("test"));
+                });
             });
             web.Configure(app =>
             {
                 app.UseRouting();
+                app.UseRateLimiter();
                 app.UseEndpoints(e => e.MapInvestigationProxy());
             });
         });
@@ -75,7 +88,7 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
     [Fact]
     public async Task Proxy_ReturnsNotFound_WhenHandleUnknown()
     {
-        var response = await _client.GetAsync("/proxy/inv_missing/health");
+        var response = await _client.PostAsync("/proxy/inv_missing/mcp", new StringContent("{}", Encoding.UTF8, "application/json"));
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
@@ -83,7 +96,7 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
     public async Task Proxy_ReturnsGone_WhenHandleIsNotActive()
     {
         _store.Add(NewHandle("inv_attaching", InvestigationState.Attaching));
-        var response = await _client.GetAsync("/proxy/inv_attaching/health");
+        var response = await _client.PostAsync("/proxy/inv_attaching/mcp", new StringContent("{}", Encoding.UTF8, "application/json"));
         response.StatusCode.Should().Be(HttpStatusCode.Gone);
     }
 
@@ -94,7 +107,7 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
     public async Task Proxy_ReturnsGone_ForTerminalStates(InvestigationState state)
     {
         _store.Add(NewHandle("inv_term_" + state, state));
-        var response = await _client.GetAsync($"/proxy/inv_term_{state}/health");
+        var response = await _client.PostAsync($"/proxy/inv_term_{state}/mcp", new StringContent("{}", Encoding.UTF8, "application/json"));
         response.StatusCode.Should().Be(HttpStatusCode.Gone);
     }
 
@@ -137,15 +150,20 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
         _store.Add(NewHandle("inv_hop", InvestigationState.Active, "pod-token"));
         _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
 
-        var req = new HttpRequestMessage(HttpMethod.Get, "/proxy/inv_hop/x");
+        var req = new HttpRequestMessage(HttpMethod.Post, "/proxy/inv_hop/mcp")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
         req.Headers.TryAddWithoutValidation("Connection", "keep-alive");
         req.Headers.TryAddWithoutValidation("Proxy-Authorization", "Basic abc");
+        req.Headers.TryAddWithoutValidation("Cookie", "session=abc");
 
         var response = await _client.SendAsync(req);
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         _upstream.LastRequest!.Headers.Contains("Connection").Should().BeFalse();
         _upstream.LastRequest.Headers.Contains("Proxy-Authorization").Should().BeFalse();
+        _upstream.LastRequest.Headers.Contains("Cookie").Should().BeFalse();
         _upstream.LastRequest.Headers.Authorization!.Parameter.Should().Be("pod-token");
     }
 
@@ -155,9 +173,246 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
         _store.Add(NewHandle("inv_502", InvestigationState.Active, "pod-token"));
         _upstream.NextResponse = _ => throw new HttpRequestException("connect refused");
 
-        var response = await _client.GetAsync("/proxy/inv_502/x");
+        var response = await _client.PostAsync("/proxy/inv_502/mcp", new StringContent("{}", Encoding.UTF8, "application/json"));
 
         response.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+    }
+
+    [Fact]
+    public async Task Proxy_RejectsCrossSessionCaller_WithStructured403()
+    {
+        // H6: handle minted with OwnerSessionId="owner-A", caller presents a different
+        // Mcp-Session-Id → 403 ProxyOwnerMismatch.
+        _store.Add(NewHandleOwned("inv_owned", "owner-A", "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/proxy/inv_owned/mcp")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Add("Mcp-Session-Id", "owner-B");
+
+        var response = await _client.SendAsync(req);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyOwnerMismatch");
+        _upstream.LastRequest.Should().BeNull("the proxy must not forward when ownership check fails");
+    }
+
+    [Fact]
+    public async Task Proxy_AdminBypass_AllowsCrossSessionCaller_WhenAllowCrossSessionAdminTrue()
+    {
+        // H6 + AllowCrossSessionAdmin: when the deployment opts into admin mode
+        // (operator / central orchestrator topology), the owner-session check is
+        // bypassed and the proxy forwards regardless of Mcp-Session-Id mismatch.
+        await DisposeAsync();
+        await InitializeAdminAsync();
+
+        _store.Add(NewHandleOwned("inv_admin", "owner-A", "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK);
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/proxy/inv_admin/mcp")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Add("Mcp-Session-Id", "owner-B");
+
+        var response = await _client.SendAsync(req);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull("admin mode must forward cross-session traffic");
+    }
+
+    private async Task InitializeAdminAsync()
+    {
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureWebHost(web =>
+        {
+            web.UseTestServer();
+            web.ConfigureServices(services =>
+            {
+                _store = new StubInvestigationStore();
+                _upstream = new CapturingUpstream();
+                _manager = new StubPortForwardManager(_upstream);
+                var opts = new OrchestratorOptions
+                {
+                    Enabled = true,
+                    ProxyBasePath = "/proxy",
+                    ProxyPodPort = 5130,
+                    AllowCrossSessionAdmin = true,
+                };
+                services.AddSingleton(opts);
+                services.AddSingleton<IInvestigationStore>(_store);
+                services.AddSingleton<IPortForwardManager>(_manager);
+                services.AddLogging();
+                services.AddRouting();
+                services.AddRateLimiter(o =>
+                {
+                    o.AddPolicy(InvestigationProxyEndpoints.RateLimiterPolicyName, _ =>
+                        System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("test"));
+                });
+            });
+            web.Configure(app =>
+            {
+                app.UseRouting();
+                app.UseRateLimiter();
+                app.UseEndpoints(e => e.MapInvestigationProxy());
+            });
+        });
+        _host = await builder.StartAsync();
+        _server = _host.GetTestServer();
+        _client = _server.CreateClient();
+    }
+
+    [Fact]
+    public async Task Proxy_RejectsAnonymousCaller_WhenHandleHasOwner()
+    {
+        // H6: handle has an owner, caller omits the Mcp-Session-Id header entirely.
+        _store.Add(NewHandleOwned("inv_owned_anon", "owner-A", "pod-token"));
+
+        var response = await _client.PostAsync("/proxy/inv_owned_anon/mcp", new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_AllowsOwnerSessionCaller()
+    {
+        _store.Add(NewHandleOwned("inv_owned_ok", "owner-A", "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/proxy/inv_owned_ok/mcp")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Add("Mcp-Session-Id", "owner-A");
+
+        var response = await _client.SendAsync(req);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_RejectsDisallowedPath_WithStructured404()
+    {
+        // H7: any path under /proxy/{handleId}/ that isn't /mcp[...] is rejected
+        // with a structured ProxyPathNotAllowed envelope.
+        _store.Add(NewHandle("inv_path", InvestigationState.Active, "pod-token"));
+
+        var response = await _client.GetAsync("/proxy/inv_path/health");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyPathNotAllowed");
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("PUT")]
+    [InlineData("PATCH")]
+    [InlineData("OPTIONS")]
+    public async Task Proxy_RejectsDisallowedMethods_OnMcpPath(string method)
+    {
+        // H7: only POST/GET/DELETE are valid on /mcp; everything else falls through
+        // to the catch-all and returns ProxyPathNotAllowed.
+        _store.Add(NewHandle("inv_method_" + method, InvestigationState.Active, "pod-token"));
+
+        var req = new HttpRequestMessage(new HttpMethod(method), $"/proxy/inv_method_{method}/mcp")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+        };
+        var response = await _client.SendAsync(req);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("/proxy/inv_dot/mcp/../health")]
+    [InlineData("/proxy/inv_dot/mcp/%2e%2e/health")]
+    public async Task Proxy_RejectsDotSegmentPath_WithStructured404(string url)
+    {
+        // B3 review (issue #164 High 3): dot-segments must be rejected before
+        // they can be normalized away by UriBuilder and escape /mcp.
+        _store.Add(NewHandle("inv_dot", InvestigationState.Active, "pod-token"));
+
+        var response = await _client.PostAsync(url, new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyPathNotAllowed");
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_RejectsDisallowedJsonRpcTool_With403()
+    {
+        // B3 review (issue #164 High 1): a direct POST to /proxy/{id}/mcp must
+        // be blocked by the same allowlist that gates the in-process call-tool
+        // filter — otherwise the HTTP proxy is a bypass.
+        _store.Add(NewHandle("inv_jrpc_bad", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK);
+
+        var payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"totally_not_a_real_tool\",\"arguments\":{}}}";
+        var response = await _client.PostAsync("/proxy/inv_jrpc_bad/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyToolNotAllowed");
+        _upstream.LastRequest.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_AllowsJsonRpcInitialize_Passthrough()
+    {
+        // Non-tools/call methods must pass through unaltered — the allowlist
+        // gate is scoped to tools/call envelopes only.
+        _store.Add(NewHandle("inv_jrpc_init", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
+
+        var payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
+        var response = await _client.PostAsync("/proxy/inv_jrpc_init/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_AllowsJsonRpcKnownTool_Passthrough()
+    {
+        _store.Add(NewHandle("inv_jrpc_ok", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
+
+        var allowed = Server.Orchestrator.Investigations.InvestigationProxyToolAllowlist.AllowedToolNames.First();
+        var payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + allowed + "\",\"arguments\":{}}}";
+        var response = await _client.PostAsync("/proxy/inv_jrpc_ok/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        _upstream.LastRequest.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Proxy_RejectsOversizedBody_With413()
+    {
+        // M5: body cap = 1 MiB by default; this test pins the cap small and sends
+        // a payload over the limit. Expect 413 + ProxyBodyTooLarge envelope.
+        // We rebuild the host with a tiny cap so the test is fast.
+        await DisposeAsync();
+        await InitializeAsync(proxyBytesCap: 1024);
+
+        _store.Add(NewHandle("inv_big", InvestigationState.Active, "pod-token"));
+        _upstream.NextResponse = _ => new HttpResponseMessage(HttpStatusCode.OK);
+
+        var payload = new string('x', 4096);
+        var response = await _client.PostAsync("/proxy/inv_big/mcp", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("ProxyBodyTooLarge");
+        _upstream.LastRequest.Should().BeNull();
     }
 
     private static InvestigationHandle NewHandle(string id, InvestigationState state, string podToken = "pod") => new(
@@ -170,6 +425,18 @@ public class InvestigationProxyEndpointTests : IAsyncLifetime
         State: state,
         AttachedAt: DateTimeOffset.UtcNow,
         ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(5));
+
+    private static InvestigationHandle NewHandleOwned(string id, string ownerSessionId, string podToken) => new(
+        HandleId: id,
+        Namespace: "ns",
+        PodName: "pod",
+        TargetContainerName: "app",
+        EphemeralContainerName: "diag",
+        PodLocalBearerToken: podToken,
+        State: InvestigationState.Active,
+        AttachedAt: DateTimeOffset.UtcNow,
+        ExpiresAt: DateTimeOffset.UtcNow.AddMinutes(5),
+        OwnerSessionId: ownerSessionId);
 
     private sealed class StubInvestigationStore : IInvestigationStore
     {

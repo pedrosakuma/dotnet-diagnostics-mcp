@@ -128,4 +128,47 @@ public sealed class OrchestratorOptions
     /// <c>{ProxyBasePath}/{handleId}/{**rest}</c>. Default: <c>/proxy</c>.
     /// </summary>
     public string ProxyBasePath { get; set; } = "/proxy";
+
+    /// <summary>
+    /// H6 (issue #164) — when true, <c>list_active_investigations</c> accepts an
+    /// opt-in <c>includeAllSessions=true</c> argument and returns handles minted by
+    /// other MCP sessions (the legacy behavior). Default false: every session sees
+    /// only its own handles, which is the secure-by-default posture. Set true only
+    /// in single-tenant operator deployments where one human auditor drives the
+    /// orchestrator on behalf of every active investigation.
+    /// </summary>
+    public bool AllowCrossSessionAdmin { get; set; }
+
+    /// <summary>
+    /// M5 (issue #164) — maximum request body size, in bytes, accepted by the
+    /// per-handle reverse proxy at <c>{ProxyBasePath}/{handleId}/mcp</c>. MCP JSON-RPC
+    /// bodies are tiny in practice (a few hundred bytes per tool call); 1 MiB is two
+    /// orders of magnitude above the largest legitimate payload we have observed and
+    /// caps unbounded buffering by an authenticated-but-misbehaving client. Bodies
+    /// larger than the cap are rejected with 413 Payload Too Large before the proxy
+    /// reads them into its in-memory buffer. Default: 1 MiB.
+    /// </summary>
+    public long ProxyRequestSizeLimitBytes { get; set; } = 1L * 1024 * 1024;
+
+    /// <summary>
+    /// M5 (issue #164) — request budget for the per-IP rate-limit policy applied to
+    /// both <c>/mcp</c> and <c>{ProxyBasePath}/{handleId}/mcp</c>. Counted across a
+    /// fixed window of <see cref="RateLimitWindowSeconds"/> seconds. Default: 120
+    /// requests per minute — comfortably above an interactive LLM's tool-call rate
+    /// while still bounding a runaway / malicious client's amplification factor.
+    /// </summary>
+    public int RateLimitPermitsPerWindow { get; set; } = 120;
+
+    /// <summary>
+    /// M5 (issue #164) — fixed-window duration (seconds) paired with
+    /// <see cref="RateLimitPermitsPerWindow"/>. Default: 60 seconds.
+    /// </summary>
+    public int RateLimitWindowSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// M5 (issue #164) — bounded queue depth for the rate-limit policy. Set to 0
+    /// to reject excess requests immediately (recommended for low-fanout LLM clients);
+    /// raise modestly only when bursts are an expected workload shape. Default: 0.
+    /// </summary>
+    public int RateLimitQueueLimit { get; set; }
 }

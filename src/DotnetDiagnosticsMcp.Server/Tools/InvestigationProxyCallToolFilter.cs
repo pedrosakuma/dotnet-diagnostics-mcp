@@ -130,6 +130,46 @@ internal static class InvestigationProxyCallToolFilter
             return await next(requestParams, cancellationToken).ConfigureAwait(false);
         }
 
+        // H6 / B3 review (issue #164): defense-in-depth owner check. The binder
+        // is supposed to bind callers only to handles they own, but if a binding
+        // ever drifts (e.g. session id rotation, a reuse code path that misses
+        // the owner check) we must not forward upstream as someone else. When
+        // the handle has an owner and it doesn't match the caller, surface a
+        // structured error rather than silently widening access. Un-owned
+        // handles (stdio / framework) remain forward-able by anyone.
+        if (handle.OwnerSessionId is not null &&
+            !string.Equals(handle.OwnerSessionId, sessionId, StringComparison.Ordinal))
+        {
+            loggerAccessor()?.LogWarning(
+                "Refusing to forward '{ToolName}' from session {SessionId} via investigation {HandleId}: handle is owned by a different session.",
+                toolName, sessionId, handle.HandleId);
+            return new CallToolResult
+            {
+                IsError = true,
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock
+                    {
+                        Text = $"Cannot forward '{toolName}' via investigation {handle.HandleId}: it is owned by a different MCP session. " +
+                               "Re-attach to the pod in this session or call the tool locally with an explicit processId.",
+                    },
+                },
+            };
+        }
+
+        // H7 (issue #164): enforce the explicit forwarded-tool allowlist BEFORE we
+        // delegate to the proxy client. A tool that is not on the allowlist is NOT
+        // silently demoted to local execution (which would mask "this tool doesn't
+        // make sense in a Pod-attached context" misuse from the LLM); it surfaces
+        // a structured error so the LLM can self-correct.
+        if (!InvestigationProxyToolAllowlist.IsAllowed(toolName))
+        {
+            loggerAccessor()?.LogWarning(
+                "Refusing to forward '{ToolName}' from session {SessionId} via investigation {HandleId}: tool is not on the proxy allowlist.",
+                toolName, sessionId, handle.HandleId);
+            return BuildToolNotAllowedResult(toolName, handle.HandleId);
+        }
+
         try
         {
             loggerAccessor()?.LogDebug(
@@ -196,6 +236,27 @@ internal static class InvestigationProxyCallToolFilter
               .Append(string.IsNullOrWhiteSpace(cur.Message) ? "(no message)" : cur.Message);
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// H7 (issue #164) — structured error surface when a tool name fails the
+    /// proxy allowlist gate. The shape mirrors <see cref="BuildErrorText"/> so the
+    /// LLM has one error-block format to reason about.
+    /// </summary>
+    internal static CallToolResult BuildToolNotAllowedResult(string toolName, string handleId)
+    {
+        var text = $"{toolName} failed: tool '{toolName}' is not on the orchestrator's investigation-proxy " +
+                   $"allowlist and was refused before forwarding to investigation {handleId}. " +
+                   "Only the documented diagnostics tools (DiagnosticTools surface) can traverse the proxy. " +
+                   "Either call this tool against a local pid (pass an explicit processId) or use a tool that is in the allowlist.";
+        return new CallToolResult
+        {
+            IsError = true,
+            Content = new List<ContentBlock>
+            {
+                new TextContentBlock { Text = text },
+            },
+        };
     }
 
     // Mirror of OrchestratorTools.TryGetServerSessionId / DiagnosticTools.TryGetServerSessionId.

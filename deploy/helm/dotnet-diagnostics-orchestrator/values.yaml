@@ -83,6 +83,11 @@ orchestrator:
   attachReadinessTimeoutSeconds: 60
   defaultInvestigationTtlSeconds: 1800
   proxyPodPort: 5130
+  # B3 (#164): when true, operators (e.g. central orchestrators or test
+  # harnesses) may list and proxy handles minted by other MCP sessions.
+  # Default false — every caller sees only its own handles and the proxy
+  # rejects cross-session access with a structured 403 ProxyOwnerMismatch.
+  allowCrossSessionAdmin: false
 
 nodeSelector: {}
 tolerations: []

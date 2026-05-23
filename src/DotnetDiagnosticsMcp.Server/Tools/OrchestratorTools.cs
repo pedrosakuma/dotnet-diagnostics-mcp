@@ -186,7 +186,13 @@ public sealed class OrchestratorTools
             ContainerName: containerName,
             TtlSeconds: ttlSeconds,
             RequirePreparedTarget: requirePreparedTarget,
-            AllowReuseExistingSession: allowReuseExistingSession);
+            AllowReuseExistingSession: allowReuseExistingSession,
+            // H6 (issue #164): stamp the caller's MCP session id onto the request
+            // so the handle the orchestrator mints is bound to this session and
+            // /proxy/{handleId} can later enforce per-owner authorization.
+            // TryGetServerSessionId returns null on stdio / framework calls without
+            // a session — those handles intentionally remain un-scoped.
+            OwnerSessionId: TryGetServerSessionId(server));
 
         InvestigationHandle handle;
         try
@@ -333,6 +339,8 @@ public sealed class OrchestratorTools
     public static async Task<DiagnosticResult<DetachResult>> DetachFromPod(
         InvestigationCloser closer,
         IInvestigationSessionBinder sessionBinder,
+        IInvestigationStore store,
+        OrchestratorOptions options,
         McpServer server,
         [Description("Investigation handle id returned by attach_to_pod. When omitted, defaults to the handle currently bound to this MCP session.")]
         string? handleId = null,
@@ -340,10 +348,10 @@ public sealed class OrchestratorTools
     {
         _ = cancellationToken; // Close pipeline is best-effort and must finish even if the caller bailed.
 
+        var sessionId = TryGetServerSessionId(server);
         var resolvedHandleId = handleId;
         if (string.IsNullOrWhiteSpace(resolvedHandleId))
         {
-            var sessionId = TryGetServerSessionId(server);
             resolvedHandleId = sessionBinder.TryGetHandleId(sessionId);
         }
 
@@ -362,6 +370,25 @@ public sealed class OrchestratorTools
                 new NextActionHint(
                     "list_active_investigations",
                     "Call list_active_investigations to enumerate known handles, then re-run detach_from_pod with an explicit handleId."));
+        }
+
+        // B3 review (issue #164): require owner-session match before closing.
+        // Without this any authenticated caller who learns a handle id (e.g. via
+        // logs, a previous share, brute-forcing) could DoS another session's
+        // investigation. Unknown handles are still no-ops (idempotent close)
+        // and don't leak existence beyond what the caller already knows.
+        var existing = store.GetById(resolvedHandleId);
+        if (existing is not null &&
+            existing.OwnerSessionId is not null &&
+            !string.Equals(existing.OwnerSessionId, sessionId, StringComparison.Ordinal) &&
+            !options.AllowCrossSessionAdmin)
+        {
+            return DiagnosticResult.Fail<DetachResult>(
+                summary: $"detach_from_pod: handle '{resolvedHandleId}' is owned by a different MCP session.",
+                error: new DiagnosticError(
+                    Kind: "PermissionDenied",
+                    Message: "Cannot close another MCP session's investigation handle.",
+                    Detail: "Re-attach to the pod in this session, or wait for the TTL reaper to retire the handle."));
         }
 
         var outcome = await closer.CloseAsync(
@@ -407,24 +434,48 @@ public sealed class OrchestratorTools
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Returns every investigation handle the orchestrator has minted (or knows about) since startup. " +
+        "Returns every investigation handle the orchestrator has minted on behalf of this MCP session. " +
         "By default only Active/Attaching handles are returned — pass includeTerminal=true to also see " +
-        "Closed/Expired/Failed entries for diagnostic forensics. Bearer tokens are never included; the " +
-        "shape matches attach_to_pod's response so the same envelope works for both tools.")]
+        "Closed/Expired/Failed entries for diagnostic forensics. Other sessions' handles are NEVER " +
+        "returned unless the orchestrator is configured with Orchestrator:AllowCrossSessionAdmin=true " +
+        "AND the caller passes includeAllSessions=true (operator-audit escape hatch). " +
+        "Bearer tokens are never included; the shape matches attach_to_pod's response so the same " +
+        "envelope works for both tools.")]
     public static Task<DiagnosticResult<InvestigationListPage>> ListActiveInvestigations(
         IInvestigationStore store,
         OrchestratorOptions options,
+        McpServer? server = null,
         [Description("When true, includes handles in terminal states (Closed/Expired/Failed). Default false — only Active/Attaching.")]
         bool includeTerminal = false,
+        [Description("Operator-only opt-in (requires Orchestrator:AllowCrossSessionAdmin=true). When true, returns handles minted by other MCP sessions. Default false — every caller sees only its own handles.")]
+        bool includeAllSessions = false,
         CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
 
         var snapshot = store.Snapshot();
 
+        // H6 (issue #164): determine the caller's MCP session id once. Handles
+        // owned by other sessions are filtered out below unless the admin
+        // escape hatch is active. A null sessionId (stdio / unit test) is
+        // treated as "system caller" and matches only handles that were minted
+        // without an owner (OwnerSessionId == null) — those are exactly the
+        // handles created on the same un-scoped transport, so the secure
+        // behavior degrades sensibly.
+        var callerSessionId = TryGetServerSessionId(server!);
+        var adminListing = includeAllSessions && options.AllowCrossSessionAdmin;
+
+        // B3 review (issue #164): when not in admin mode, counts and TotalKnown
+        // must be computed over the *visible* set only. Returning a global
+        // TotalKnown / state counts would re-introduce the enumeration side
+        // channel that H6 closes: an attacker could attach a tiny probe handle
+        // and watch the counts move as other sessions attached / detached.
         int active = 0, attaching = 0, closed = 0, expired = 0, failed = 0;
+        int visibleTotal = 0;
         foreach (var h in snapshot)
         {
+            if (!adminListing && !IsOwnedByCaller(h, callerSessionId)) continue;
+            visibleTotal++;
             switch (h.State)
             {
                 case InvestigationState.Active: active++; break;
@@ -437,9 +488,15 @@ public sealed class OrchestratorTools
 
         var proxyPrefix = options.ProxyBasePath.TrimEnd('/');
         var items = new List<AttachSession>(snapshot.Count);
+        var redactedCount = 0;
         foreach (var h in snapshot)
         {
             if (!includeTerminal && IsTerminalState(h.State)) continue;
+            if (!adminListing && !IsOwnedByCaller(h, callerSessionId))
+            {
+                redactedCount++;
+                continue;
+            }
             var proxyUrl = h.State == InvestigationState.Active
                 ? proxyPrefix + "/" + h.HandleId
                 : null;
@@ -450,7 +507,7 @@ public sealed class OrchestratorTools
 
         var page = new InvestigationListPage(
             Items: items,
-            TotalKnown: snapshot.Count,
+            TotalKnown: visibleTotal,
             ActiveCount: active,
             AttachingCount: attaching,
             ClosedCount: closed,
@@ -461,15 +518,22 @@ public sealed class OrchestratorTools
         if (items.Count == 0)
         {
             summary = includeTerminal
-                ? "list_active_investigations: no investigations on record."
-                : "list_active_investigations: no Active/Attaching investigations. Pass includeTerminal=true to inspect Closed/Expired/Failed history.";
+                ? "list_active_investigations: no investigations owned by this MCP session."
+                : "list_active_investigations: no Active/Attaching investigations owned by this MCP session. Pass includeTerminal=true to inspect Closed/Expired/Failed history.";
         }
         else
         {
             summary = $"list_active_investigations: {items.Count} returned (active={active}, attaching={attaching}" +
                       (includeTerminal ? $", closed={closed}, expired={expired}, failed={failed}" : "") +
-                      $"; totalKnown={snapshot.Count}).";
+                      $"; totalKnown={visibleTotal}" +
+                      (adminListing ? "; admin listing (includeAllSessions=true)" : string.Empty) +
+                      ").";
         }
+
+        // redactedCount is intentionally consumed internally for logging only.
+        // We do NOT include it in the user-visible summary because that would
+        // still leak the existence of other sessions' handles.
+        _ = redactedCount;
 
         return Task.FromResult(DiagnosticResult.Ok(
             page,
@@ -479,6 +543,18 @@ public sealed class OrchestratorTools
                 items.Count == 0
                     ? "Call attach_to_pod to open a new investigation."
                     : "Pass an item's handleId to detach_from_pod to close it explicitly, or wait for the TTL reaper.")));
+    }
+
+    private static bool IsOwnedByCaller(InvestigationHandle handle, string? callerSessionId)
+    {
+        // Handles minted without an owner (stdio attach, framework calls that had
+        // no session id) are reachable by every authenticated caller — this is
+        // intentional to preserve dev-time stdio ergonomics, where there is only
+        // ever one human driving the orchestrator. In HTTP deployments every
+        // attach happens through a session-bearing transport, so the owner is
+        // always populated and per-session isolation applies.
+        if (handle.OwnerSessionId is null) return true;
+        return string.Equals(handle.OwnerSessionId, callerSessionId, StringComparison.Ordinal);
     }
 
     private static bool IsTerminalState(InvestigationState state)

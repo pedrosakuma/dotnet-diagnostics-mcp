@@ -42,7 +42,7 @@ public sealed class OrchestratorToolsP4Tests
         fx.Binder.Bind("sess-a", h.HandleId);
 
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, server: null!, handleId: h.HandleId);
+            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         result.Data.Should().NotBeNull();
@@ -58,7 +58,7 @@ public sealed class OrchestratorToolsP4Tests
     {
         var fx = new Fixture();
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, server: null!, handleId: "missing");
+            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: "missing");
 
         result.IsError.Should().BeFalse();
         result.Data!.Found.Should().BeFalse();
@@ -70,7 +70,7 @@ public sealed class OrchestratorToolsP4Tests
     {
         var fx = new Fixture();
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, server: null!, handleId: null);
+            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: null);
 
         result.IsError.Should().BeFalse();
         result.Data!.HandleId.Should().BeEmpty();
@@ -88,11 +88,43 @@ public sealed class OrchestratorToolsP4Tests
         fx.Store.Add(h);
 
         var result = await OrchestratorTools.DetachFromPod(
-            fx.Closer, fx.Binder, server: null!, handleId: h.HandleId);
+            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
 
         result.IsError.Should().BeFalse();
         result.Data!.AlreadyTerminal.Should().BeTrue();
         result.Data.PreviousState.Should().Be(InvestigationState.Closed);
+    }
+
+    [Fact]
+    public async Task DetachFromPod_OwnerMismatch_ReturnsPermissionDenied()
+    {
+        // B3 review (issue #164): a handle owned by another MCP session must not be
+        // closable by an unrelated caller — otherwise any authenticated peer can DoS
+        // another session's investigation just by knowing the handle id.
+        var fx = new Fixture();
+        var h = Active() with { OwnerSessionId = "sess-other" };
+        fx.Store.Add(h);
+
+        var result = await OrchestratorTools.DetachFromPod(
+            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be("PermissionDenied");
+        fx.Store.GetById(h.HandleId)!.State.Should().Be(InvestigationState.Active);
+    }
+
+    [Fact]
+    public async Task DetachFromPod_OwnerMismatch_AdminOverride_Allows()
+    {
+        var fx = new Fixture { Options = { AllowCrossSessionAdmin = true } };
+        var h = Active() with { OwnerSessionId = "sess-other" };
+        fx.Store.Add(h);
+
+        var result = await OrchestratorTools.DetachFromPod(
+            fx.Closer, fx.Binder, fx.Store, fx.Options, server: null!, handleId: h.HandleId);
+
+        result.IsError.Should().BeFalse();
+        fx.Store.GetById(h.HandleId)!.State.Should().Be(InvestigationState.Closed);
     }
 
     // ---- list_active_investigations ------------------------------------------------------
@@ -176,6 +208,41 @@ public sealed class OrchestratorToolsP4Tests
         var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options);
 
         result.Data!.Items.Select(i => i.HandleId).Should().Equal("newest", "middle", "oldest");
+    }
+
+    [Fact]
+    public async Task ListActiveInvestigations_CrossSession_HidesOtherSessionsHandles()
+    {
+        // B3 review (issue #164 Med 2): counts and items must be computed over the
+        // visible-only set, not the global store, or the size of another session's
+        // investigation surface leaks via TotalKnown / *Count.
+        var fx = new Fixture();
+        fx.Store.Add(Active("a1") with { OwnerSessionId = "sess-other" });
+        fx.Store.Add(Active("a2") with { OwnerSessionId = "sess-other", State = InvestigationState.Attaching });
+        fx.Store.Add(Active("c1") with { OwnerSessionId = "sess-other", State = InvestigationState.Closed });
+
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, server: null!, includeTerminal: true);
+
+        result.IsError.Should().BeFalse();
+        result.Data!.TotalKnown.Should().Be(0);
+        result.Data.ActiveCount.Should().Be(0);
+        result.Data.AttachingCount.Should().Be(0);
+        result.Data.ClosedCount.Should().Be(0);
+        result.Data.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ListActiveInvestigations_AdminOverride_SeesEveryHandle()
+    {
+        var fx = new Fixture { Options = { AllowCrossSessionAdmin = true } };
+        fx.Store.Add(Active("a1") with { OwnerSessionId = "sess-other" });
+        fx.Store.Add(Active("a2") with { OwnerSessionId = "sess-other", State = InvestigationState.Closed });
+
+        var result = await OrchestratorTools.ListActiveInvestigations(fx.Store, fx.Options, server: null!, includeTerminal: true, includeAllSessions: true);
+
+        result.IsError.Should().BeFalse();
+        result.Data!.TotalKnown.Should().Be(2);
+        result.Data.Items.Should().HaveCount(2);
     }
 
     private sealed class Fixture

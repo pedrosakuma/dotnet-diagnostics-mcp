@@ -197,6 +197,35 @@ public sealed class InvestigationProxyCallToolFilterTests
         fx.LocalInvocations.Should().Be(0);
     }
 
+    [Fact]
+    public async Task RejectsDisallowedTool_BeforeForwarding()
+    {
+        // H7: even after binding, an unknown / non-DiagnosticTools tool name is
+        // rejected with a structured error result and is never forwarded. The
+        // allowlist is the second gate after BypassToolNames.
+        var fx = new Fixture();
+        fx.Binder.Bind("session-bad-tool", ActiveHandle.HandleId);
+        fx.Store.Add(ActiveHandle);
+
+        var result = await fx.Invoke(Params("totally_not_a_real_tool"), sessionId: "session-bad-tool");
+
+        result.IsError.Should().BeTrue();
+        fx.ProxyClient.CallCount.Should().Be(0, "the allowlist must reject the call before forwarding");
+        fx.LocalInvocations.Should().Be(0, "and must not fall back to local execution either");
+    }
+
+    [Fact]
+    public void Allowlist_ContainsKnownDiagnosticTools()
+    {
+        // Sanity-check the reflection-built allowlist actually loaded the expected
+        // tool surface. If this drops to zero, the [McpServerTool] discovery broke.
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("snapshot_counters");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("collect_cpu_sample");
+        InvestigationProxyToolAllowlist.IsAllowed("snapshot_counters").Should().BeTrue();
+        InvestigationProxyToolAllowlist.IsAllowed("totally_not_a_real_tool").Should().BeFalse();
+        InvestigationProxyToolAllowlist.IsAllowed(null).Should().BeFalse();
+    }
+
     [Theory]
     [InlineData("4242", true)]
     [InlineData("\"4242\"", true)]

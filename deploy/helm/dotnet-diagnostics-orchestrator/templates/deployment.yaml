@@ -79,6 +79,8 @@ spec:
               value: {{ .Values.orchestrator.defaultInvestigationTtlSeconds | quote }}
             - name: Orchestrator__ProxyPodPort
               value: {{ .Values.orchestrator.proxyPodPort | quote }}
+            - name: Orchestrator__AllowCrossSessionAdmin
+              value: {{ ternary "true" "false" .Values.orchestrator.allowCrossSessionAdmin | quote }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           readinessProbe:
