@@ -1,0 +1,20 @@
+# Smoke fixture: scoped `bearerTokens` only (RFC 0001 §6).
+# The legacy `bearerToken.value` is left at its public placeholder; the chart
+# must NOT render the legacy Secret nor the legacy MCP_BEARER_TOKEN env var.
+bearerTokens:
+  - name: ops-viewer
+    valueFrom:
+      secretKeyRef:
+        name: dotnet-diag-tokens
+        key: viewer
+    scopes:
+      - read-counters
+      - eventpipe
+      - investigation-export
+  - name: ops-admin
+    valueFrom:
+      secretKeyRef:
+        name: dotnet-diag-tokens
+        key: admin
+    scopes:
+      - "*"

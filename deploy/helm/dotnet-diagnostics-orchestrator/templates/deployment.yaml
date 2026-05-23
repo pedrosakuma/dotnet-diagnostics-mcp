@@ -45,11 +45,61 @@ spec:
           env:
             - name: ASPNETCORE_URLS
               value: {{ printf "http://0.0.0.0:%v" .Values.service.port | quote }}
+            {{- /*
+            Legacy single-bearer wiring. Rendered only when the operator has
+            opted into the legacy `bearerToken` block (existingSecret set, or
+            an explicit non-placeholder value). When the operator has migrated
+            to the scoped `bearerTokens` list and left `bearerToken` at its
+            defaults, secret.yaml skips rendering the legacy Secret and we
+            must skip the env ref here too — otherwise the Pod would fail to
+            start with "secret not found".
+
+            When BOTH legacy and scoped are configured at the same time the
+            scoped registry wins at runtime; the server emits a startup
+            warning naming the ignored MCP_BEARER_TOKEN (RFC 0001 §7.1).
+            */ -}}
+            {{- $hasLegacyBearer := or (ne .Values.bearerToken.existingSecret "") (and (ne .Values.bearerToken.value "") (ne .Values.bearerToken.value "replace-me-with-a-strong-random-token")) }}
+            {{- if $hasLegacyBearer }}
             - name: MCP_BEARER_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dotnet-diagnostics-orchestrator.secretName" . }}
                   key: token
+            {{- end }}
+            {{- /*
+            Scoped bearer tokens per RFC 0001 §6. Each entry expands to one
+            `__Name`, one `__Token` (valueFrom: secretKeyRef), and one
+            `__Scopes__{j}` env var per scope. `BearerTokenRegistry` (B5.1
+            #188) parses `Auth:BearerTokens` from this exact shape.
+            */ -}}
+            {{- range $i, $entry := .Values.bearerTokens }}
+            {{- if or (not $entry.name) (eq (toString $entry.name) "") }}
+            {{- fail (printf "bearerTokens[%d] is missing a non-empty `name`" $i) }}
+            {{- end }}
+            {{- if not $entry.valueFrom }}
+            {{- fail (printf "bearerTokens[%d] (%s) is missing `valueFrom.secretKeyRef`" $i $entry.name) }}
+            {{- end }}
+            {{- if not $entry.valueFrom.secretKeyRef }}
+            {{- fail (printf "bearerTokens[%d] (%s) requires `valueFrom.secretKeyRef` (literal token values are not accepted — store them in a Kubernetes Secret)" $i $entry.name) }}
+            {{- end }}
+            {{- if or (not (hasKey $entry.valueFrom.secretKeyRef "name")) (not (hasKey $entry.valueFrom.secretKeyRef "key")) }}
+            {{- fail (printf "bearerTokens[%d] (%s) `valueFrom.secretKeyRef` must set both `name` and `key`" $i $entry.name) }}
+            {{- end }}
+            {{- if or (not $entry.scopes) (eq (len $entry.scopes) 0) }}
+            {{- fail (printf "bearerTokens[%d] (%s) must declare at least one scope" $i $entry.name) }}
+            {{- end }}
+            - name: {{ printf "Auth__BearerTokens__%d__Name" $i }}
+              value: {{ $entry.name | quote }}
+            - name: {{ printf "Auth__BearerTokens__%d__Token" $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $entry.valueFrom.secretKeyRef.name | quote }}
+                  key: {{ $entry.valueFrom.secretKeyRef.key | quote }}
+            {{- range $j, $scope := $entry.scopes }}
+            - name: {{ printf "Auth__BearerTokens__%d__Scopes__%d" $i $j }}
+              value: {{ $scope | quote }}
+            {{- end }}
+            {{- end }}
             - name: Orchestrator__Enabled
               value: {{ ternary "true" "false" .Values.orchestrator.enabled | quote }}
             - name: Orchestrator__DefaultNamespace
