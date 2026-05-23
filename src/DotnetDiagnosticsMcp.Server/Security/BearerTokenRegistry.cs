@@ -22,6 +22,8 @@ internal sealed class BearerTokenRegistry : IPrincipalResolver
     // string can be discarded after construction. Iteration order is fixed at build time.
     private readonly IReadOnlyList<(byte[] TokenBytes, BearerPrincipal Principal)> _entries;
 
+    public static readonly BearerTokenRegistry Empty = new(Array.Empty<(byte[] TokenBytes, BearerPrincipal Principal)>());
+
     private BearerTokenRegistry(IReadOnlyList<(byte[] TokenBytes, BearerPrincipal Principal)> entries)
     {
         _entries = entries;

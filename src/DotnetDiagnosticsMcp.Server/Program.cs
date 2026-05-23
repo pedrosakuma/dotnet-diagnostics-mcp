@@ -29,6 +29,7 @@ if (args.Contains("--stdio"))
 }
 
 var builder = WebApplication.CreateBuilder(args);
+var oidcJwtAuth = builder.AddOidcJwtAuth();
 
 builder.Logging.AddSimpleConsole(o =>
 {
@@ -113,13 +114,13 @@ var hasScopedTokens = builder.Configuration.GetSection("Auth:BearerTokens").Exis
 var hasLegacyToken = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MCP_BEARER_TOKEN"));
 var boundToNonLoopback = BindingInspector.HasNonLoopbackBinding(app, builder.Configuration);
 
-if (boundToNonLoopback && !hasScopedTokens && !hasLegacyToken)
+if (boundToNonLoopback && !hasScopedTokens && !hasLegacyToken && !oidcJwtAuth.IsEnabled)
 {
     app.Logger.LogCritical(
         "Refusing to start: server is configured to bind to a non-loopback address but " +
-        "neither Auth:BearerTokens nor MCP_BEARER_TOKEN is set. " +
-        "Configure Auth:BearerTokens (preferred — see RFC 0001) or set MCP_BEARER_TOKEN " +
-        "to an operator-managed secret before exposing the MCP endpoint, " +
+        "neither Auth:BearerTokens, MCP_BEARER_TOKEN, nor MCP_OIDC_ISSUER/MCP_OIDC_AUDIENCE is set. " +
+        "Configure Auth:BearerTokens (preferred for opaque tokens), set MCP_BEARER_TOKEN, or enable OIDC/JWT validation " +
+        "with MCP_OIDC_ISSUER + MCP_OIDC_AUDIENCE before exposing the MCP endpoint, " +
         "or restrict --urls / ASPNETCORE_URLS to loopback (http://127.0.0.1:<port>) for local development.");
     return 1;
 }
@@ -134,17 +135,26 @@ if (boundToNonLoopback && !hasScopedTokens && hasLegacyToken)
 }
 
 BearerTokenRegistry registry;
-try
+if (oidcJwtAuth.IsEnabled && !hasScopedTokens && !hasLegacyToken)
 {
-    registry = BearerTokenRegistry.Build(
-        builder.Configuration,
-        app.Logger,
-        allowEphemeralFallback: !boundToNonLoopback);
+    registry = BearerTokenRegistry.Empty;
+    app.Logger.LogInformation(
+        "OIDC/JWT auth enabled without any opaque bearer tokens; JWT validation is active and opaque bearer values will be rejected.");
 }
-catch (InvalidOperationException ex)
+else
 {
-    app.Logger.LogCritical(ex, "Bearer auth registry failed to initialise.");
-    return 1;
+    try
+    {
+        registry = BearerTokenRegistry.Build(
+            builder.Configuration,
+            app.Logger,
+            allowEphemeralFallback: !boundToNonLoopback);
+    }
+    catch (InvalidOperationException ex)
+    {
+        app.Logger.LogCritical(ex, "Bearer auth registry failed to initialise.");
+        return 1;
+    }
 }
 
 // Singleton resolver — keeps the JWT/OIDC swap path (RFC 0001 §3.3) a one-line DI

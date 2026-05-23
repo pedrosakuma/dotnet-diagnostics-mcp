@@ -1,16 +1,17 @@
 using DotnetDiagnosticsMcp.Server.Security;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 
 namespace DotnetDiagnosticsMcp.Server.Auth;
 
 /// <summary>
-/// Scoped bearer-token auth middleware (RFC 0001 §3 / §5). Replaces the previous
-/// single-bearer string-compare with an <see cref="IPrincipalResolver"/> lookup and
-/// stamps the resolved <see cref="BearerPrincipal"/> on
-/// <see cref="HttpContext.Items"/> so the upcoming <c>[RequireScope]</c> filter
-/// (B5.2) can authorize per-tool.
+/// HTTP auth middleware for both opaque bearer tokens and OIDC-backed JWTs. Opaque
+/// tokens continue to resolve through <see cref="IPrincipalResolver"/>; JWT-shaped
+/// bearer values are validated through ASP.NET Core's <c>JwtBearerHandler</c> when
+/// OIDC is configured.
 /// </summary>
 /// <remarks>
 /// <para><c>/health</c> is allow-listed (same as before) so K8s/Docker probes do not
@@ -26,15 +27,18 @@ internal sealed class BearerTokenMiddleware
 
     private readonly RequestDelegate _next;
     private readonly IPrincipalResolver _resolver;
+    private readonly OidcJwtAuthOptions _oidcJwtAuthOptions;
     private readonly ILogger<BearerTokenMiddleware> _logger;
 
     public BearerTokenMiddleware(
         RequestDelegate next,
         IPrincipalResolver resolver,
+        OidcJwtAuthOptions oidcJwtAuthOptions,
         ILogger<BearerTokenMiddleware> logger)
     {
         _next = next;
         _resolver = resolver;
+        _oidcJwtAuthOptions = oidcJwtAuthOptions;
         _logger = logger;
     }
 
@@ -55,6 +59,38 @@ internal sealed class BearerTokenMiddleware
                 "Bearer auth denied: missing or malformed Authorization header. remoteIp={RemoteIp} missingHeader=true",
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
             await WriteUnauthorizedAsync(context).ConfigureAwait(false);
+            return;
+        }
+
+        if (_oidcJwtAuthOptions.IsEnabled && LooksLikeJwt(presented))
+        {
+            var authenticationService = context.RequestServices.GetRequiredService<IAuthenticationService>();
+            var authResult = await authenticationService
+                .AuthenticateAsync(context, OidcJwtAuthExtensions.JwtScheme)
+                .ConfigureAwait(false);
+
+            if (!authResult.Succeeded || authResult.Principal is null)
+            {
+                _logger.LogWarning(
+                    "Bearer auth denied: JWT validation failed. remoteIp={RemoteIp} missingHeader=false",
+                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+                await WriteUnauthorizedAsync(context).ConfigureAwait(false);
+                return;
+            }
+
+            context.User = authResult.Principal;
+            var jwtPrincipal = context.GetBearerPrincipal();
+            if (jwtPrincipal is null)
+            {
+                _logger.LogWarning(
+                    "Bearer auth denied: JWT validated but principal mapping was unavailable. remoteIp={RemoteIp} missingHeader=false",
+                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+                await WriteUnauthorizedAsync(context).ConfigureAwait(false);
+                return;
+            }
+
+            _logger.LogInformation("Bearer auth allowed for principal {TokenName}.", jwtPrincipal.Name);
+            await _next(context).ConfigureAwait(false);
             return;
         }
 
@@ -98,5 +134,43 @@ internal sealed class BearerTokenMiddleware
 
         token = header[prefix.Length..].Trim();
         return token.Length > 0;
+    }
+
+    private static bool LooksLikeJwt(string token)
+    {
+        var firstDot = token.IndexOf('.');
+        if (firstDot <= 0)
+        {
+            return false;
+        }
+
+        var secondDot = token.IndexOf('.', firstDot + 1);
+        if (secondDot <= firstDot + 1 || secondDot >= token.Length - 1)
+        {
+            return false;
+        }
+
+        return IsJwtSegment(token.AsSpan(0, firstDot)) &&
+            IsJwtSegment(token.AsSpan(firstDot + 1, secondDot - firstDot - 1)) &&
+            IsJwtSegment(token.AsSpan(secondDot + 1));
+    }
+
+    private static bool IsJwtSegment(ReadOnlySpan<char> segment)
+    {
+        foreach (var c in segment)
+        {
+            if ((c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' ||
+                c == '_')
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 }

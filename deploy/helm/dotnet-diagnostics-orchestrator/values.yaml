@@ -107,6 +107,21 @@ bearerTokens: []
 #     scopes:
 #       - "*"
 
+# Optional OIDC / JWT validation for HTTP clients. When enabled the chart emits
+# MCP_OIDC_* env vars so the server validates JWT-shaped bearer tokens via the
+# configured issuer and audience, while opaque bearer tokens continue to flow
+# through bearerTokens / MCP_BEARER_TOKEN unchanged.
+oidc:
+  enabled: false
+  issuer: ""
+  audience: ""
+  # Optional override when your issuer puts scopes in a non-standard claim.
+  # Leave empty to accept either `scp` or `scope`.
+  scopeClaim: ""
+  # Optional JSON object mapping claim names to required values (string), arrays
+  # of allowed values, or null for claim presence only.
+  requiredClaimsJson: ""
+
 orchestrator:
   enabled: true
   # Leave empty to default to the chart namespace.

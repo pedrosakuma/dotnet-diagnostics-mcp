@@ -1,7 +1,7 @@
 # Helm deployment: dotnet-diagnostics-orchestrator
 
 The central orchestrator Helm chart lives at [`dotnet-diagnostics-orchestrator/`](./dotnet-diagnostics-orchestrator).
-It deploys the Phase 7 orchestrator surface (`list_pods`, `attach_to_pod`, routed diagnostics tools) behind the same bearer-token auth model as the existing sidecar.
+It deploys the Phase 7 orchestrator surface (`list_pods`, `attach_to_pod`, routed diagnostics tools) behind the same HTTP auth surface as the existing sidecar: legacy/static bearer tokens, scoped opaque tokens, or OIDC/JWT validation.
 
 ## Quick start: Helm
 
@@ -26,10 +26,7 @@ Run `helm test diag-orchestrator -n diagnosticsmcp-system` after install to veri
 
 ## TLS is required for any non-loopback bind
 
-The orchestrator authenticates clients with a static bearer token. **The token
-travels in the `Authorization` header on every request**, so plaintext HTTP on
-anything other than a strict loopback interface lets any network observer on the
-path (kube-proxy hop, mesh sidecar, transparent IDS, …) replay the bearer.
+The orchestrator authenticates clients with either opaque bearer tokens or OIDC-minted JWTs. **The bearer/JWT travels in the `Authorization` header on every request**, so plaintext HTTP on anything other than a strict loopback interface lets any network observer on the path (kube-proxy hop, mesh sidecar, transparent IDS, …) replay it.
 
 Two equally-valid postures are supported:
 
@@ -219,6 +216,32 @@ remain available as fallback; they log a once-per-process deprecation warning
 when they are what unlocked a call. See `docs/tool-reference.md` § "Security
 gates (B4)" and `docs/rfcs/0001-per-tool-authorization-scopes.md` § 7 for the
 deprecation timeline.
+
+## OIDC / JWT auth (Phase 8 / #196)
+
+Set `oidc.enabled=true` to let the HTTP transport accept JWT-shaped bearer tokens from an external issuer (Entra ID, IAM Identity Center, Keycloak, workload identity federation, ...). Opaque bearer tokens keep working unchanged; the server routes JWT-shaped tokens through OIDC discovery + JWKS validation and leaves everything else on `bearerTokens` / `MCP_BEARER_TOKEN`.
+
+### `values.yaml` example
+
+```yaml
+oidc:
+  enabled: true
+  issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+  audience: api://dotnet-diagnostics-mcp
+  # Optional when your issuer uses a non-standard claim name.
+  scopeClaim: ""
+  # Optional: claim presence only -> null, exact value -> string, allowlist -> array.
+  requiredClaimsJson: '{"azp":"diag-client"}'
+```
+
+When enabled the chart renders these env vars into the Pod:
+
+- `MCP_OIDC_ISSUER`
+- `MCP_OIDC_AUDIENCE`
+- optional `MCP_OIDC_SCOPE_CLAIM`
+- optional `MCP_OIDC_REQUIRED_CLAIMS_JSON`
+
+`oidc.enabled=true` requires both `oidc.issuer` and `oidc.audience`. Use `requiredClaimsJson` to pin extra issuer-specific claims such as `azp`, `appid`, or tenant ids without changing server code.
 
 ## Operations and security
 

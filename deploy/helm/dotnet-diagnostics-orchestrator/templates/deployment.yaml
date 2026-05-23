@@ -108,6 +108,26 @@ spec:
               value: {{ $scope | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.oidc.enabled }}
+            {{- if eq (toString (default "" .Values.oidc.issuer) | trim) "" }}
+            {{- fail "oidc.enabled=true requires a non-empty oidc.issuer" }}
+            {{- end }}
+            {{- if eq (toString (default "" .Values.oidc.audience) | trim) "" }}
+            {{- fail "oidc.enabled=true requires a non-empty oidc.audience" }}
+            {{- end }}
+            - name: MCP_OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: MCP_OIDC_AUDIENCE
+              value: {{ .Values.oidc.audience | quote }}
+            {{- if ne (toString (default "" .Values.oidc.scopeClaim) | trim) "" }}
+            - name: MCP_OIDC_SCOPE_CLAIM
+              value: {{ .Values.oidc.scopeClaim | quote }}
+            {{- end }}
+            {{- if ne (toString (default "" .Values.oidc.requiredClaimsJson) | trim) "" }}
+            - name: MCP_OIDC_REQUIRED_CLAIMS_JSON
+              value: {{ .Values.oidc.requiredClaimsJson | quote }}
+            {{- end }}
+            {{- end }}
             - name: Orchestrator__Enabled
               value: {{ ternary "true" "false" .Values.orchestrator.enabled | quote }}
             - name: Orchestrator__DefaultNamespace

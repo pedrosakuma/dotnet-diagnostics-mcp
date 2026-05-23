@@ -51,6 +51,7 @@ public sealed class BearerTokenMiddlewareTests
         var middleware = new BearerTokenMiddleware(
             ctx => { nextCalled = true; return Task.CompletedTask; },
             resolver,
+            OidcJwtAuthOptions.Disabled,
             logger ?? NullLogger<BearerTokenMiddleware>.Instance);
 
         var ctx = new DefaultHttpContext();

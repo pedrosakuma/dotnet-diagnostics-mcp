@@ -6,7 +6,7 @@
   Desktop, Cursor, ...) spawns the server as a child process per session. No daemon,
   no bearer token, no ports — every `dotnet tool update` + client reload picks up
   the fresh binary automatically (see #74 for the motivation).
-- **Streamable HTTP** at `POST /mcp` with `Authorization: Bearer <token>`
+- **Streamable HTTP** at `POST /mcp` with `Authorization: Bearer <token-or-jwt>`
   (default; intended for Kubernetes sidecar / shared-server scenarios where one
   long-running server is consumed by multiple clients or pods).
 
@@ -61,6 +61,56 @@ curl -fsS http://localhost:5000/health
 
 curl -fsS http://localhost:5000/mcp -H "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
+
+## OIDC quickstart (HTTP transport)
+
+Set these env vars on the server to enable JWT validation next to the existing opaque bearer tokens:
+
+```bash
+export MCP_OIDC_ISSUER="https://issuer.example.com"
+export MCP_OIDC_AUDIENCE="dotnet-diagnostics-mcp"
+# Optional: require extra issuer-specific claims.
+export MCP_OIDC_REQUIRED_CLAIMS_JSON='{"azp":"diag-client"}'
+```
+
+Then send the access token exactly like the legacy bearer path:
+
+```bash
+curl -i http://localhost:5000/mcp \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+### Microsoft Entra ID
+
+```bash
+export MCP_OIDC_ISSUER="https://login.microsoftonline.com/<tenant-id>/v2.0"
+export MCP_OIDC_AUDIENCE="api://dotnet-diagnostics-mcp"
+export MCP_OIDC_REQUIRED_CLAIMS_JSON='{"azp":"<client-id>"}'
+```
+
+Use the app registration / managed identity to mint an access token for `api://dotnet-diagnostics-mcp`, and put your MCP scopes in the token's `scp` claim.
+
+### AWS IAM Identity Center
+
+```bash
+export MCP_OIDC_ISSUER="https://oidc.<region>.amazonaws.com/id/<provider-id>"
+export MCP_OIDC_AUDIENCE="dotnet-diagnostics-mcp"
+export MCP_OIDC_REQUIRED_CLAIMS_JSON='{"client_id":"<application-arn-or-client-id>"}'
+```
+
+Map your permission set or trusted token issuer so the resulting JWT carries the MCP scopes in `scope` or `scp`.
+
+### Keycloak
+
+```bash
+export MCP_OIDC_ISSUER="https://keycloak.example.com/realms/<realm>"
+export MCP_OIDC_AUDIENCE="dotnet-diagnostics-mcp"
+# Optional when Keycloak stores scopes in a custom claim instead of `scope` / `scp`.
+export MCP_OIDC_SCOPE_CLAIM="scope"
+export MCP_OIDC_REQUIRED_CLAIMS_JSON='{"azp":"dotnet-diagnostics-mcp-client"}'
+```
+
+Create a confidential client or service account, add the MCP scopes to its client scope mapping, and pass the resulting access token in the `Authorization` header.
 
 ## 2. Connect from the C# MCP SDK
 
