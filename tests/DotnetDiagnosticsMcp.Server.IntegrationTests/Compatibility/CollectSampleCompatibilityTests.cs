@@ -121,19 +121,44 @@ public sealed class CollectSampleCompatibilityTests : IClassFixture<CollectSampl
             ["topN"] = 10,
         };
 
-        var legacy = DeserializeStructured<AllocationSample>(
-            await client.CallToolAsync("collect_allocation_sample", common, cancellationToken: CancellationToken.None));
-        var unified = DeserializeStructured<CollectSampleEnvelope>(
-            await client.CallToolAsync("collect_sample", With(common, ("kind", "allocation")), cancellationToken: CancellationToken.None));
+        // GCAllocationTick fires every ~100KB of managed allocations. Without explicit
+        // pressure the test host may produce zero ticks in one of the two 2s windows
+        // (causing TopByBytes non-emptiness to differ between legacy and unified runs).
+        // Drive a steady ~5MB/s allocation rate from a background task that spans both
+        // sample windows; cancel it after both calls complete.
+        using var pressureCts = new CancellationTokenSource();
+        var pressureTask = Task.Run(async () =>
+        {
+            var rng = new Random(42);
+            while (!pressureCts.IsCancellationRequested)
+            {
+                _ = new byte[64 * 1024];
+                _ = rng.Next();
+                await Task.Delay(10, pressureCts.Token).ConfigureAwait(false);
+            }
+        }, pressureCts.Token);
 
-        unified!.Kind.Should().Be("allocation");
-        unified.Allocation.Should().NotBeNull();
-        unified.Cpu.Should().BeNull();
-        unified.OffCpu.Should().BeNull();
+        try
+        {
+            var legacy = DeserializeStructured<AllocationSample>(
+                await client.CallToolAsync("collect_allocation_sample", common, cancellationToken: CancellationToken.None));
+            var unified = DeserializeStructured<CollectSampleEnvelope>(
+                await client.CallToolAsync("collect_sample", With(common, ("kind", "allocation")), cancellationToken: CancellationToken.None));
 
-        unified.Allocation!.ProcessId.Should().Be(legacy!.ProcessId);
-        unified.Allocation.TotalEvents.Should().BeGreaterThanOrEqualTo(0);
-        AssertSameShape(legacy, unified.Allocation);
+            unified!.Kind.Should().Be("allocation");
+            unified.Allocation.Should().NotBeNull();
+            unified.Cpu.Should().BeNull();
+            unified.OffCpu.Should().BeNull();
+
+            unified.Allocation!.ProcessId.Should().Be(legacy!.ProcessId);
+            unified.Allocation.TotalEvents.Should().BeGreaterThanOrEqualTo(0);
+            AssertSameShape(legacy, unified.Allocation);
+        }
+        finally
+        {
+            pressureCts.Cancel();
+            try { await pressureTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
+        }
     }
 
     [Fact]
