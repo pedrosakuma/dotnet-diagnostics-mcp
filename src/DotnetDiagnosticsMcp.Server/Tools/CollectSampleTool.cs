@@ -184,11 +184,14 @@ public sealed class CollectSampleTool
         string kind,
         Func<CollectSampleEnvelope, TInner, CollectSampleEnvelope> populate)
     {
-        var envelope = new CollectSampleEnvelope(kind);
-        if (inner.Data is not null)
-        {
-            envelope = populate(envelope, inner.Data);
-        }
+        // Preserve the legacy ack shape: when the legacy collector returns success with a null
+        // payload (e.g. runAsJob=true on cpu emits a job-handle ack with Data=null), keep Data
+        // null on the unified envelope too. Wrapping null as `CollectSampleEnvelope(kind)` with
+        // all kind fields = null would violate the "exactly one populated payload field"
+        // contract and silently change the ack JSON shape.
+        CollectSampleEnvelope? envelope = inner.Data is null
+            ? null
+            : populate(new CollectSampleEnvelope(kind), inner.Data);
 
         return new DiagnosticResult<CollectSampleEnvelope>(inner.Summary, inner.Hints, inner.Error)
         {

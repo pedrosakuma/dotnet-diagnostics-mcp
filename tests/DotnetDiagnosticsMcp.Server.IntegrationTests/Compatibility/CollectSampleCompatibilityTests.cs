@@ -62,7 +62,52 @@ public sealed class CollectSampleCompatibilityTests : IClassFixture<CollectSampl
         unified.Allocation.Should().BeNull();
 
         unified.Cpu!.ProcessId.Should().Be(legacy!.ProcessId);
+
+        // Field-stripping guard: every public property the legacy payload populated must also be
+        // populated on the unified side. Counts of variable-content collections (TopHotspots,
+        // ResolvedFrames, …) may legitimately differ run-to-run, so we only assert presence /
+        // non-null parity here rather than byte-equality. Catches regressions where the
+        // discriminator wrapper accidentally drops a sub-record.
+        AssertSameShape(legacy, unified.Cpu);
     }
+
+    [Fact]
+    public async Task Kind_Cpu_RunAsJob_PreservesLegacyJobAckShape()
+    {
+        // Issue #210 / reviewer note: with runAsJob=true the legacy CollectCpuSample returns a
+        // success envelope whose Data is null and whose Handle carries the job id. The unified
+        // tool must preserve that shape exactly — not wrap null as `{ kind:"cpu", cpu:null, … }`,
+        // which would silently change the ack JSON for every existing async-collection client.
+        await using var client = await ConnectAsync();
+
+        var common = new Dictionary<string, object?>
+        {
+            ["processId"] = Environment.ProcessId,
+            ["durationSeconds"] = 2,
+            ["topN"] = 5,
+            ["resolveSourceLines"] = false,
+            ["runAsJob"] = true,
+        };
+
+        var legacyResult = await client.CallToolAsync("collect_cpu_sample", common, cancellationToken: CancellationToken.None);
+        var unifiedResult = await client.CallToolAsync("collect_sample", With(common, ("kind", "cpu")), cancellationToken: CancellationToken.None);
+
+        var legacy = DeserializeEnvelope(legacyResult)!;
+        var unified = DeserializeEnvelope(unifiedResult)!;
+
+        legacy.Error.Should().BeNull();
+        unified.Error.Should().BeNull();
+        legacy.Handle.Should().NotBeNullOrEmpty("legacy runAsJob ack carries the job handle");
+        unified.Handle.Should().NotBeNullOrEmpty("unified runAsJob ack must carry the same handle field");
+
+        // The job-ack Data must be null on BOTH legacy and unified — wrapping it as an empty
+        // CollectSampleEnvelope would violate the byte-equivalence contract.
+        IsJsonNullOrAbsent(legacy.Data).Should().BeTrue("legacy runAsJob ack has Data=null");
+        IsJsonNullOrAbsent(unified.Data).Should().BeTrue("unified runAsJob ack must keep Data=null, not wrap it as an empty envelope");
+    }
+
+    private static bool IsJsonNullOrAbsent(JsonElement? element)
+        => element is null || element.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined;
 
     [Fact]
     public async Task Kind_Allocation_MatchesLegacyCollectAllocationSample()
@@ -88,6 +133,7 @@ public sealed class CollectSampleCompatibilityTests : IClassFixture<CollectSampl
 
         unified.Allocation!.ProcessId.Should().Be(legacy!.ProcessId);
         unified.Allocation.TotalEvents.Should().BeGreaterThanOrEqualTo(0);
+        AssertSameShape(legacy, unified.Allocation);
     }
 
     [Fact]
@@ -127,6 +173,7 @@ public sealed class CollectSampleCompatibilityTests : IClassFixture<CollectSampl
         unified.Cpu.Should().BeNull();
         unified.Allocation.Should().BeNull();
         unified.OffCpu!.ProcessId.Should().Be(legacy!.ProcessId);
+        AssertSameShape(legacy, unified.OffCpu);
     }
 
     [Fact]
@@ -167,6 +214,43 @@ public sealed class CollectSampleCompatibilityTests : IClassFixture<CollectSampl
         }
 
         tools.Should().Contain(t => t.Name == "collect_sample");
+    }
+
+    /// <summary>
+    /// Structural-parity check between the legacy payload and the unified payload routed onto
+    /// the same kind slot. Sampling data necessarily differs between two independent collection
+    /// runs (different threads scheduled, different GCAllocationTick fires, …) so we cannot
+    /// byte-compare values. Instead we walk the public properties and assert that every
+    /// property the legacy payload populated to a non-null/non-empty value is also populated on
+    /// the unified payload, and that collection-typed properties match in non-emptiness. This is
+    /// the strongest run-to-run check available and catches the failure modes the consolidation
+    /// could plausibly introduce: dropped sub-records, stripped collections, or null-projection
+    /// regressions in <see cref="CollectSampleTool"/>.
+    /// </summary>
+    private static void AssertSameShape<T>(T legacy, T unified) where T : class
+    {
+        legacy.Should().NotBeNull();
+        unified.Should().NotBeNull();
+
+        foreach (var prop in typeof(T).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            var l = prop.GetValue(legacy);
+            var u = prop.GetValue(unified);
+
+            if (l is null) continue;
+
+            u.Should().NotBeNull($"property '{prop.Name}' was populated by the legacy collector but is null on the unified payload (field-stripping regression)");
+
+            if (l is System.Collections.IEnumerable lEnum and not string)
+            {
+                var lAny = lEnum.Cast<object?>().Any();
+                var uAny = ((System.Collections.IEnumerable)u!).Cast<object?>().Any();
+                // Both runs must agree on whether the collection produced any items. Run-to-run
+                // jitter means the contents will differ, but a regression that strips the field
+                // would surface as "legacy non-empty / unified empty".
+                uAny.Should().Be(lAny, $"property '{prop.Name}' non-emptiness must match between legacy and unified payloads");
+            }
+        }
     }
 
     private static Dictionary<string, object?> With(Dictionary<string, object?> source, params (string Key, object? Value)[] overrides)
