@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using DotnetDiagnosticsMcp.Server.Hosting;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
@@ -124,11 +124,23 @@ public sealed class PodLocalToolSurfacesTests
         }
     }
 
-    private static string ReadDiagnosticServiceRegistrationSource([CallerFilePath] string? thisFile = null)
+    private static string ReadDiagnosticServiceRegistrationSource()
     {
-        // thisFile resolves to .../tests/DotnetDiagnosticsMcp.Server.IntegrationTests/PodLocalToolSurfacesTests.cs.
-        var repoRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile!)!, "..", ".."));
-        var path = Path.Combine(repoRoot, "src", "DotnetDiagnosticsMcp.Server", "Hosting", "DiagnosticServiceRegistration.cs");
+        // [CallerFilePath] is unusable in deterministic CI builds (paths collapse to "/_/...").
+        // Walk up from the test assembly location until we find the repo root (marked by
+        // DotnetDiagnosticsMcp.slnx), then read the source file from src/.
+        var dir = Path.GetDirectoryName(typeof(PodLocalToolSurfacesTests).Assembly.Location);
+        while (dir is not null && !File.Exists(Path.Combine(dir, "DotnetDiagnosticsMcp.slnx")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+        if (dir is null)
+        {
+            throw new FileNotFoundException(
+                "Could not locate repo root (DotnetDiagnosticsMcp.slnx) by walking up from " +
+                typeof(PodLocalToolSurfacesTests).Assembly.Location);
+        }
+        var path = Path.Combine(dir, "src", "DotnetDiagnosticsMcp.Server", "Hosting", "DiagnosticServiceRegistration.cs");
         return File.ReadAllText(path);
     }
 }
