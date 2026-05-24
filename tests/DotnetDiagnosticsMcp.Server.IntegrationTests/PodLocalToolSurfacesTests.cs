@@ -1,4 +1,8 @@
+using System;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using DotnetDiagnosticsMcp.Server.Hosting;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
@@ -89,5 +93,42 @@ public sealed class PodLocalToolSurfacesTests
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("inspect_heap");
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("inspect_process");
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("get_bytes");
+    }
+
+    /// <summary>
+    /// The AOT-friendly <c>WithTools&lt;T&gt;()</c> chain in
+    /// <c>DiagnosticServiceRegistration.AddDiagnosticServer</c> is intentionally still
+    /// hand-rolled (it requires a compile-time generic argument so the source generator can
+    /// emit the dispatch glue). It is therefore the one site that can silently drift from
+    /// <see cref="PodLocalToolSurfaces"/>. This test parses the source file and asserts the
+    /// chain mentions every type in <see cref="PodLocalToolSurfaces.Always"/> and every type
+    /// in <see cref="PodLocalToolSurfaces.OrchestratorOnly"/> — without it, a future Wave 3
+    /// PR could add a surface to the helper, see the scope/deprecation/proxy registries pick
+    /// it up, and never notice the SDK is not dispatching it.
+    /// </summary>
+    [Fact]
+    public void WithTools_Chain_In_DiagnosticServiceRegistration_Matches_PodLocalToolSurfaces()
+    {
+        var registrationSource = ReadDiagnosticServiceRegistrationSource();
+
+        var withToolsTypeNames = Regex
+            .Matches(registrationSource, @"\.WithTools<\s*([A-Za-z_][A-Za-z0-9_]*)\s*>\(\s*\)")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var surface in PodLocalToolSurfaces.Always.Concat(PodLocalToolSurfaces.OrchestratorOnly))
+        {
+            withToolsTypeNames.Should().Contain(
+                surface.Name,
+                $"DiagnosticServiceRegistration.AddDiagnosticServer must call .WithTools<{surface.Name}>() for every type listed in PodLocalToolSurfaces");
+        }
+    }
+
+    private static string ReadDiagnosticServiceRegistrationSource([CallerFilePath] string? thisFile = null)
+    {
+        // thisFile resolves to .../tests/DotnetDiagnosticsMcp.Server.IntegrationTests/PodLocalToolSurfacesTests.cs.
+        var repoRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile!)!, "..", ".."));
+        var path = Path.Combine(repoRoot, "src", "DotnetDiagnosticsMcp.Server", "Hosting", "DiagnosticServiceRegistration.cs");
+        return File.ReadAllText(path);
     }
 }

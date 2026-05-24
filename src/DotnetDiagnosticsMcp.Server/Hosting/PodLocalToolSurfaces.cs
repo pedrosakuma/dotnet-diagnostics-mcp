@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
 
@@ -30,42 +31,47 @@ namespace DotnetDiagnosticsMcp.Server.Hosting;
 internal static class PodLocalToolSurfaces
 {
     /// <summary>Tool-surface classes registered on every server (no orchestrator dependency).</summary>
-    public static IReadOnlyList<Type> Always { get; } = new[]
+    /// <remarks>
+    /// Exposed as <see cref="ImmutableArray{T}"/> rather than <see cref="IReadOnlyList{T}"/> so consumers
+    /// cannot cast back to <c>Type[]</c> and mutate the canonical list (would propagate to every site —
+    /// including the lazy-built <c>InvestigationProxyToolAllowlist</c> set).
+    /// </remarks>
+    public static ImmutableArray<Type> Always { get; } = ImmutableArray.Create(new[]
     {
         typeof(DiagnosticTools),
         typeof(CollectEventsTool),
         typeof(GetBytesTool),
         typeof(InspectProcessTool),
         typeof(InspectHeapTool),
-    };
+    });
 
     /// <summary>Tool-surface classes registered only when orchestrator features are enabled.</summary>
-    public static IReadOnlyList<Type> OrchestratorOnly { get; } = new[]
+    public static ImmutableArray<Type> OrchestratorOnly { get; } = ImmutableArray.Create(new[]
     {
         typeof(OrchestratorTools),
         typeof(ListOrchestratorTool),
-    };
+    });
 
     /// <summary>
     /// Subset of tool-surface classes that the orchestrator reverse proxy is allowed to forward
     /// to the pod-local sidecar. By contract this excludes <see cref="OrchestratorOnly"/>
     /// (the pod-local server doesn't host those tools).
     /// </summary>
-    public static IReadOnlyList<Type> Proxyable => Always;
+    public static ImmutableArray<Type> Proxyable => Always;
 
     /// <summary>Returns the full set of surfaces to register given the orchestrator toggle.</summary>
     public static Type[] GetSurfaceTypes(bool enableOrchestratorTools)
     {
         if (!enableOrchestratorTools)
         {
-            var copy = new Type[Always.Count];
-            for (var i = 0; i < Always.Count; i++) copy[i] = Always[i];
+            var copy = new Type[Always.Length];
+            for (var i = 0; i < Always.Length; i++) copy[i] = Always[i];
             return copy;
         }
 
-        var combined = new Type[Always.Count + OrchestratorOnly.Count];
-        for (var i = 0; i < Always.Count; i++) combined[i] = Always[i];
-        for (var i = 0; i < OrchestratorOnly.Count; i++) combined[Always.Count + i] = OrchestratorOnly[i];
+        var combined = new Type[Always.Length + OrchestratorOnly.Length];
+        for (var i = 0; i < Always.Length; i++) combined[i] = Always[i];
+        for (var i = 0; i < OrchestratorOnly.Length; i++) combined[Always.Length + i] = OrchestratorOnly[i];
         return combined;
     }
 }
