@@ -43,12 +43,12 @@ internal static class InvestigationProxyToolAllowlist
     private static HashSet<string> BuildSet()
     {
         var set = new HashSet<string>(StringComparer.Ordinal);
-        // Pod-local diagnostic surface — DiagnosticTools (legacy + non-RFC-0002 tools) plus
-        // every type that hosts an additional [McpServerToolType] reachable through the
-        // pod-local sidecar. Keep this list in lock-step with DiagnosticServiceRegistration's
-        // WithTools<>() chain so a new tool-surface class added there cannot be silently
-        // unreachable through the orchestrator proxy.
-        foreach (var surface in new[] { typeof(DiagnosticTools), typeof(GetBytesTool), typeof(InspectProcessTool) })
+        // Pod-local diagnostic surface — sourced from PodLocalToolSurfaces.Proxyable so
+        // adding a new pod-local tool surface there automatically makes its tools
+        // forwardable through the orchestrator proxy. Orchestrator-management tools
+        // (PodLocalToolSurfaces.OrchestratorOnly) are intentionally excluded — they live
+        // on the orchestrator process and the pod-local sidecar wouldn't understand them.
+        foreach (var surface in DotnetDiagnosticsMcp.Server.Hosting.PodLocalToolSurfaces.Proxyable)
         {
             foreach (var method in surface.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
             {

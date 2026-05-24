@@ -216,6 +216,11 @@ internal static class DiagnosticServiceRegistration
             .WithTools<GetBytesTool>()
             .WithTools<InspectProcessTool>()
             .WithTools<InspectHeapTool>()
+            // ⚠️ Keep this chain in lock-step with PodLocalToolSurfaces.Always — every type
+            // listed there must appear above so the SDK actually dispatches to it. The
+            // surface-type registries below (scope + deprecation) and the orchestrator
+            // proxy allowlist already read from PodLocalToolSurfaces; this chain stays
+            // explicit to keep AOT-friendly generic registration.
             .WithPrompts<Prompts.DiagnosticPrompts>()
             .WithResources<Resources.InvestigationGuideResources>()
             .WithResources<Resources.TraceSessionResources>()
@@ -251,9 +256,7 @@ internal static class DiagnosticServiceRegistration
                 {
                     if (cachedFilter is null)
                     {
-                        var surfaceTypes = enableOrchestratorTools
-                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(InspectHeapTool), typeof(OrchestratorTools), typeof(ListOrchestratorTool) }
-                            : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(InspectHeapTool) };
+                        var surfaceTypes = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools);
                         cachedRegistry = Security.ToolScopeRegistry.Build(surfaceTypes);
 
                         cachedFilter = Security.ToolScopeAuthorizationFilter.Create(
@@ -299,9 +302,7 @@ internal static class DiagnosticServiceRegistration
                     }
                     else
                     {
-                        var surfaceTypes = enableOrchestratorTools
-                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(InspectHeapTool), typeof(OrchestratorTools), typeof(ListOrchestratorTool) }
-                            : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(InspectHeapTool) };
+                        var surfaceTypes = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools);
                         cached = ToolDeprecationRegistry.Build(
                             surfaceTypes,
                             loggerFactoryAccessor()?.CreateLogger<ToolDeprecationRegistry>());
