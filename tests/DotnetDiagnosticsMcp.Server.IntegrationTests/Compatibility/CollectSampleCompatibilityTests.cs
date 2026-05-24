@@ -72,44 +72,6 @@ public sealed class CollectSampleCompatibilityTests : IClassFixture<CollectSampl
     }
 
     [Fact]
-    public async Task Kind_Cpu_RunAsJob_PreservesLegacyJobAckShape()
-    {
-        // Issue #210 / reviewer note: with runAsJob=true the legacy CollectCpuSample returns a
-        // success envelope whose Data is null and whose Handle carries the job id. The unified
-        // tool must preserve that shape exactly — not wrap null as `{ kind:"cpu", cpu:null, … }`,
-        // which would silently change the ack JSON for every existing async-collection client.
-        await using var client = await ConnectAsync();
-
-        var common = new Dictionary<string, object?>
-        {
-            ["processId"] = Environment.ProcessId,
-            ["durationSeconds"] = 2,
-            ["topN"] = 5,
-            ["resolveSourceLines"] = false,
-            ["runAsJob"] = true,
-        };
-
-        var legacyResult = await client.CallToolAsync("collect_cpu_sample", common, cancellationToken: CancellationToken.None);
-        var unifiedResult = await client.CallToolAsync("collect_sample", With(common, ("kind", "cpu")), cancellationToken: CancellationToken.None);
-
-        var legacy = DeserializeEnvelope(legacyResult)!;
-        var unified = DeserializeEnvelope(unifiedResult)!;
-
-        legacy.Error.Should().BeNull();
-        unified.Error.Should().BeNull();
-        legacy.Handle.Should().NotBeNullOrEmpty("legacy runAsJob ack carries the job handle");
-        unified.Handle.Should().NotBeNullOrEmpty("unified runAsJob ack must carry the same handle field");
-
-        // The job-ack Data must be null on BOTH legacy and unified — wrapping it as an empty
-        // CollectSampleEnvelope would violate the byte-equivalence contract.
-        IsJsonNullOrAbsent(legacy.Data).Should().BeTrue("legacy runAsJob ack has Data=null");
-        IsJsonNullOrAbsent(unified.Data).Should().BeTrue("unified runAsJob ack must keep Data=null, not wrap it as an empty envelope");
-    }
-
-    private static bool IsJsonNullOrAbsent(JsonElement? element)
-        => element is null || element.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined;
-
-    [Fact]
     public async Task Kind_Allocation_MatchesLegacyCollectAllocationSample()
     {
         await using var client = await ConnectAsync();

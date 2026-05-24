@@ -67,7 +67,6 @@ Legend: `✅` works · `⚠️` works with caveats (footnote) · `❌` unavailab
 | `collect_process_dump` | ✅ | ✅ | ✅ native dump | ✅ native dump |
 | `capture_method_bytes` | ✅ JIT code-heap | ✅ JIT code-heap | ❌ [^jit-only] | ❌ [^jit-only] |
 | `start_investigation` / `export_investigation_summary` / `compare_to_baseline` | ✅ | ✅ | ✅ | ✅ |
-| `get_collection_status` / `cancel_collection` | ✅ | ✅ | ✅ | ✅ |
 
 [^stale]: Resolved in [#108](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/108): stale diagnostic sockets and Linux TID collisions are filtered out via thread-group-leader validation. Affected `v0.3.0` and `v0.3.1`; fixed on `main`.
 [^aot-eventsource]: The provider must be embedded in the AOT binary at publish time. Sources added via assembly load after publish are not reachable.

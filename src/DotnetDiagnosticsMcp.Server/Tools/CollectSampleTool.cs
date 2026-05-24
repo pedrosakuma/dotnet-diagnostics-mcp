@@ -18,16 +18,13 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// RFC 0002 §4.2 consolidation: single MCP entry-point for the bounded-time sampling
 /// family — <c>cpu</c>, <c>off_cpu</c>, <c>allocation</c>. Delegates to the legacy
 /// <see cref="DiagnosticTools"/> methods so per-kind behaviour (provider/keyword setup,
-/// SSRF guards, ClrMD enrichment, <c>runAsJob</c> semantics) is preserved verbatim —
-/// asserted byte-for-byte by the dual-entrypoint compatibility tests.
+/// SSRF guards, ClrMD enrichment) is preserved verbatim — asserted byte-for-byte by the
+/// dual-entrypoint compatibility tests.
 /// </summary>
 /// <remarks>
 /// <para>The legacy tools (<c>collect_cpu_sample</c>, <c>collect_off_cpu_sample</c>,
 /// <c>collect_allocation_sample</c>) stay registered and functional, stamped with
 /// <see cref="DeprecatedToolAttribute"/> for a deprecation window — see issue #210.</para>
-/// <para>The MCP-task / <c>runAsJob</c> async cutover is tracked separately by issue #211;
-/// this tool preserves the existing <c>runAsJob=true</c> behaviour for <c>kind="cpu"</c>
-/// without altering its lifecycle.</para>
 /// </remarks>
 [McpServerToolType]
 public sealed class CollectSampleTool
@@ -62,9 +59,9 @@ public sealed class CollectSampleTool
         "ContextSwitch via NT Kernel Logger), or 'allocation' (GCAllocationTick rolled up by type — " +
         "TypeName is empty on NativeAOT, surfaced as a caveat in the envelope summary). " +
         "Each kind preserves the parameters and behaviour of its legacy collector tool, including " +
-        "the SSRF-guarded `symbolPath` precedence chain, ClrMD generic-instantiation enrichment for " +
-        "CPU samples, and the `runAsJob=true` background-job lifecycle for CPU samples (the async / " +
-        "MCP Tasks cutover is tracked separately by issue #211). " +
+        "the SSRF-guarded `symbolPath` precedence chain and ClrMD generic-instantiation enrichment " +
+        "for CPU samples. Long-running collections expose MCP-native notifications/progress + " +
+        "notifications/cancelled on the same tools/call request, or can be promoted to an MCP Task. " +
         "Returns a polymorphic envelope with exactly one of {cpu, offCpu, allocation} populated " +
         "alongside the chosen kind, the issued handle, and standard NextActionHints.")]
     public static async Task<DiagnosticResult<CollectSampleEnvelope>> CollectSample(
@@ -72,7 +69,6 @@ public sealed class CollectSampleTool
         IOffCpuSampler offCpuSampler,
         EventPipeAllocationSampler allocationSampler,
         IDiagnosticHandleStore handles,
-        DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
         IProcessContextResolver resolver,
         SymbolServerAllowlist symbolServerAllowlist,
         IPrincipalAccessor principalAccessor,
@@ -101,9 +97,8 @@ public sealed class CollectSampleTool
         bool resolveMethodInstantiations = false,
         [Description("kind='cpu' only. Cap on how many top hotspots get ClrMD generic-instantiation enrichment. Must be >= 1. Defaults to the requested topN.")]
         int? maxResolvedMethodInstantiations = null,
-        [Description("kind='cpu' only. If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed'. Defaults to false (synchronous). The MCP-task cutover that retires this flag is tracked by issue #211.")]
-        bool runAsJob = false,
         LegacyDiagnosticsFlagDeprecation? deprecation = null,
+        RequestContext<CallToolRequestParams>? requestContext = null,
         CancellationToken cancellationToken = default)
     {
         if (!DiscriminatorDispatch.TryValidate<CollectSampleEnvelope>(
@@ -118,7 +113,6 @@ public sealed class CollectSampleTool
                 await DiagnosticTools.CollectCpuSample(
                     cpuSampler,
                     handles,
-                    jobs,
                     resolver,
                     symbolServerAllowlist,
                     principalAccessor,
@@ -130,11 +124,9 @@ public sealed class CollectSampleTool
                     maxResolvedSources,
                     resolveMethodInstantiations,
                     maxResolvedMethodInstantiations,
-                    runAsJob,
                     depth,
                     deprecation,
-                    runAsJobDeprecation: null,
-                    requestContext: null,
+                    requestContext,
                     cancellationToken).ConfigureAwait(false),
                 KindCpu,
                 (env, data) => env with { Cpu = data }),
@@ -186,11 +178,6 @@ public sealed class CollectSampleTool
         string kind,
         Func<CollectSampleEnvelope, TInner, CollectSampleEnvelope> populate)
     {
-        // Preserve the legacy ack shape: when the legacy collector returns success with a null
-        // payload (e.g. runAsJob=true on cpu emits a job-handle ack with Data=null), keep Data
-        // null on the unified envelope too. Wrapping null as `CollectSampleEnvelope(kind)` with
-        // all kind fields = null would violate the "exactly one populated payload field"
-        // contract and silently change the ack JSON shape.
         CollectSampleEnvelope? envelope = inner.Data is null
             ? null
             : populate(new CollectSampleEnvelope(kind), inner.Data);
@@ -201,6 +188,7 @@ public sealed class CollectSampleTool
             Handle = inner.Handle,
             HandleExpiresAt = inner.HandleExpiresAt,
             ResolvedProcess = inner.ResolvedProcess,
+            Cancelled = inner.Cancelled,
         };
     }
 }

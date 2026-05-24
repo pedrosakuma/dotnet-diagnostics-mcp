@@ -47,8 +47,6 @@ over it. If `[McpServerTool]` decorations move, only this section must be re-pin
 | `start_investigation` | DiagnosticTools.cs:2465 |
 | `export_investigation_summary` | DiagnosticTools.cs:2519 |
 | `compare_to_baseline` | DiagnosticTools.cs:2582 |
-| `get_collection_status` | DiagnosticTools.cs:2655 |
-| `cancel_collection` | DiagnosticTools.cs:2776 |
 
 `OrchestratorTools.cs` (4 tools):
 
@@ -324,12 +322,10 @@ suitably small dump files (`<= 256 MiB`) from the target environment.
 | `export_investigation_summary` | DiagnosticTools.cs:2519 |
 | `compare_to_baseline` | DiagnosticTools.cs:2582 |
 | `get_call_tree` | DiagnosticTools.cs:647 |
-| `get_collection_status` | DiagnosticTools.cs:2655 |
-| `cancel_collection` | DiagnosticTools.cs:2776 |
 
 **Privilege rationale.** Read-only meta-tools — they consult planning state, emit
-JSON/Markdown summaries, and steer (`get_collection_status` / `cancel_collection`)
-background jobs the caller already minted as part of the investigation. No new
+JSON/Markdown summaries, and steer
+investigation drilldowns the caller already minted. No new
 collection is performed. The bucket also covers `get_call_tree`, which is a pure
 drilldown over an already-collected CPU sample handle (and so authorizes per the
 handle-ownership rule in §2.12 once that lands). Distinct scope because the *contents*
@@ -339,15 +335,15 @@ may want to gate export separately (e.g. forbid customer-support roles from emit
 summaries containing exception text).
 
 **Risk if leaked.** Adversary can re-export prior findings (already in their possession
-if they were the original collector) and cancel in-flight collections they minted. Low
+if they were the original collector). Low
 marginal risk; included for completeness.
 
 ### 2.11 `job-control` *(reserved — no tools currently assigned)*
 
-The strawman in #166 proposed a dedicated `job-control` bucket for
-`get_collection_status` / `cancel_collection`. The B5.2 implementation folded both into
-`investigation-export` (§2.10) on the rationale that, until dump jobs go async, every
-job-control surface in the server is an investigation drilldown. The name is reserved
+The strawman in #166 proposed a dedicated `job-control` bucket for the legacy
+`get_collection_status` / `cancel_collection` MCP surfaces. Those tools were retired
+in RFC 0002 Stage B (issue #211) in favour of MCP-native progress + cancellation, so
+no production tool maps to this scope today. The name is reserved
 here so a future PR can introduce it cleanly the moment a job-control-only surface
 appears (e.g. a watchdog token that can cancel but not enumerate prior findings).
 
@@ -445,10 +441,10 @@ plus five modifier scopes. Differences:
 - **Added `module-bytes-read`** (literal modifier) — needed to gate the cross-MCP
   byte-export tools added for orchestrator mode without letting `root` / `*`
   silently export pod-local binaries and dumps.
-- **`job-control` reserved but unused** — strawman split `get_collection_status` /
-  `cancel_collection` into a dedicated bucket. B5.2 folded them into
-  `investigation-export` (along with `get_call_tree`) on the rationale that the only
-  current job-control surfaces are investigation drilldowns. The name is held in
+- **`job-control` reserved but unused** — strawman split the legacy
+  `get_collection_status` / `cancel_collection` MCP surfaces into a dedicated bucket.
+  Those tools were retired in RFC 0002 Stage B (issue #211), so no production tool
+  maps to this scope today. The name is held in
   reserve (§2.11) for a future watchdog-style role.
 - **Moved `start_investigation` into `investigation-export`** (strawman had it loose).
 - **Stacked `ptrace` on top of `heap-read` for `inspect_live_heap`** rather than minting

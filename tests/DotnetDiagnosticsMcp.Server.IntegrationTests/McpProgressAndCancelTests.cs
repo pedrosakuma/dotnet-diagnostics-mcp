@@ -9,13 +9,11 @@ using ModelContextProtocol.Client;
 namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
 
 /// <summary>
-/// Stage A of RFC 0002 §7.3 #7 / issue #211 — end-to-end coverage for the MCP-native
-/// progress and cancellation path on long-running collectors (<c>collect_cpu_sample</c>
-/// and the merged <c>collect_events</c> surface). The polling-based
-/// <c>runAsJob</c>/<c>get_collection_status</c>/<c>cancel_collection</c> path stays
-/// covered by <see cref="McpToolsTests.CollectCpuSample_RunAsJob_HandleSurvivesAndPollableUntilCompleted"/>;
-/// these tests assert the new path so Stage B (which deletes the polling tools) can
-/// land without losing test coverage.
+/// RFC 0002 §7.3 #7 / issue #211 — end-to-end coverage for the MCP-native progress and
+/// cancellation path on long-running collectors (<c>collect_cpu_sample</c> and the merged
+/// <c>collect_events</c> surface). This is the only surface for async collection now that
+/// Stage B removed the legacy <c>runAsJob</c> / <c>get_collection_status</c> /
+/// <c>cancel_collection</c> polling tools.
 /// </summary>
 [Collection(DiagnosticIntegrationGroup.Name)]
 public sealed class McpProgressAndCancelTests : IClassFixture<McpProgressAndCancelTests.AuthedFactory>

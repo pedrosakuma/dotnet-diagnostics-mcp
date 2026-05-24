@@ -227,14 +227,13 @@ on `tools/call`:
 Cutover plan:
 
 1. Update your MCP client SDK to a version that emits a progress token on
-   long-running `tools/call`.
-2. Stop passing `runAsJob=true`. The server still accepts it in Stage A but
-   logs a once-per-process Warning (`runAsJob=true is deprecated…`) so
-   operators can confirm no traffic still depends on it.
-3. Stop calling `get_collection_status` / `cancel_collection`. They remain in
-   Stage A; both will be removed in **Stage B** once
-   [issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211)
-   completes the client-matrix audit.
+   long-running `tools/call`, or — for spec-compliant clients — adopts
+   MCP Tasks (`params.task` + `tasks/get` + `tasks/result` + `tasks/cancel`).
+2. Either path is sufficient: progress + cancel notifications cover the
+   in-request lifecycle, while MCP Tasks cover the detached-poll lifecycle.
 
-If your client cannot be updated, the legacy polling path remains functional
-in this release.
+> **Stage B (RFC 0002 §7.3 #7 / [issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211)).**
+> The legacy `collect_cpu_sample(runAsJob=true)` + `get_collection_status` +
+> `cancel_collection` polling bridge has been removed. The tool surface
+> dropped by two: clients that still depend on the polling path must adopt
+> one of the two paths above before upgrading.

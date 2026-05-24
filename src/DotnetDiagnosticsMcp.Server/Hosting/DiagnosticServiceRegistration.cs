@@ -50,9 +50,6 @@ internal static class DiagnosticServiceRegistration
         // principal lacking the matching modifier scope. Singleton so the once-flags
         // survive across requests.
         services.AddSingleton<Security.LegacyDiagnosticsFlagDeprecation>();
-        // Stage A of RFC 0002 §7.3 #7 / issue #211 — once-per-process warning when a client
-        // still uses the legacy runAsJob=true path instead of MCP-native progress + cancel.
-        services.AddSingleton<Security.LegacyRunAsJobDeprecation>();
 
         services.AddSingleton(new SymbolPathBuilder(configuredSymbolPath));
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Artifacts.IArtifactRootProvider, DotnetDiagnosticsMcp.Core.Artifacts.EnvironmentArtifactRootProvider>();
@@ -105,7 +102,6 @@ internal static class DiagnosticServiceRegistration
                 pollInterval: System.TimeSpan.FromSeconds(1),
                 maxTasks: 32,
                 maxTasksPerSession: 32));
-        services.AddSingleton<DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner, DotnetDiagnosticsMcp.Core.Jobs.CollectionJobRunner>();
         services.AddHostedService<HandleEvictionBackgroundService>();
 
         return services;

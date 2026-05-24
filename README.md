@@ -58,7 +58,6 @@ tests/
 | `collect_process_dump` | Write a Mini / Triage / WithHeap / Full dump to disk |
 | `start_investigation` | Structured plan (cold / warm / hypothesis) before any collector runs |
 | `export_investigation_summary` / `compare_to_baseline` | Portable JSON memory; LLM persists, diffs across deploys |
-| `get_collection_status` / `cancel_collection` | Background-job lifecycle for long collections |
 
 Full schemas and return shapes: [`docs/tool-reference.md`](./docs/tool-reference.md).
 Common investigation recipes: [`docs/investigation-playbooks.md`](./docs/investigation-playbooks.md).
