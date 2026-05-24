@@ -43,16 +43,12 @@ internal static class InvestigationProxyToolAllowlist
     private static HashSet<string> BuildSet()
     {
         var set = new HashSet<string>(StringComparer.Ordinal);
-<<<<<<< HEAD
-        foreach (var surface in new[] { typeof(DiagnosticTools), typeof(GetBytesTool) })
-=======
         // Pod-local diagnostic surface — DiagnosticTools (legacy + non-RFC-0002 tools) plus
         // every type that hosts an additional [McpServerToolType] reachable through the
         // pod-local sidecar. Keep this list in lock-step with DiagnosticServiceRegistration's
         // WithTools<>() chain so a new tool-surface class added there cannot be silently
         // unreachable through the orchestrator proxy.
-        foreach (var surface in new[] { typeof(DiagnosticTools), typeof(InspectProcessTool) })
->>>>>>> 467e189 (feat(rfc0002): inspect_process(view=...) — bootstrap consolidation (closes #209))
+        foreach (var surface in new[] { typeof(DiagnosticTools), typeof(GetBytesTool), typeof(InspectProcessTool) })
         {
             foreach (var method in surface.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance))
             {

@@ -98,6 +98,8 @@ public sealed class InspectProcessTool
         int durationSeconds = 10,
         [Description("view=memory_trend only — interval between consecutive samples in seconds. Must be >= 1. Defaults to 2.")]
         int sampleEverySeconds = 2,
+        [Description("view=container only — depth knob forwarded to get_container_signals. Summary (default) drops the Notes[] caveats; Detail / Raw keep them.")]
+        SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
         if (!DiscriminatorDispatch.TryValidate<InspectProcessReport>(
@@ -121,7 +123,7 @@ public sealed class InspectProcessTool
                 (report, data) => report with { Capabilities = data }),
             ContainerView => Wrap(
                 await DiagnosticTools.GetContainerSignals(
-                        containerCollector, resolver, processId, depth: SamplingDepth.Summary, cancellationToken)
+                        containerCollector, resolver, processId, depth: depth, cancellationToken)
                     .ConfigureAwait(false),
                 canonical,
                 (report, data) => report with { Container = data }),
