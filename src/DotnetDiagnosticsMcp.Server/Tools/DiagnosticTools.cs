@@ -22,6 +22,7 @@ using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Threads;
 using DotnetDiagnosticsMcp.Server.Security;
+using DotnetDiagnosticsMcp.Server.Diagnostics;
 using DotnetDiagnosticsMcp.Server.Tools.Deprecation;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol;
@@ -479,10 +480,12 @@ public sealed class DiagnosticTools
         [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to the requested topN so every emitted MethodIdentity carries its resolved SourceLocation when available.")] int? maxResolvedSources = null,
         [Description("If true, performs an opt-in ClrMD attach after sampling to recover closed generic instantiations for the hottest managed frames (displayed on MethodIdentity as ClosedSignature + GenericTypeArguments.Method). CoreCLR only. On Linux this requires CAP_SYS_PTRACE (or ptrace_scope=0) and briefly suspends the target during the attach. Defaults to false to keep the EventPipe-only path lightweight.")] bool resolveMethodInstantiations = false,
         [Description("Cap on how many top hotspots get ClrMD generic-instantiation enrichment. Must be >= 1. Defaults to the requested topN so the enrichment work stays bounded to the hottest frames.")] int? maxResolvedMethodInstantiations = null,
-        [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous).")] bool runAsJob = false,
+        [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous). DEPRECATED: spec-compliant clients should rely on MCP notifications/progress + notifications/cancelled instead; runAsJob=true is scheduled for removal in Stage B of RFC 0002 §7.3 #7 (issue #211).")] bool runAsJob = false,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 hotspots inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full sample is always retained behind the issued handle — drill in with get_call_tree.")]
         SamplingDepth depth = SamplingDepth.Summary,
         LegacyDiagnosticsFlagDeprecation? deprecation = null,
+        LegacyRunAsJobDeprecation? runAsJobDeprecation = null,
+        RequestContext<CallToolRequestParams>? requestContext = null,
         CancellationToken cancellationToken = default)
     {
         if (durationSeconds < 1) return InvalidArg<CpuSample>(nameof(durationSeconds), "must be >= 1");
@@ -514,6 +517,8 @@ public sealed class DiagnosticTools
 
         if (runAsJob)
         {
+            // Stage A of RFC 0002 §7.3 #7 / issue #211: legacy polling path is deprecated.
+            runAsJobDeprecation?.NotifyRunAsJobUse();
             // Detach: the job outlives the MCP request, so we must not cancel it when the
             // request token trips. The runner's own cancel hook is what stops it.
             var jobTtl = TimeSpan.FromSeconds(durationSeconds) + CpuSampleHandleTtl;
@@ -551,7 +556,27 @@ public sealed class DiagnosticTools
         CpuSampleResult result;
         try
         {
-            result = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, instantiationOpts, cancellationToken).ConfigureAwait(false);
+            result = await CollectionProgressTicker.RunAsync(
+                requestContext,
+                "collect_cpu_sample",
+                TimeSpan.FromSeconds(durationSeconds),
+                TimeSpan.FromSeconds(1),
+                ct => sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, instantiationOpts, ct),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // MCP-native cancel path (notifications/cancelled). Return a partial envelope so the
+            // client knows the operation terminated cleanly without polling get_collection_status.
+            return WithContext(
+                new DiagnosticResult<CpuSample>(
+                    $"CPU sampling cancelled by the client after starting against pid {pid}. " +
+                    "No samples were retained — restart the collection to capture data.",
+                    Array.Empty<NextActionHint>())
+                {
+                    Cancelled = true,
+                },
+                ctx);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("elevation", StringComparison.OrdinalIgnoreCase) ||
                                                     ex.Message.Contains("privilege", StringComparison.OrdinalIgnoreCase) ||

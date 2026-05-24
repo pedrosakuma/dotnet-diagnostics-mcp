@@ -109,6 +109,47 @@ The legacy fallback remains for clients that do not implement Tasks yet:
 Task's state through the legacy tool. Do **not** combine task augmentation with
 `runAsJob=true` on the same call.
 
+### MCP-native progress and cancellation (RFC 0002 §7.3 #7 / issue #211)
+
+In addition to MCP Tasks, long-running collectors now emit standard MCP
+`notifications/progress` messages and honor `notifications/cancelled` on the
+same `tools/call` request — no second round-trip, no polling. This is the
+**preferred** path for clients that don't implement the full Tasks lifecycle.
+
+Tools wired up so far (Stage A):
+
+- `collect_cpu_sample`
+- `collect_events` (every `kind` — counters, exceptions, gc, event_source, activities)
+
+How it works:
+
+- The client sends a normal `tools/call` request with `_meta.progressToken` set
+  (most C# / TypeScript SDKs do this automatically when an `IProgress<…>` is passed
+  to `CallToolAsync`).
+- The server emits `notifications/progress` on a ~1s cadence while the collector
+  is running, plus a terminal `progress=100` on success.
+- If the client cancels the in-flight `tools/call` request (its SDK
+  `CancellationToken` trips, or it sends an MCP `notifications/cancelled`
+  scoped to that **request id** — not to the progress token), the underlying
+  EventPipe / sampler session is torn down and the server returns a
+  `DiagnosticResult<T>` envelope with `cancelled: true` and empty data.
+  Depending on which side of the race wins, some MCP client SDKs surface
+  the cancellation as an `OperationCanceledException` instead of returning
+  the envelope — both shapes are spec-conformant.
+
+Stage A deprecation:
+
+- `collect_cpu_sample(runAsJob=true)` still works, but logs a once-per-process
+  Warning the first time it's invoked. Operators can grep server logs for
+  `runAsJob=true is deprecated` to find clients that still depend on the
+  polling bridge.
+- `get_collection_status` and `cancel_collection` remain available.
+
+Stage B (separate PR, gated on the client-matrix audit on
+[issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211))
+will delete `get_collection_status`, `cancel_collection`, and the `runAsJob`
+parameter, dropping the tool surface by two.
+
 ### Prompts (curated playbooks)
 
 In addition to tools, the server exposes 6 MCP **Prompts** that pre-package the

@@ -199,3 +199,42 @@ curl -i http://localhost:5000/mcp -H "Authorization: Bearer $MCP_BEARER_TOKEN"
   Envoy) or a service mesh for TLS and additional access controls.
 - **Logs** are JSON-friendly via `SimpleConsole`; pipe stdout into your
   collector of choice.
+
+## Long-running collectors: cutover to MCP-native progress and cancellation
+
+Stage A of [RFC 0002 §7.3 #7 / issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211)
+adds MCP-native progress and cancellation to `collect_cpu_sample` and
+`collect_events`. Clients should stop using the legacy polling bridge as soon
+as their MCP runtime supports `notifications/progress` + `notifications/cancelled`
+on `tools/call`:
+
+- **C# MCP SDK** (≥ `1.3.0`): pass an `IProgress<ProgressNotificationValue>` to
+  `client.CallToolAsync(name, args, progress, cancellationToken)`. Cancellation
+  flows through the `CancellationToken`.
+- **TypeScript MCP SDK** (≥ `1.5.0`): set `_meta.progressToken` on the
+  `tools/call` request and listen for `notifications/progress`. To cancel,
+  abort the in-flight request (the SDK then sends an MCP
+  `notifications/cancelled` whose `requestId` matches the original
+  `tools/call` — **cancellation is request-scoped, not progress-token-scoped**).
+- **Generic clients**: any MCP-spec-compliant client that handles
+  `notifications/progress` works — the server emits progress on a ~1s cadence
+  and a terminal `100%` on completion. When the server-side cancel handler
+  wins the race, the call returns a structured envelope with `cancelled: true`;
+  when the client transport closes first, the SDK typically surfaces the
+  cancellation as an exception. Both are spec-conformant — render either as
+  a "stopped" state.
+
+Cutover plan:
+
+1. Update your MCP client SDK to a version that emits a progress token on
+   long-running `tools/call`.
+2. Stop passing `runAsJob=true`. The server still accepts it in Stage A but
+   logs a once-per-process Warning (`runAsJob=true is deprecated…`) so
+   operators can confirm no traffic still depends on it.
+3. Stop calling `get_collection_status` / `cancel_collection`. They remain in
+   Stage A; both will be removed in **Stage B** once
+   [issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211)
+   completes the client-matrix audit.
+
+If your client cannot be updated, the legacy polling path remains functional
+in this release.

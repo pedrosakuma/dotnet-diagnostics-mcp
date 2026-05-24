@@ -10,7 +10,9 @@ using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Tools.Dispatch;
+using DotnetDiagnosticsMcp.Server.Diagnostics;
 using DotnetDiagnosticsMcp.Server.Security;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace DotnetDiagnosticsMcp.Server.Tools;
@@ -118,6 +120,7 @@ public sealed class CollectEventsTool
         [Description("kind=activities only. Maximum number of captured activities to retain. Must be >= 1. Defaults to 200.")]
         int maxActivities = 200,
         LegacyDiagnosticsFlagDeprecation? deprecation = null,
+        RequestContext<CallToolRequestParams>? requestContext = null,
         CancellationToken cancellationToken = default)
     {
         if (!DiscriminatorDispatch.TryValidate<CollectEventsEnvelope>(
@@ -149,56 +152,79 @@ public sealed class CollectEventsTool
         // the parameter see no behavioral change.
         var effectiveDuration = durationSeconds ?? (canonicalKind == "counters" ? 5 : 10);
 
-        return canonicalKind switch
+        // Stage A of RFC 0002 §7.3 #7 / issue #211: emit MCP notifications/progress while the
+        // EventPipe session is open, and translate MCP notifications/cancelled into a partial
+        // envelope so spec-compliant clients no longer need the legacy job-polling bridge.
+        try
         {
-            "counters" => Project(
-                await DiagnosticTools.SnapshotCounters(
-                    counterCollector, resolver, handles,
-                    processId, effectiveDuration, providers, intervalSeconds, depth,
-                    cancellationToken).ConfigureAwait(false),
-                "counters",
-                (env, data) => env with { Counters = data }),
+            return await CollectionProgressTicker.RunAsync(
+                requestContext,
+                $"collect_events:{canonicalKind}",
+                TimeSpan.FromSeconds(effectiveDuration),
+                TimeSpan.FromSeconds(1),
+                async ct => canonicalKind switch
+                {
+                    "counters" => Project(
+                        await DiagnosticTools.SnapshotCounters(
+                            counterCollector, resolver, handles,
+                            processId, effectiveDuration, providers, intervalSeconds, depth,
+                            ct).ConfigureAwait(false),
+                        "counters",
+                        (env, data) => env with { Counters = data }),
 
-            "exceptions" => Project(
-                await DiagnosticTools.CollectExceptions(
-                    exceptionCollector, resolver, handles,
-                    processId, effectiveDuration, maxRecent, depth,
-                    cancellationToken).ConfigureAwait(false),
-                "exceptions",
-                (env, data) => env with { Exceptions = data }),
+                    "exceptions" => Project(
+                        await DiagnosticTools.CollectExceptions(
+                            exceptionCollector, resolver, handles,
+                            processId, effectiveDuration, maxRecent, depth,
+                            ct).ConfigureAwait(false),
+                        "exceptions",
+                        (env, data) => env with { Exceptions = data }),
 
-            "gc" => Project(
-                await DiagnosticTools.CollectGcEvents(
-                    gcCollector, resolver, handles,
-                    processId, effectiveDuration, maxEvents, depth,
-                    cancellationToken).ConfigureAwait(false),
-                "gc",
-                (env, data) => env with { Gc = data }),
+                    "gc" => Project(
+                        await DiagnosticTools.CollectGcEvents(
+                            gcCollector, resolver, handles,
+                            processId, effectiveDuration, maxEvents, depth,
+                            ct).ConfigureAwait(false),
+                        "gc",
+                        (env, data) => env with { Gc = data }),
 
-            "event_source" => Project(
-                await DiagnosticTools.CollectEventSource(
-                    eventSourceCollector, resolver, handles,
-                    allowlist, sensitiveGate, principalAccessor,
-                    providerName ?? string.Empty,
-                    processId, effectiveDuration, keywords, eventLevel, maxEvents, depth,
-                    unsafeProvider, deprecation,
-                    cancellationToken).ConfigureAwait(false),
-                "event_source",
-                (env, data) => env with { EventSource = data }),
+                    "event_source" => Project(
+                        await DiagnosticTools.CollectEventSource(
+                            eventSourceCollector, resolver, handles,
+                            allowlist, sensitiveGate, principalAccessor,
+                            providerName ?? string.Empty,
+                            processId, effectiveDuration, keywords, eventLevel, maxEvents, depth,
+                            unsafeProvider, deprecation,
+                            ct).ConfigureAwait(false),
+                        "event_source",
+                        (env, data) => env with { EventSource = data }),
 
-            "activities" => Project(
-                await DiagnosticTools.CollectActivities(
-                    activityCollector, resolver, handles,
-                    processId, sources, effectiveDuration, maxActivities,
-                    cancellationToken).ConfigureAwait(false),
-                "activities",
-                (env, data) => env with { Activities = data }),
+                    "activities" => Project(
+                        await DiagnosticTools.CollectActivities(
+                            activityCollector, resolver, handles,
+                            processId, sources, effectiveDuration, maxActivities,
+                            ct).ConfigureAwait(false),
+                        "activities",
+                        (env, data) => env with { Activities = data }),
 
-            // Unreachable — TryValidate narrowed canonicalKind to the AllowedKinds set above.
-            _ => DiagnosticResult.Fail<CollectEventsEnvelope>(
-                $"Unhandled kind '{canonicalKind}'.",
-                new DiagnosticError("InvalidArgument", $"Unhandled kind '{canonicalKind}'.", nameof(kind))),
-        };
+                    // Unreachable — TryValidate narrowed canonicalKind to the AllowedKinds set above.
+                    _ => DiagnosticResult.Fail<CollectEventsEnvelope>(
+                        $"Unhandled kind '{canonicalKind}'.",
+                        new DiagnosticError("InvalidArgument", $"Unhandled kind '{canonicalKind}'.", nameof(kind))),
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new DiagnosticResult<CollectEventsEnvelope>(
+                $"collect_events(kind='{canonicalKind}') cancelled by the client before the {effectiveDuration}s window elapsed. " +
+                "No payload was retained — restart the collection to capture data.",
+                Array.Empty<NextActionHint>())
+            {
+                Data = new CollectEventsEnvelope(canonicalKind),
+                Cancelled = true,
+            };
+        }
     }
 
     /// <summary>
