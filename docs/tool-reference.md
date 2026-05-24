@@ -38,7 +38,7 @@ envelope alongside `data` / `summary` / `hints`:
 ```
 
 This means the previously-obligatory opener of
-`list_dotnet_processes` → `get_diagnostic_capabilities` → `<tool>` collapses to
+[`inspect_process(view="list")`](#inspect_process) → `inspect_process(view="capabilities")` → `<tool>` collapses to
 a single `<tool>` call when there is only one .NET process visible to the
 sidecar. The capability digest is cached per pid for 60 seconds so back-to-back
 tool calls within an investigation pay the probe cost once.
@@ -256,11 +256,12 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 
 | Tool | Cost | Requires CoreCLR? | NativeAOT? | Side effects |
 |---|---|---|---|---|
-| [`list_dotnet_processes`](#list_dotnet_processes) | cheap | no | ✅ | none |
-| [`get_process_info`](#get_process_info) | cheap | no | ✅ | none |
-| [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) | ~2 s | no | ✅ | opens a short EventPipe probe |
-| [`get_container_signals`](#get_container_signals) | cheap | no | ✅ (Linux) | reads `/sys/fs/cgroup` + `/proc` files |
-| [`get_memory_trend`](#get_memory_trend) | window-bound | no | ✅ | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
+| [`inspect_process`](#inspect_process) | depends on `view` | no | ✅ | union of the five legacy bootstrap tools below |
+| [`list_dotnet_processes`](#list_dotnet_processes) *(deprecated — use `inspect_process(view="list")`)* | cheap | no | ✅ | none |
+| [`get_process_info`](#get_process_info) *(deprecated — use `inspect_process(view="info")`)* | cheap | no | ✅ | none |
+| [`get_diagnostic_capabilities`](#get_diagnostic_capabilities) *(deprecated — use `inspect_process(view="capabilities")`)* | ~2 s | no | ✅ | opens a short EventPipe probe |
+| [`get_container_signals`](#get_container_signals) *(deprecated — use `inspect_process(view="container")`)* | cheap | no | ✅ (Linux) | reads `/sys/fs/cgroup` + `/proc` files |
+| [`get_memory_trend`](#get_memory_trend) *(deprecated — use `inspect_process(view="memory_trend")`)* | window-bound | no | ✅ | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
 | `collect_off_cpu_sample` (Linux/Windows) | window-bound | no | ✅ (Linux) | system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
 | `query_off_cpu_snapshot` | cheap | no | ✅ | drilldown on handle from `collect_off_cpu_sample` |
 | [`collect_events`](#collect_events) | window-bound | no | ✅ (mostly — see kind) | **Canonical EventPipe collector.** Dispatches by `kind` to counters/exceptions/gc/event_source/activities. |
@@ -326,7 +327,58 @@ hint to the perf-replay fallback tracked in issue #92.
 
 ---
 
+## `inspect_process`
+
+**Canonical bootstrap tool** ([RFC 0002 §4.6](./rfcs/0002-tool-surface-consolidation.md)).
+Consolidates the five legacy metadata tools — `list_dotnet_processes`,
+`get_process_info`, `get_diagnostic_capabilities`, `get_container_signals`,
+`get_memory_trend` — behind one `view` discriminator. Each view delegates to
+the same implementation as the legacy tool of the same name, so the payload
+under `data` is byte-identical to the legacy envelope's `data`. The five
+legacy tools remain wired (marked `Deprecated` on tools/list output) and will
+be retired in a future release.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend"` | `"list"` | Which bootstrap projection to compute. |
+| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` the server auto-resolves the lone reachable .NET process; for any other view, omitting it triggers the standard resolver. |
+| `durationSeconds` | `int` | `10` | Used only by `view="memory_trend"`. Must be ≥ 2. |
+| `sampleEverySeconds` | `int` | `2` | Used only by `view="memory_trend"`. Must be ≥ 1. |
+| `depth` | `SamplingDepth?` | `Summary` | Used only by `view="container"`; forwarded to `get_container_signals`. |
+
+**Returns:** `InspectProcessReport` — a standard envelope (`summary` / `hints` /
+`error` / `resolvedProcess`) wrapping a `data` object that contains exactly one
+populated field matching the requested view:
+
+| `view` | `data` shape |
+|---|---|
+| `list` | `DotnetProcess[]` (see [`list_dotnet_processes`](#list_dotnet_processes)) |
+| `info` | `DotnetProcess` (see [`get_process_info`](#get_process_info)) |
+| `capabilities` | `DiagnosticCapabilities` (see [`get_diagnostic_capabilities`](#get_diagnostic_capabilities)) |
+| `container` | `ContainerSignals` (see [`get_container_signals`](#get_container_signals)) |
+| `memory_trend` | `MemoryTrend` (see [`get_memory_trend`](#get_memory_trend)) |
+
+**Recommended bootstrap sequence:**
+
+```text
+inspect_process(view="list")          # discover candidate PIDs (or rely on auto-resolve)
+inspect_process(view="capabilities")  # confirm CoreCLR vs NativeAOT + ptrace/PSI/perf gates
+inspect_process(view="container")     # cheap cgroup/PSI signals before any EventPipe session
+inspect_process(view="memory_trend")  # lightweight leak signal — any OS process, no IPC
+```
+
+Unknown view values surface as the standard discriminator-dispatch error
+(`error.kind = "InvalidArgument"`, `error.detail = "view"`).
+
+---
+
 ## `list_dotnet_processes`
+
+> **Deprecated** — use [`inspect_process(view="list")`](#inspect_process). The
+> payload is unchanged; the legacy tool remains registered and emits a
+> `Deprecated` flag on `tools/list`.
 
 Lists every .NET process on the local machine that exposes a Diagnostic IPC
 endpoint (Unix socket on Linux, named pipe on Windows).
@@ -355,6 +407,8 @@ unreachable are silently omitted.
 
 ## `get_process_info`
 
+> **Deprecated** — use [`inspect_process(view="info")`](#inspect_process).
+
 Returns metadata for a single PID.
 
 **Parameters:**
@@ -369,6 +423,8 @@ process is gone / unreachable.
 ---
 
 ## `get_diagnostic_capabilities`
+
+> **Deprecated** — use [`inspect_process(view="capabilities")`](#inspect_process).
 
 Probes the target by opening a short EventPipe session against the
 `Microsoft-DotNETCore-SampleProfiler` provider. The presence/absence of sample
@@ -405,6 +461,8 @@ events is used to classify the runtime as **CoreCLR** vs **NativeAOT**.
 ---
 
 ## `get_memory_trend`
+
+> **Deprecated** — use [`inspect_process(view="memory_trend")`](#inspect_process).
 
 Samples OS-level memory metrics at regular intervals over a configurable window
 and computes per-second deltas and a growth verdict. Works on **any** runtime
