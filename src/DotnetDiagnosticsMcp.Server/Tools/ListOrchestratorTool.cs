@@ -110,8 +110,8 @@ public sealed class ListOrchestratorTool
         }
 
         // Per-kind scope tightening — see RFC §4.7. The [RequireAnyScope] filter at dispatch
-        // accepts callers holding either listing scope; this guard makes sure a 'list'-only
-        // token cannot enumerate investigation handles by switching kinds.
+        // accepts callers holding either listing scope; these guards make sure neither kind
+        // becomes a back-door to the other's data by switching the discriminator.
         if (canonicalKind == KindInvestigations)
         {
             var principal = principalAccessor.Current;
@@ -125,6 +125,21 @@ public sealed class ListOrchestratorTool
                         "list_orchestrator",
                         "Use kind='pods' (orchestrator-list scope) or grant the token 'orchestrator-attach'.",
                         new Dictionary<string, object?> { ["kind"] = KindPods }));
+            }
+        }
+        else if (canonicalKind == KindPods)
+        {
+            var principal = principalAccessor.Current;
+            if (principal is not null && !principal.HasScope("orchestrator-list"))
+            {
+                var msg = "list_orchestrator(kind=pods) requires the 'orchestrator-list' scope.";
+                return DiagnosticResult.Fail<ListOrchestratorResult>(
+                    msg,
+                    new DiagnosticError(OrchestratorErrorKinds.PermissionDenied, msg),
+                    new NextActionHint(
+                        "list_orchestrator",
+                        "Grant the token 'orchestrator-list', or use kind='investigations' (orchestrator-attach scope).",
+                        new Dictionary<string, object?> { ["kind"] = KindInvestigations }));
             }
         }
 

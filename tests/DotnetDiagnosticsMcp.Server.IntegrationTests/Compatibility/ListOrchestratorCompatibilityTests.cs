@@ -166,6 +166,22 @@ public sealed class ListOrchestratorCompatibilityTests
     }
 
     [Fact]
+    public async Task KindPods_RequiresOrchestratorListScope()
+    {
+        var options = new OrchestratorOptions { Enabled = true };
+        var result = await ListOrchestratorTool.ListOrchestrator(
+            inventory: new ThrowingPodInventory(),
+            store: new MemoryInvestigationStore(),
+            options,
+            principalAccessor: TestPrincipalAccessors.WithScopes("orchestrator-attach"),
+            kind: ListOrchestratorTool.KindPods);
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be(OrchestratorErrorKinds.PermissionDenied);
+        result.Hints.Should().Contain(h => h.NextTool == "list_orchestrator");
+    }
+
+    [Fact]
     public async Task UnknownKind_ReturnsInvalidArgumentEnvelope()
     {
         var options = new OrchestratorOptions { Enabled = true };
