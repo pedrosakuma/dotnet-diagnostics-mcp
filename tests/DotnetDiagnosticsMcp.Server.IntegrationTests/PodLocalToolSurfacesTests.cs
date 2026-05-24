@@ -32,6 +32,7 @@ public sealed class PodLocalToolSurfacesTests
             typeof(GetBytesTool),
             typeof(InspectProcessTool),
             typeof(InspectHeapTool),
+            typeof(QuerySnapshotTool),
         });
     }
 
@@ -94,6 +95,7 @@ public sealed class PodLocalToolSurfacesTests
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("inspect_heap");
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("inspect_process");
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("get_bytes");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("query_snapshot");
     }
 
     /// <summary>
