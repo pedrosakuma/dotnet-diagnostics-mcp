@@ -275,8 +275,9 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap (heap drilldown values metadata-only by default — see [Security gates](#security-gates-b4)) |
 | [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | ✅ (native dump) | **writes a dump file to disk** |
 | [`capture_method_bytes`](#capture_method_bytes) | cheap | **yes** | ❌ (use `dotnet-native-mcp.disassemble`) | reads JIT code-heap |
-| `get_module_bytes` | cheap | **yes** (live module attach) | ❌ (materialize locally, then hand off) | streams PE / PDB bytes over MCP chunks |
-| `get_dump_bytes` | cheap | no | ❌ (materialize locally, then hand off) | streams dump bytes from `MCP_ARTIFACT_ROOT` |
+| `get_module_bytes` | cheap | **yes** (live module attach) | ❌ (materialize locally, then hand off) | streams PE / PDB bytes over MCP chunks (**deprecated — use `get_bytes(kind=module)`**) |
+| `get_dump_bytes` | cheap | no | ❌ (materialize locally, then hand off) | streams dump bytes from `MCP_ARTIFACT_ROOT` (**deprecated — use `get_bytes(kind=dump)`**) |
+| `get_bytes` | cheap | when `kind=module` | ❌ (materialize locally, then hand off) | RFC 0002 §4.4 successor; dispatches on `kind=module|dump` |
 | `list_pods` (orchestrator) | cheap | n/a | n/a | Kubernetes `pods.list` only — **opt-in**, registered only when `Orchestrator:Enabled=true` |
 
 "Window-bound" means the duration is the dominant cost; the tool will block for
@@ -1112,6 +1113,27 @@ attach.
 **Side effects:** writes one `.bin` file per region (Hot, plus Cold when the
 JIT split the method). Suspend window on live attach is typically < 100 ms.
 **NativeAOT/R2R targets are rejected** with an explanatory error envelope.
+
+## `get_bytes`
+
+**Successor (RFC 0002 §4.4) to `get_module_bytes` + `get_dump_bytes`.** Single
+byte-fetch entrypoint that dispatches on a `kind` discriminator:
+
+- `kind: "module"` — same shape as the legacy `get_module_bytes`. Required
+  `moduleVersionId`; optional `asset` (`"pe"`/`"pdb"`), `processId`.
+- `kind: "dump"` — same shape as the legacy `get_dump_bytes`. Required
+  `dumpFilePath` (under `MCP_ARTIFACT_ROOT`).
+
+Both branches share `offset` / `maxBytes` and return the same
+`ByteFetchEnvelope` documented below. Unknown `kind` returns a structured
+`InvalidArgument` error envelope listing the allowed values — never throws.
+
+> **Scope:** `module-bytes-read` (literal modifier — same enforcement as the
+> legacy tools).
+
+The legacy `get_module_bytes` and `get_dump_bytes` entrypoints remain available
+during the deprecation window and emit byte-for-byte identical envelopes — see
+`GetBytesCompatibilityTests` for the asserted contract.
 
 ## `get_module_bytes`
 

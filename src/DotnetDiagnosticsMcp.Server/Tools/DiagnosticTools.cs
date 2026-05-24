@@ -2413,6 +2413,7 @@ public sealed class DiagnosticTools
             });
     }
 
+    [Deprecation.DeprecatedTool("get_bytes", "Removed in next minor")]
     [RequireScope("module-bytes-read")]
     [McpServerTool(
         Name = "get_module_bytes",
@@ -2477,6 +2478,7 @@ public sealed class DiagnosticTools
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    [Deprecation.DeprecatedTool("get_bytes", "Removed in next minor")]
     [RequireScope("module-bytes-read")]
     [McpServerTool(
         Name = "get_dump_bytes",
