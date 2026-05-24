@@ -1,0 +1,93 @@
+using System.Linq;
+using DotnetDiagnosticsMcp.Server.Hosting;
+using DotnetDiagnosticsMcp.Server.Orchestrator;
+using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
+using DotnetDiagnosticsMcp.Server.Tools;
+using FluentAssertions;
+using Xunit;
+
+namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
+
+/// <summary>
+/// Verifies <see cref="PodLocalToolSurfaces"/> stays the single source of truth for tool
+/// registration. Every consumer (scope registry, deprecation registry, orchestrator proxy
+/// allowlist, and the SDK's <c>WithTools&lt;&gt;()</c> chain) reads from it; if a new tool
+/// surface is added there, these tests guarantee the registries and the allowlist will see
+/// it without a parallel edit.
+/// </summary>
+public sealed class PodLocalToolSurfacesTests
+{
+    [Fact]
+    public void Always_Includes_Every_PodLocal_ToolSurface()
+    {
+        PodLocalToolSurfaces.Always.Should().Contain(new[]
+        {
+            typeof(DiagnosticTools),
+            typeof(CollectEventsTool),
+            typeof(GetBytesTool),
+            typeof(InspectProcessTool),
+            typeof(InspectHeapTool),
+        });
+    }
+
+    [Fact]
+    public void OrchestratorOnly_Lists_Orchestrator_Management_Surfaces_Only()
+    {
+        PodLocalToolSurfaces.OrchestratorOnly.Should().BeEquivalentTo(new[]
+        {
+            typeof(OrchestratorTools),
+            typeof(ListOrchestratorTool),
+        });
+    }
+
+    [Fact]
+    public void Proxyable_Equals_Always_And_Excludes_OrchestratorOnly()
+    {
+        PodLocalToolSurfaces.Proxyable.Should().BeEquivalentTo(PodLocalToolSurfaces.Always);
+        PodLocalToolSurfaces.Proxyable.Should().NotIntersectWith(PodLocalToolSurfaces.OrchestratorOnly);
+    }
+
+    [Fact]
+    public void GetSurfaceTypes_Without_Orchestrator_Returns_Only_Always()
+    {
+        var surfaces = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools: false);
+
+        surfaces.Should().BeEquivalentTo(PodLocalToolSurfaces.Always);
+    }
+
+    [Fact]
+    public void GetSurfaceTypes_With_Orchestrator_Returns_Always_Plus_OrchestratorOnly()
+    {
+        var surfaces = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools: true);
+
+        surfaces.Should().BeEquivalentTo(
+            PodLocalToolSurfaces.Always.Concat(PodLocalToolSurfaces.OrchestratorOnly));
+    }
+
+    [Fact]
+    public void GetSurfaceTypes_Returns_Defensive_Copy()
+    {
+        var first = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools: false);
+        first[0] = typeof(object);
+
+        var second = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools: false);
+
+        second[0].Should().NotBe(typeof(object));
+    }
+
+    /// <summary>
+    /// Regression for the omission seen during the RFC 0002 fleet cascade — the orchestrator
+    /// proxy allowlist used to hard-code a smaller subset and silently dropped any new
+    /// pod-local tool surface (CollectEventsTool / InspectHeapTool went missing in Wave 2).
+    /// Sourcing the allowlist from <see cref="PodLocalToolSurfaces.Proxyable"/> means the
+    /// list now grows automatically as new surfaces are added.
+    /// </summary>
+    [Fact]
+    public void InvestigationProxyToolAllowlist_Includes_Every_PodLocal_Surface_Tool()
+    {
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("collect_events");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("inspect_heap");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("inspect_process");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("get_bytes");
+    }
+}
