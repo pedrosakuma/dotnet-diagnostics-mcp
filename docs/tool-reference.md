@@ -276,10 +276,16 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | `inspect_live_heap` / `inspect_dump` (heap) / `query_heap_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap (heap drilldown values metadata-only by default — see [Security gates](#security-gates-b4)) |
 | [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | ✅ (native dump) | **writes a dump file to disk** |
 | [`capture_method_bytes`](#capture_method_bytes) | cheap | **yes** | ❌ (use `dotnet-native-mcp.disassemble`) | reads JIT code-heap |
+<<<<<<< HEAD
 | `get_module_bytes` | cheap | **yes** (live module attach) | ❌ (materialize locally, then hand off) | streams PE / PDB bytes over MCP chunks (**deprecated — use `get_bytes(kind=module)`**) |
 | `get_dump_bytes` | cheap | no | ❌ (materialize locally, then hand off) | streams dump bytes from `MCP_ARTIFACT_ROOT` (**deprecated — use `get_bytes(kind=dump)`**) |
 | `get_bytes` | cheap | when `kind=module` | ❌ (materialize locally, then hand off) | RFC 0002 §4.4 successor; dispatches on `kind=module|dump` |
 | `list_pods` (orchestrator) | cheap | n/a | n/a | Kubernetes `pods.list` only — **opt-in**, registered only when `Orchestrator:Enabled=true` |
+=======
+| `get_module_bytes` | cheap | **yes** (live module attach) | ❌ (materialize locally, then hand off) | streams PE / PDB bytes over MCP chunks |
+| `get_dump_bytes` | cheap | no | ❌ (materialize locally, then hand off) | streams dump bytes from `MCP_ARTIFACT_ROOT` |
+| `list_orchestrator(kind=pods\|investigations)` (orchestrator) | cheap | n/a | n/a | RFC 0002 §4.7 successor to `list_pods` + `list_active_investigations`. `kind=pods` → Kubernetes `pods.list` (scope `orchestrator-list`); `kind=investigations` → in-memory handle snapshot (scope `orchestrator-attach`). **Opt-in**, registered only when `Orchestrator:Enabled=true`. Legacy tool names remain accepted for one deprecation window (removed in 0.7.0). |
+>>>>>>> 8642067 (feat(rfc0002): list_orchestrator(kind=pods|investigations) — orchestrator list consolidation (closes #212))
 
 "Window-bound" means the duration is the dominant cost; the tool will block for
 ~`durationSeconds`.
@@ -1272,6 +1278,73 @@ sibling MCP needs the dump bytes locally.
 
 **When NOT to use:** as a generic file reader — the sandbox intentionally only
 covers dump artifacts under `MCP_ARTIFACT_ROOT`.
+
+---
+
+## `list_orchestrator`
+
+RFC 0002 §4.7 consolidation of the orchestrator listing surface (issue #212). One
+read-only tool that dispatches on `kind`:
+
+| `kind` | Replaces | Required scope | Returns |
+|---|---|---|---|
+| `pods` | `list_pods` | `orchestrator-list` | `PodCandidatePage` under `data.pods` |
+| `investigations` | `list_active_investigations` | `orchestrator-attach` | `InvestigationListPage` under `data.investigations` |
+
+Per-kind parameters are preserved verbatim:
+
+- **`kind="pods"`** — `namespace`, `labelSelector`, `fieldSelector`,
+  `containerName`, `preparedOnly` (default `true`), `includeNotReady`
+  (default `false`), `limit` (default `100`, clamped to
+  `Orchestrator:MaxListLimit`), `cursor`.
+- **`kind="investigations"`** — `includeTerminal` (default `false`),
+  `includeAllSessions` (default `false`; requires
+  `Orchestrator:AllowCrossSessionAdmin=true` **or** the bearer's
+  `orchestrator-admin` modifier scope).
+
+**Result envelope:**
+
+```json
+{
+  "summary": "...",
+  "hints": [ ... ],
+  "data": {
+    "kind": "pods",                  // discriminator echo
+    "pods":            { "items": [...], "nextCursor": null },   // when kind=pods
+    "investigations":  null                                       // null when not selected
+  }
+}
+```
+
+Exactly one of `data.pods` / `data.investigations` is populated, matching `data.kind`.
+Errors (unknown `kind`, orchestrator disabled, scope mismatch) surface as the
+standard `DiagnosticError` envelope with kinds `InvalidArgument`,
+`OrchestratorDisabled`, or `PermissionDenied` respectively.
+
+**Authorization.** The MCP scope filter accepts either of `orchestrator-list` /
+`orchestrator-attach`. The tool re-checks scopes per `kind` so a token holding
+only `orchestrator-list` cannot enumerate investigation handles by switching the
+discriminator (RFC §4.7).
+
+**Why `attach_to_pod` / `detach_from_pod` are NOT folded in.** RFC §4.7 — those
+verbs have side-effect boundaries (ephemeral-container injection, handle close,
+session unbind) that are distinct from read-only listing. They remain explicit.
+
+**Deprecation.** `list_pods` and `list_active_investigations` are still
+registered and behave unchanged, but each carries `[DeprecatedTool]` metadata
+pointing at `list_orchestrator` and will be removed in **0.7.0**.
+
+**Examples**
+
+```jsonc
+// Enumerate prepared Pods in a namespace:
+{ "name": "list_orchestrator", "arguments": {
+    "kind": "pods", "namespace": "checkout", "labelSelector": "app=api" } }
+
+// List active handles for the current MCP session:
+{ "name": "list_orchestrator", "arguments": {
+    "kind": "investigations", "includeTerminal": false } }
+```
 
 ---
 

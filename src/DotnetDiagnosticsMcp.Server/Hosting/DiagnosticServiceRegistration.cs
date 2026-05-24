@@ -224,6 +224,7 @@ internal static class DiagnosticServiceRegistration
         if (enableOrchestratorTools)
         {
             builder.WithTools<OrchestratorTools>();
+            builder.WithTools<ListOrchestratorTool>();
         }
 
         return builder;
@@ -250,7 +251,7 @@ internal static class DiagnosticServiceRegistration
                     if (cachedFilter is null)
                     {
                         var surfaceTypes = enableOrchestratorTools
-                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(OrchestratorTools) }
+                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(OrchestratorTools), typeof(ListOrchestratorTool) }
                             : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool) };
                         cachedRegistry = Security.ToolScopeRegistry.Build(surfaceTypes);
 
@@ -298,7 +299,7 @@ internal static class DiagnosticServiceRegistration
                     else
                     {
                         var surfaceTypes = enableOrchestratorTools
-                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(OrchestratorTools) }
+                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(OrchestratorTools), typeof(ListOrchestratorTool) }
                             : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool) };
                         cached = ToolDeprecationRegistry.Build(
                             surfaceTypes,
