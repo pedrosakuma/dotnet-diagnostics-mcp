@@ -138,8 +138,8 @@ foreach (var tool in tools)
 }
 
 var processes = await client.CallToolAsync(
-    "list_dotnet_processes",
-    arguments: null);
+    "inspect_process",
+    arguments: new Dictionary<string, object?> { ["view"] = "list" });
 ```
 
 See [`tests/DotnetDiagnosticsMcp.Server.IntegrationTests/McpToolsTests.cs`](../tests/DotnetDiagnosticsMcp.Server.IntegrationTests/McpToolsTests.cs)

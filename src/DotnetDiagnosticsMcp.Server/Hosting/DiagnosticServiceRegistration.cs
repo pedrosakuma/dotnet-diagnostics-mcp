@@ -214,6 +214,7 @@ internal static class DiagnosticServiceRegistration
             .WithTools<DiagnosticTools>()
             .WithTools<CollectEventsTool>()
             .WithTools<GetBytesTool>()
+            .WithTools<InspectProcessTool>()
             .WithPrompts<Prompts.DiagnosticPrompts>()
             .WithResources<Resources.InvestigationGuideResources>()
             .WithResources<Resources.TraceSessionResources>()
@@ -249,8 +250,8 @@ internal static class DiagnosticServiceRegistration
                     if (cachedFilter is null)
                     {
                         var surfaceTypes = enableOrchestratorTools
-                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(OrchestratorTools) }
-                            : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool) };
+                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(OrchestratorTools) }
+                            : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool) };
                         cachedRegistry = Security.ToolScopeRegistry.Build(surfaceTypes);
 
                         cachedFilter = Security.ToolScopeAuthorizationFilter.Create(
@@ -297,8 +298,8 @@ internal static class DiagnosticServiceRegistration
                     else
                     {
                         var surfaceTypes = enableOrchestratorTools
-                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(OrchestratorTools) }
-                            : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool) };
+                            ? new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool), typeof(OrchestratorTools) }
+                            : new[] { typeof(DiagnosticTools), typeof(CollectEventsTool), typeof(GetBytesTool), typeof(InspectProcessTool) };
                         cached = ToolDeprecationRegistry.Build(
                             surfaceTypes,
                             loggerFactoryAccessor()?.CreateLogger<ToolDeprecationRegistry>());

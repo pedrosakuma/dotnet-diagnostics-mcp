@@ -40,6 +40,7 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 public sealed class DiagnosticTools
 {
     [RequireScope("read-counters")]
+    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"list\") instead.")]
     [McpServerTool(
         Name = "list_dotnet_processes",
         Title = "List local .NET processes",
@@ -73,6 +74,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("read-counters")]
+    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"info\", processId=…) instead.")]
     [McpServerTool(
         Name = "get_process_info",
         Title = "Get .NET process info",
@@ -112,6 +114,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("read-counters")]
+    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"capabilities\", processId=…) instead.")]
     [McpServerTool(
         Name = "get_diagnostic_capabilities",
         Title = "Detect diagnostic capabilities",
@@ -160,6 +163,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("read-counters")]
+    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"container\", processId=…) instead.")]
     [McpServerTool(
         Name = "get_container_signals",
         Title = "Read cgroup v2 container signals (CPU throttling, memory, PSI)",
@@ -267,6 +271,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("read-counters")]
+    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"memory_trend\", processId=…) instead.")]
     [McpServerTool(
         Name = "get_memory_trend",
         Title = "Sample process memory growth over a window",
