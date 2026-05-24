@@ -9,6 +9,7 @@ using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using DotnetDiagnosticsMcp.Server.Security;
+using DotnetDiagnosticsMcp.Server.Tools.Deprecation;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Server;
@@ -30,6 +31,7 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 public sealed class OrchestratorTools
 {
     [RequireScope("orchestrator-list")]
+    [DeprecatedTool("list_orchestrator", "0.7.0", Note = "Call list_orchestrator(kind=\"pods\", ...) — same parameter shape.")]
     [McpServerTool(
         Name = "list_pods",
         Title = "List candidate Pods for diagnostic attach",
@@ -444,6 +446,7 @@ public sealed class OrchestratorTools
     }
 
     [RequireScope("orchestrator-attach")]
+    [DeprecatedTool("list_orchestrator", "0.7.0", Note = "Call list_orchestrator(kind=\"investigations\", ...) — same parameter shape.")]
     [McpServerTool(
         Name = "list_active_investigations",
         Title = "List investigation handles known to the orchestrator",
