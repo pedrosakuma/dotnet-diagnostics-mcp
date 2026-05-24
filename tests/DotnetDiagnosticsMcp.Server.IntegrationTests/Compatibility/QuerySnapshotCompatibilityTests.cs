@@ -122,6 +122,25 @@ public sealed class QuerySnapshotCompatibilityTests
                 HandleId, view: "topStacks", topN: 25));
     }
 
+    [Fact]
+    public async Task QuerySnapshot_OffCpu_DefaultTopN_MatchesLegacyDefault_With_More_Than_25_Stacks()
+    {
+        // Regression for code-review feedback: legacy query_off_cpu_snapshot defaults
+        // topN to 25; query_snapshot must resolve omitted topN to the same value for
+        // off-CPU handles (not the cross-kind 50). Use 30 stacks so a 25 vs 50 cap
+        // would produce envelopes that differ in stack count.
+        var artifact = BuildOffCpuArtifactWithStacks(stackCount: 30);
+        await CompatibilityEnvelopeAssert.AssertEnvelopesEqualAsync(
+            legacy: () => Task.FromResult(DiagnosticTools.QueryOffCpuSnapshot(
+                BuildStore(DiagnosticTools.OffCpuHandleKind, artifact),
+                HandleId, view: "topStacks")),
+            successor: async () => await QuerySnapshotTool.QuerySnapshot(
+                BuildStore(DiagnosticTools.OffCpuHandleKind, artifact),
+                NoopInspector(), Redactor(), Gate(),
+                TestPrincipalAccessors.Root,
+                HandleId, view: "topStacks"));
+    }
+
     // ---- collection (counters / GC) ----
 
     [Fact]
@@ -357,27 +376,34 @@ public sealed class QuerySnapshotCompatibilityTests
     }
 
     private static OffCpuSnapshotArtifact BuildOffCpuArtifact()
+        => BuildOffCpuArtifactWithStacks(stackCount: 1);
+
+    private static OffCpuSnapshotArtifact BuildOffCpuArtifactWithStacks(int stackCount)
     {
         var frame = new OffCpuFrame("kernel", "futex_wait");
-        var stack = new OffCpuStackHotspot(
-            LeafFrame: "futex_wait",
-            OffCpuMicros: 1000,
-            OccurrenceCount: 3,
-            DominantState: "S",
-            Stack: new[] { frame });
+        var stacks = new List<OffCpuStackHotspot>(stackCount);
+        for (var i = 0; i < stackCount; i++)
+        {
+            stacks.Add(new OffCpuStackHotspot(
+                LeafFrame: $"futex_wait_{i}",
+                OffCpuMicros: 1000 - i,
+                OccurrenceCount: 3,
+                DominantState: "S",
+                Stack: new[] { frame }));
+        }
         var threadView = new OffCpuThreadView(
             Tid: 100,
             ThreadName: "dotnet",
             OffCpuMicros: 1000,
             SwitchCount: 3,
-            TopBlockingLeaf: "futex_wait");
+            TopBlockingLeaf: "futex_wait_0");
         return new OffCpuSnapshotArtifact(
             ProcessId: Pid,
             StartedAt: At,
             Duration: TimeSpan.FromSeconds(10),
             TotalOffCpuMicros: 1000,
             SchedSwitches: 3,
-            Stacks: new[] { stack },
+            Stacks: stacks,
             Threads: new[] { threadView },
             SymbolSource: "stub");
     }
