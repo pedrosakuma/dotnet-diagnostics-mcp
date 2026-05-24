@@ -128,10 +128,14 @@ How it works:
   to `CallToolAsync`).
 - The server emits `notifications/progress` on a ~1s cadence while the collector
   is running, plus a terminal `progress=100` on success.
-- If the client cancels the request (its `CancellationToken` trips or it sends
-  `notifications/cancelled`), the underlying EventPipe / sampler session is
-  torn down and the call returns a `DiagnosticResult<T>` envelope with
-  `cancelled: true` and empty data — no exception bubbled to the client.
+- If the client cancels the in-flight `tools/call` request (its SDK
+  `CancellationToken` trips, or it sends an MCP `notifications/cancelled`
+  scoped to that **request id** — not to the progress token), the underlying
+  EventPipe / sampler session is torn down and the server returns a
+  `DiagnosticResult<T>` envelope with `cancelled: true` and empty data.
+  Depending on which side of the race wins, some MCP client SDKs surface
+  the cancellation as an `OperationCanceledException` instead of returning
+  the envelope — both shapes are spec-conformant.
 
 Stage A deprecation:
 

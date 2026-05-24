@@ -212,13 +212,17 @@ on `tools/call`:
   `client.CallToolAsync(name, args, progress, cancellationToken)`. Cancellation
   flows through the `CancellationToken`.
 - **TypeScript MCP SDK** (≥ `1.5.0`): set `_meta.progressToken` on the
-  `tools/call` request and listen for `notifications/progress`; cancel by
-  sending `notifications/cancelled` with the same token.
+  `tools/call` request and listen for `notifications/progress`. To cancel,
+  abort the in-flight request (the SDK then sends an MCP
+  `notifications/cancelled` whose `requestId` matches the original
+  `tools/call` — **cancellation is request-scoped, not progress-token-scoped**).
 - **Generic clients**: any MCP-spec-compliant client that handles
   `notifications/progress` works — the server emits progress on a ~1s cadence
-  and a terminal `100%` on completion. Cancelled calls return a structured
-  envelope with `cancelled: true` (no exception) so the client can render a
-  clean "stopped" state.
+  and a terminal `100%` on completion. When the server-side cancel handler
+  wins the race, the call returns a structured envelope with `cancelled: true`;
+  when the client transport closes first, the SDK typically surfaces the
+  cancellation as an exception. Both are spec-conformant — render either as
+  a "stopped" state.
 
 Cutover plan:
 
