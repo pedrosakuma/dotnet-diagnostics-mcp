@@ -57,9 +57,13 @@ adds a uniform `depth` parameter to every windowed collector. Values:
   `Detail` for every tool.
 
 **Key invariant — the handle store always carries the FULL artifact**, regardless
-of `depth`. The depth knob only filters the *inline* response. Drilldown tools
-(`query_collection`, `query_off_cpu_snapshot`, `query_thread_snapshot`,
-`get_call_tree`) keep returning everything the original collection captured.
+of `depth`. The depth knob only filters the *inline* response. Drilldown is now
+unified behind a single verb — **[`query_snapshot(handle, view, …)`](#query_snapshot)**
+(RFC 0002 §4.1 / #207) — which dispatches on the handle's recorded artifact kind
+and re-projects everything the original collection captured. The five legacy
+drilldown tools (`query_heap_snapshot`, `query_thread_snapshot`,
+`query_off_cpu_snapshot`, `query_collection`, `get_call_tree`) remain registered
+through the 0.9.0 deprecation window as byte-equal aliases of the unified verb.
 
 Per-tool `Summary` semantics:
 
@@ -174,13 +178,13 @@ context window. Each prompt embeds the hypothesis tree from the playbook plus
 exact tool-call examples (with placeholder args reflecting bootstrap implícito).
 The LLM may always ignore a prompt and drive ad-hoc.
 
-### Handle chaining nos coletores (`query_collection`)
+### Handle chaining nos coletores (`query_snapshot`)
 
 Os 5 coletores windowed — `snapshot_counters`, `collect_exceptions`,
 `collect_gc_events`, `collect_activities`, `collect_event_source` — devolvem, junto do summary +
 top-N inline, um `handle` opaco (Crockford-base32, TTL ~10 min) registrado num
 store em memória. A LLM pode então re-projetar o mesmo artefato sob outra
-visão **sem rodar o EventPipe de novo** chamando `query_collection`:
+visão **sem rodar o EventPipe de novo** chamando `query_snapshot`:
 
 ```jsonc
 // 1. coleta uma vez
@@ -188,19 +192,38 @@ collect_exceptions(processId=4242, durationSeconds=10)
   → { summary: "30 exceptions (3 types)", handle: "01H...XY", data: { … top-N } }
 
 // 2. drilldown N vezes dentro da janela TTL
-query_collection(handle="01H...XY", view="recent", topN=20)
-query_collection(handle="01H...XY", view="byType")
+query_snapshot(handle="01H...XY", view="recent", topN=20)
+query_snapshot(handle="01H...XY", view="byType")
 ```
+
+`query_snapshot` (RFC 0002 §4.1 / #207) é o verbo único de drilldown — ele
+faz dispatch pelo `kind` que o handle carrega e cobre os 10 kinds emitidos
+pelos coletores acima + heap (`heap-snapshot`), thread (`thread-snapshot`),
+off-CPU (`off-cpu-snapshot`) e call-tree (`cpu-sample` / `allocation-sample`).
+Os 5 verbos legados (`query_collection`, `query_heap_snapshot`,
+`query_thread_snapshot`, `query_off_cpu_snapshot`, `get_call_tree`) seguem
+registrados como aliases byte-equal durante a janela de depreciação 0.9.0
+(asserted por `QuerySnapshotCompatibilityTests`).
 
 Visões disponíveis por `kind`:
 
-| Kind (`CollectionHandleKinds`) | Emitido por | Views aceitas |
+| Kind | Emitido por | Views aceitas |
 |---|---|---|
 | `counters` | `snapshot_counters` | `summary` (default), `byProvider` |
 | `exception-snapshot` | `collect_exceptions` | `summary` (default = `byType.Take(topN)`), `byType`, `recent` |
 | `gc-events` | `collect_gc_events` | `summary` (default), `events`, `pauseHistogram` |
 | `activities` | `collect_activities` | `summary` (default), `bySource`, `byOperation`, `activities` |
 | `event-source` | `collect_event_source` | `summary` (default), `byEventName`, `events` |
+| `heap-snapshot` | `inspect_heap` / `inspect_live_heap` / `inspect_dump` | `top-types` (default), `retention-paths`, `roots-by-kind`, `finalizer-queue`, `fragmentation`, `static-fields`, `delegate-targets`, `duplicate-strings`, `object`, `gcroot`, `objsize`, `async` |
+| `thread-snapshot` | `collect_thread_snapshot` | `top-blocked` (default), `threads-summary`, `stack`, `lock-graph`, `deadlocks`, `unique-stacks`, `threadpool` |
+| `off-cpu-snapshot` | `collect_off_cpu_sample` | `topStacks` (default), `byThread`, `stack` |
+| `cpu-sample` / `allocation-sample` | `collect_cpu_sample` / `collect_allocation_sample` | `call-tree` (única; legacy `get_call_tree` não tinha discriminador) |
+
+Autorização é aplicada por kind no dispatcher (`heap-read` para heap,
+`ptrace` para thread, `eventpipe` para off-CPU, `investigation-export` para
+call-tree, `read-counters`|`eventpipe` para collection) — o gate estático aceita
+qualquer um dos 5 escopos para o tool surface; o boundary por kind preserva o
+contrato de cada legado verbatim (RFC 0002 §4.1).
 
 > **Nota — truncação em `event-source`:** o coletor para de armazenar eventos
 > ao atingir `maxEvents`, mas continua contando o total. As views
@@ -214,9 +237,9 @@ desconhecido devolve `DiagnosticError { Kind: "HandleExpired" }` com um
 `NextActionHint` apontando o coletor original.
 
 Esse contrato é o equivalente "split collector, unified drilldown"
-(documentado em [`AGENTS.md`](../AGENTS.md)) aplicado aos coletores EventPipe
-— mesmo padrão que `inspect_dump`/`inspect_live_heap` → `query_heap_snapshot`
-e `collect_thread_snapshot` → `query_thread_snapshot`.
+(documentado em [`AGENTS.md`](../AGENTS.md)) aplicado a *todos* os coletores
+— mesmo padrão de `inspect_dump`/`inspect_live_heap` e
+`collect_thread_snapshot`, agora colapsado num único verbo de query.
 
 ### Kernel-side signals (`get_container_signals`)
 

@@ -220,6 +220,7 @@ internal static class DiagnosticServiceRegistration
             .WithTools<GetBytesTool>()
             .WithTools<InspectProcessTool>()
             .WithTools<InspectHeapTool>()
+            .WithTools<QuerySnapshotTool>()
             // ⚠️ Keep this chain in lock-step with PodLocalToolSurfaces.Always — every type
             // listed there must appear above so the SDK actually dispatches to it. The
             // surface-type registries below (scope + deprecation) and the orchestrator

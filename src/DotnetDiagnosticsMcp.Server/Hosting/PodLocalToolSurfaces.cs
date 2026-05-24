@@ -44,6 +44,7 @@ internal static class PodLocalToolSurfaces
         typeof(GetBytesTool),
         typeof(InspectProcessTool),
         typeof(InspectHeapTool),
+        typeof(QuerySnapshotTool),
     });
 
     /// <summary>Tool-surface classes registered only when orchestrator features are enabled.</summary>

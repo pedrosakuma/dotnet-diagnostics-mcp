@@ -690,6 +690,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("investigation-export")]
+    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=\"call-tree\") instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
     [McpServerTool(
         Name = "get_call_tree",
         Title = "Drill into CPU sample call tree",
@@ -876,6 +877,7 @@ public sealed class DiagnosticTools
     public const string OffCpuHandleKind = "off-cpu-snapshot";
 
     [RequireScope("eventpipe")]
+    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=topStacks|byThread|stack) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
     [McpServerTool(
         Name = "query_off_cpu_snapshot",
         Title = "Drill into an off-CPU snapshot",
@@ -984,6 +986,7 @@ public sealed class DiagnosticTools
     private static readonly TimeSpan CollectionHandleTtl = TimeSpan.FromMinutes(10);
 
     [RequireAnyScope("read-counters", "eventpipe")]
+    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=...) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
     [McpServerTool(
         Name = "query_collection",
         Title = "Drill into a previously-collected artifact",
@@ -1735,6 +1738,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("heap-read")]
+    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=top-types|retention-paths|...) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
     [McpServerTool(
         Name = "query_heap_snapshot",
         Title = "Drill into a heap snapshot",
@@ -2598,6 +2602,7 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("ptrace")]
+    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=threads-summary|stack|lock-graph|...) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
     [McpServerTool(
         Name = "query_thread_snapshot",
         Title = "Drill into a thread + lock snapshot",
