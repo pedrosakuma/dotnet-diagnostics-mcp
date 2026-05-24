@@ -299,84 +299,6 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
     }
 
     [Fact]
-    public async Task CollectCpuSample_RunAsJob_SummaryMatchesSyncSummaryPayloadShape()
-    {
-        using var factory = _factory.WithWebHostBuilder(builder =>
-            builder.ConfigureServices(services => services.AddSingleton<ICpuSampler, DeterministicCpuSampler>()));
-        await using var client = await ConnectAsync(factory);
-
-        DeterministicCpuSampler.TotalHotspots.Should().BeGreaterThan(3,
-            "the deterministic sampler must exercise summary truncation to catch the regression from #121");
-
-        var syncRaw = await client.CallToolAsync(
-            "collect_cpu_sample",
-            new Dictionary<string, object?>
-            {
-                ["processId"] = Environment.ProcessId,
-                ["durationSeconds"] = 2,
-                ["topN"] = 25,
-                ["resolveSourceLines"] = false,
-                ["depth"] = "Summary",
-            },
-            cancellationToken: CancellationToken.None);
-        var syncEnvelope = DeserializeEnvelope<CpuSample>(syncRaw);
-
-        var startRaw = await client.CallToolAsync(
-            "collect_cpu_sample",
-            new Dictionary<string, object?>
-            {
-                ["processId"] = Environment.ProcessId,
-                ["durationSeconds"] = 2,
-                ["topN"] = 25,
-                ["resolveSourceLines"] = false,
-                ["runAsJob"] = true,
-                ["depth"] = "Summary",
-            },
-            cancellationToken: CancellationToken.None);
-        var startEnvelope = DeserializeEnvelope<CpuSample>(startRaw);
-
-        startEnvelope.Should().NotBeNull();
-        startEnvelope!.Error.Should().BeNull();
-        startEnvelope.Handle.Should().NotBeNullOrWhiteSpace();
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        CollectionStatusReport? terminal = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            var report = await PollCollectionStatusAsync(client, startEnvelope.Handle!);
-            report.Error.Should().BeNull();
-            if (report.Status is "completed" or "failed" or "canceled")
-            {
-                terminal = report;
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-
-        terminal.Should().NotBeNull("the background job should complete within the timeout");
-        terminal!.Status.Should().Be("completed");
-        terminal.Result.Should().BeOfType<JsonElement>();
-
-        syncEnvelope.Should().NotBeNull();
-        syncEnvelope!.Error.Should().BeNull();
-        syncEnvelope.Data.Should().NotBeNull();
-
-        var asyncEnvelope = JsonSerializer.Deserialize<DiagnosticResult<CpuSample>>(((JsonElement)terminal.Result!).GetRawText(), DeserializeOptions);
-        asyncEnvelope.Should().NotBeNull();
-        asyncEnvelope!.Error.Should().BeNull();
-        asyncEnvelope.Data.Should().NotBeNull();
-
-        syncEnvelope.Data!.TopHotspots.Count.Should().Be(3);
-        asyncEnvelope.Data!.TopHotspots.Count.Should().Be(3);
-
-        var syncBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(syncEnvelope.Data, DeserializeOptions));
-        var asyncBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(asyncEnvelope.Data, DeserializeOptions));
-        asyncBytes.Should().Be(syncBytes,
-            "runAsJob summary depth should shape the deterministic CpuSample payload exactly like the synchronous summary path");
-    }
-
-    [Fact]
     public async Task CollectThreadSnapshot_SummaryDropsLocksAndCapsThreads()
     {
         await using var client = await ConnectAsync();
@@ -447,46 +369,6 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
         return await McpClient.CreateAsync(transport, clientOptions: null, cancellationToken: CancellationToken.None);
     }
 
-    private async Task<CollectionStatusReport> PollCollectionStatusAsync(McpClient client, string handle)
-    {
-        var pollResult = await client.CallToolAsync(
-            "get_collection_status",
-            new Dictionary<string, object?> { ["handle"] = handle },
-            cancellationToken: CancellationToken.None);
-
-        pollResult.IsError.Should().NotBe(true,
-            "get_collection_status must not surface tool-level errors for an alive handle");
-
-        var envelope = DeserializeEnvelope<JsonElement>(pollResult);
-        envelope.Should().NotBeNull();
-        if (envelope!.Error is not null)
-        {
-            return new CollectionStatusReport(
-                Handle: handle,
-                Kind: string.Empty,
-                ProcessId: 0,
-                Status: "error",
-                StartedAt: default,
-                CompletedAt: null,
-                ElapsedSeconds: 0,
-                Result: null,
-                Error: envelope.Error);
-        }
-
-        var data = envelope.Data;
-        return new CollectionStatusReport(
-            Handle: data.GetProperty("handle").GetString()!,
-            Kind: data.GetProperty("kind").GetString()!,
-            ProcessId: data.GetProperty("processId").GetInt32(),
-            Status: data.GetProperty("status").GetString()!,
-            StartedAt: data.GetProperty("startedAt").GetDateTimeOffset(),
-            CompletedAt: data.TryGetProperty("completedAt", out var completedAt) && completedAt.ValueKind != JsonValueKind.Null
-                ? completedAt.GetDateTimeOffset()
-                : null,
-            ElapsedSeconds: data.GetProperty("elapsedSeconds").GetDouble(),
-            Result: data.TryGetProperty("result", out var result) && result.ValueKind != JsonValueKind.Null ? (object)result : null,
-            Error: null);
-    }
 
     private static readonly JsonSerializerOptions DeserializeOptions = new()
     {

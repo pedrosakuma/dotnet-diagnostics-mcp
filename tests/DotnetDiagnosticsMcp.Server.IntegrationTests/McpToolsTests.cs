@@ -64,8 +64,6 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "start_investigation",
             "export_investigation_summary",
             "compare_to_baseline",
-            "get_collection_status",
-            "cancel_collection",
             "query_collection",
             "get_container_signals",
             "get_memory_trend",
@@ -106,8 +104,6 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             ["start_investigation"] = Array.Empty<string>(),
             ["export_investigation_summary"] = new[] { "handle" },
             ["compare_to_baseline"] = new[] { "baselineSummaryJson", "currentSummaryJson" },
-            ["get_collection_status"] = new[] { "handle" },
-            ["cancel_collection"] = new[] { "handle" },
             ["query_collection"] = new[] { "handle" },
             ["get_container_signals"] = Array.Empty<string>(),
             ["get_memory_trend"] = Array.Empty<string>(),
@@ -138,7 +134,6 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             "resolveSourceLines", "symbolPath", "maxResolvedSources",
             "resolveMethodInstantiations", "maxResolvedMethodInstantiations",
             "topTypes", "includeRetentionPaths", "retentionPathLimit",
-            "runAsJob",
             "view",
             "stackRank",
         };
@@ -250,55 +245,6 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         envelope.Data.GetProperty("totalSamples").GetInt32().Should().BeGreaterThan(0);
     }
 
-    [Fact]
-    public async Task TaskAugmentedCollectExceptions_CanBeCancelledViaLegacyBridge()
-    {
-        await using var client = await ConnectAsync();
-
-        var task = await client.CallToolAsTaskAsync(
-            "collect_exceptions",
-            new Dictionary<string, object?>
-            {
-                ["processId"] = Environment.ProcessId,
-                ["durationSeconds"] = 10,
-                ["maxRecent"] = 10,
-            },
-            new ModelContextProtocol.Protocol.McpTaskMetadata { TimeToLive = TimeSpan.FromMinutes(1) },
-            cancellationToken: CancellationToken.None);
-
-        var cancelResult = await client.CallToolAsync(
-            "cancel_collection",
-            new Dictionary<string, object?> { ["handle"] = task.TaskId },
-            cancellationToken: CancellationToken.None);
-
-        cancelResult.IsError.Should().NotBe(true);
-        var cancelReport = DeserializeStructured<CancelCollectionReport>(cancelResult);
-        cancelReport.Should().NotBeNull();
-        cancelReport!.CancellationRequested.Should().BeTrue();
-
-        var bridgedStatus = await PollCollectionStatusAsync(client, task.TaskId);
-        bridgedStatus.Error.Should().BeNull();
-        bridgedStatus.Status.Should().BeOneOf("working", "cancelled");
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        ModelContextProtocol.Protocol.McpTask terminal = task;
-        while (DateTime.UtcNow < deadline)
-        {
-            terminal = await client.GetTaskAsync(task.TaskId, cancellationToken: CancellationToken.None);
-            if (terminal.Status == ModelContextProtocol.Protocol.McpTaskStatus.Cancelled)
-            {
-                break;
-            }
-
-            await Task.Delay(200);
-        }
-
-        terminal.Status.Should().Be(ModelContextProtocol.Protocol.McpTaskStatus.Cancelled);
-
-        var finalBridgeStatus = await PollCollectionStatusAsync(client, task.TaskId);
-        finalBridgeStatus.Error.Should().BeNull();
-        finalBridgeStatus.Status.Should().Be("cancelled");
-    }
 
     [Fact]
     public async Task ListPrompts_ExposesDiagnosticPlaybooks()
@@ -891,114 +837,6 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         envelope.Hints[0].NextTool.Should().Be("collect_cpu_sample");
     }
 
-    [Fact]
-    public async Task CollectCpuSample_RunAsJob_HandleSurvivesAndPollableUntilCompleted()
-    {
-        // Regression test for dogfood issue #62 "handle dies within seconds".
-        // Reality check: the runAsJob handle MUST be poll-able from the moment
-        // collect_cpu_sample returns the ack, through job execution, until well
-        // past completion. If get_collection_status ever returns HandleNotFound
-        // while the job is alive, the LLM polling loop is irrecoverable.
-        await using var client = await ConnectAsync();
-
-        var startResult = await client.CallToolAsync(
-            "collect_cpu_sample",
-            new Dictionary<string, object?>
-            {
-                ["processId"] = Environment.ProcessId,
-                ["durationSeconds"] = 2,
-                ["topN"] = 5,
-                ["resolveSourceLines"] = false,
-                ["runAsJob"] = true,
-            },
-            cancellationToken: CancellationToken.None);
-
-        startResult.IsError.Should().NotBe(true, "starting the job must succeed");
-        var startEnvelope = DeserializeEnvelope(startResult);
-        startEnvelope.Should().NotBeNull();
-        startEnvelope!.Error.Should().BeNull();
-        var handle = startEnvelope.Handle;
-        handle.Should().NotBeNullOrWhiteSpace("runAsJob ack must carry a handle");
-
-        // Poll immediately — the handle must already be registered.
-        var firstStatus = await PollCollectionStatusAsync(client, handle!);
-        firstStatus.Error.Should().BeNull(
-            "the handle must be poll-able immediately after the runAsJob ack — never HandleNotFound");
-        firstStatus.Status.Should().BeOneOf("running", "completed",
-            "expected an in-flight or already-finished job, not an evicted handle");
-
-        // Poll to terminal. Job is 2s, give it ample headroom.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        CollectionStatusReport? terminal = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            var report = await PollCollectionStatusAsync(client, handle!);
-            report.Error.Should().BeNull(
-                "the handle must remain poll-able for the full job lifetime — dogfood #62");
-            if (report.Status is "completed" or "failed" or "canceled")
-            {
-                terminal = report;
-                break;
-            }
-
-            await Task.Delay(500);
-        }
-
-        terminal.Should().NotBeNull("the job must reach a terminal state within the timeout");
-        terminal!.Status.Should().Be("completed",
-            "a CPU sample against a healthy live process should complete cleanly");
-
-        // And the handle must still be poll-able AFTER completion (10min handle TTL).
-        var postTerminal = await PollCollectionStatusAsync(client, handle!);
-        postTerminal.Error.Should().BeNull(
-            "completed job handles must survive past the job to let the LLM retrieve results");
-        postTerminal.Status.Should().Be("completed");
-    }
-
-    private async Task<CollectionStatusReport> PollCollectionStatusAsync(McpClient client, string handle)
-    {
-        var pollResult = await client.CallToolAsync(
-            "get_collection_status",
-            new Dictionary<string, object?> { ["handle"] = handle },
-            cancellationToken: CancellationToken.None);
-
-        // The schema-validation guard from #61 also lives here implicitly: if we ever
-        // re-introduce the nullable-required bug, McpClient throws before we get here.
-        pollResult.IsError.Should().NotBe(true,
-            "get_collection_status must not surface tool-level errors for an alive handle");
-
-        var envelope = DeserializeEnvelope(pollResult);
-        envelope.Should().NotBeNull();
-        if (envelope!.Error is not null)
-        {
-            // Surface the error envelope to the caller so the test can assert on it.
-            return new CollectionStatusReport(
-                Handle: handle,
-                Kind: string.Empty,
-                ProcessId: 0,
-                Status: "error",
-                StartedAt: default,
-                CompletedAt: null,
-                ElapsedSeconds: 0,
-                Result: null,
-                Error: envelope.Error);
-        }
-
-        var data = envelope.Data;
-        return new CollectionStatusReport(
-            Handle: data.GetProperty("handle").GetString()!,
-            Kind: data.GetProperty("kind").GetString()!,
-            ProcessId: data.GetProperty("processId").GetInt32(),
-            Status: data.GetProperty("status").GetString()!,
-            StartedAt: data.GetProperty("startedAt").GetDateTimeOffset(),
-            CompletedAt: data.TryGetProperty("completedAt", out var ca) && ca.ValueKind != JsonValueKind.Null
-                ? ca.GetDateTimeOffset()
-                : null,
-            ElapsedSeconds: data.GetProperty("elapsedSeconds").GetDouble(),
-            Result: data.TryGetProperty("result", out var r) && r.ValueKind != JsonValueKind.Null ? (object)r : null,
-            Error: null);
-    }
-
 
     [Fact]
     public async Task StartInvestigation_ReturnsColdPlan_WhenOnlySymptomProvided()
@@ -1169,86 +1007,6 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         var envelope = DeserializeEnvelope(result);
         envelope.Should().NotBeNull();
         envelope!.Error!.Kind.Should().Be("InvalidSummaryJson");
-    }
-
-    [Fact]
-    public async Task GetCollectionStatus_UnknownHandle_PassesMcpOutputSchemaValidation()
-    {
-        // Regression for #61: the SDK validates structured tool output against the declared
-        // outputSchema. The client surfaced `McpError -32602: Structured content does not
-        // match the tool's output schema: data/data must have required property 'error'`
-        // because the JsonSchemaExporter marked nullable parameters of `CollectionStatusReport`
-        // (CompletedAt, Result, Error) as required, while the SDK serializes with
-        // JsonIgnoreCondition.WhenWritingNull and omitted them from the wire. Fix: add
-        // `= null` defaults to those parameters so the generator drops them from `required`.
-        await using var client = await ConnectAsync();
-
-        var result = await client.CallToolAsync(
-            "get_collection_status",
-            new Dictionary<string, object?> { ["handle"] = "DEADBEEFDEADBEEFDEAD" },
-            cancellationToken: CancellationToken.None);
-
-        var envelope = DeserializeEnvelope(result);
-        envelope.Should().NotBeNull();
-        envelope!.Error.Should().NotBeNull("an unknown handle must surface a structured DiagnosticError");
-        envelope.Error!.Kind.Should().Be("HandleNotFound");
-        envelope.Hints.Should().NotBeEmpty();
-
-        // Belt-and-suspenders: assert the declared outputSchema does NOT require nullable
-        // properties that the serializer will omit. Catches future regressions where someone
-        // drops the `= null` default on a primary-ctor param of CollectionStatusReport.
-        var tools = await client.ListToolsAsync(cancellationToken: CancellationToken.None);
-        var status = tools.Single(t => t.Name == "get_collection_status");
-        var dataSchema = status.ReturnJsonSchema!.Value.GetProperty("properties").GetProperty("data");
-        var dataRequired = dataSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString()!).ToArray();
-        dataRequired.Should().NotContain(new[] { "completedAt", "result", "error" },
-            "nullable properties must NOT be in `required` — the SDK omits null values on the wire (issue #61)");
-    }
-
-    [Fact]
-    public async Task GetCollectionStatus_RunningJob_PassesMcpOutputSchemaValidation()
-    {
-        // Regression for #61: when a real background job is in 'Running' or 'Completed'
-        // state, polling get_collection_status used to fail with McpError -32602
-        // "data/data must have required property 'error'" because the SDK's schema generator
-        // emits a required `error` property on the inner envelope wrapped inside
-        // `CollectionStatusReport.Result`. The MCP client throws before the response reaches
-        // the caller, so simply receiving a CallToolResult without exception proves the fix.
-        await using var client = await ConnectAsync();
-
-        var startResult = await client.CallToolAsync(
-            "collect_cpu_sample",
-            new Dictionary<string, object?>
-            {
-                ["processId"] = Environment.ProcessId,
-                ["durationSeconds"] = 3,
-                ["runAsJob"] = true,
-            },
-            cancellationToken: CancellationToken.None);
-
-        startResult.IsError.Should().NotBe(true);
-        var startEnvelope = DeserializeEnvelope(startResult);
-        startEnvelope!.Handle.Should().NotBeNullOrWhiteSpace("runAsJob=true must return a job handle");
-
-        // Poll while Running. The act of receiving the CallToolResult without the MCP
-        // client throwing McpError -32602 is the assertion.
-        var pollResult = await client.CallToolAsync(
-            "get_collection_status",
-            new Dictionary<string, object?> { ["handle"] = startEnvelope.Handle! },
-            cancellationToken: CancellationToken.None);
-        pollResult.IsError.Should().NotBe(true,
-            "polling a Running job must not violate the outputSchema (issue #61)");
-
-        // Wait for completion and poll again — the Completed path embeds the full
-        // DiagnosticResult<CpuSample> inside Result and exercised a different code path
-        // in the original repro.
-        await Task.Delay(TimeSpan.FromSeconds(5));
-        var finalResult = await client.CallToolAsync(
-            "get_collection_status",
-            new Dictionary<string, object?> { ["handle"] = startEnvelope.Handle! },
-            cancellationToken: CancellationToken.None);
-        finalResult.IsError.Should().NotBe(true,
-            "polling a Completed job must not violate the outputSchema (issue #61)");
     }
 
     [Fact]

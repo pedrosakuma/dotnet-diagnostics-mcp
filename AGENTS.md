@@ -141,9 +141,9 @@ dotnet … collect_exceptions  # synchronous
 
 ### 🎯 One MCP tool per concept (≤10 typical; document why each addition is essential)
 
-Anthropic recommends ≤10 tools per LLM context. We currently have 20 (the Phase 7 additions —
+Anthropic recommends ≤10 tools per LLM context. We currently have 18 (the Phase 7 additions —
 `get_call_tree`, `start_investigation`, `export_investigation_summary`, `compare_to_baseline`,
-`get_collection_status`, `cancel_collection`, `inspect_live_heap`, `query_heap_snapshot`,
+`inspect_live_heap`, `query_heap_snapshot`,
 `collect_thread_snapshot`, `query_thread_snapshot` — each unlock a specific drilldown or
 workflow the LLM cannot otherwise reach). **Don't add tools
 speculatively**. New capabilities should either:

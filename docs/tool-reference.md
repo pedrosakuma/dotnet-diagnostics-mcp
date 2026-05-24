@@ -82,7 +82,7 @@ it asked for).
 retained `Activities[]` inline (bounded by `maxActivities`) and relies on
 `query_collection(handle, view=...)` for narrower drilldown views.
 
-### Long-running collects: MCP Tasks vs `runAsJob`
+### Long-running collects: MCP Tasks + native progress/cancel
 
 As of the `2025-11-25` protocol bump, the server registers an
 `IMcpTaskStore`, advertises `capabilities.tasks.{list,cancel,requests.tools.call}`
@@ -99,24 +99,14 @@ and marks these tools with `execution.taskSupport: "optional"` in `tools/list`:
 3. fetch the terminal `CallToolResult` via `tasks/result`
 4. cancel via `tasks/cancel`
 
-The legacy fallback remains for clients that do not implement Tasks yet:
-
-- `collect_cpu_sample(..., runAsJob=true)`
-- `get_collection_status(handle)`
-- `cancel_collection(handle)`
-
-`get_collection_status` also accepts MCP `taskId`s so non-spec clients can read a
-Task's state through the legacy tool. Do **not** combine task augmentation with
-`runAsJob=true` on the same call.
-
 ### MCP-native progress and cancellation (RFC 0002 §7.3 #7 / issue #211)
 
-In addition to MCP Tasks, long-running collectors now emit standard MCP
-`notifications/progress` messages and honor `notifications/cancelled` on the
-same `tools/call` request — no second round-trip, no polling. This is the
-**preferred** path for clients that don't implement the full Tasks lifecycle.
+Clients that don't implement the full Tasks lifecycle can use the standard MCP
+`notifications/progress` + request-scoped `notifications/cancelled` flow
+instead — no second round-trip, no polling. This is the **preferred** path for
+ad-hoc collectors.
 
-Tools wired up so far (Stage A):
+Tools wired up:
 
 - `collect_cpu_sample`
 - `collect_events` (every `kind` — counters, exceptions, gc, event_source, activities)
@@ -137,18 +127,10 @@ How it works:
   the cancellation as an `OperationCanceledException` instead of returning
   the envelope — both shapes are spec-conformant.
 
-Stage A deprecation:
-
-- `collect_cpu_sample(runAsJob=true)` still works, but logs a once-per-process
-  Warning the first time it's invoked. Operators can grep server logs for
-  `runAsJob=true is deprecated` to find clients that still depend on the
-  polling bridge.
-- `get_collection_status` and `cancel_collection` remain available.
-
-Stage B (separate PR, gated on the client-matrix audit on
-[issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211))
-will delete `get_collection_status`, `cancel_collection`, and the `runAsJob`
-parameter, dropping the tool surface by two.
+> **Historical note:** earlier releases exposed a `runAsJob=true` parameter
+> plus `get_collection_status` / `cancel_collection` polling tools as a
+> pre-spec fallback. These were removed in Stage B of #211 — use MCP Tasks
+> or progress notifications.
 
 ### Prompts (curated playbooks)
 
@@ -680,7 +662,6 @@ top-N hotspots by inclusive and exclusive sample counts.
 | `maxResolvedSources` | `int?` | `topN` | Cap on how many hotspots get source resolution. |
 | `resolveMethodInstantiations` | `bool` | `false` | Opt-in ClrMD attach after sampling to recover closed generic method signatures for the hottest managed frames. CoreCLR only; on Linux requires `CAP_SYS_PTRACE` (or `ptrace_scope=0`) and briefly suspends the target. |
 | `maxResolvedMethodInstantiations` | `int?` | `topN` | Cap on how many hotspots get ClrMD generic-instantiation enrichment. |
-| `runAsJob` | `bool` | `false` | Run in the background and poll with `get_collection_status(handle)`. |
 | `depth` | `SamplingDepth` | `Summary` | `Summary` returns the top 3 hotspots inline; `Detail` / `Raw` return the requested `topN`. |
 
 **Returns:** `CpuSample`:
@@ -748,8 +729,8 @@ yields a few thousand samples; bump `durationSeconds` for sparse workloads.
 
 **Long-running pattern:** this tool supports MCP Tasks (`execution.taskSupport:
 "optional"`). Prefer task-augmented `tools/call` + `tasks/get`/`tasks/result`
-when your client supports the spec; otherwise use the legacy
-`runAsJob=true` + `get_collection_status(handle)` fallback.
+when your client supports the spec; otherwise use MCP-native progress +
+request-scoped cancellation (see [MCP-native progress and cancellation](#mcp-native-progress-and-cancellation-rfc-0002-73-7--issue-211)).
 
 ## Symbol resolution
 
@@ -894,9 +875,9 @@ observed, not a random sample. Raise `maxRecent` for storms where the tail
 matters; lower it when you only want a quick signal.
 
 **Long-running pattern:** this tool supports MCP Tasks (`execution.taskSupport:
-"optional"`). Spec clients should use task-augmented `tools/call`; legacy
-clients can still fall back to polling through `get_collection_status(taskId)`
-if they need a tool-shaped status check.
+"optional"`). Spec clients should use task-augmented `tools/call`; clients
+without Tasks support can rely on MCP-native progress + request-scoped
+cancellation on the in-flight `tools/call`.
 
 ---
 
@@ -918,8 +899,9 @@ returns aggregate + per-collection details.
 | `maxEvents` | `int` | `200` | Cap on individual GC events returned |
 
 **Long-running pattern:** this tool supports MCP Tasks (`execution.taskSupport:
-"optional"`). Spec clients should use task-augmented `tools/call`; legacy
-clients can still read a task via `get_collection_status(taskId)` when needed.
+"optional"`). Spec clients should use task-augmented `tools/call`; clients
+without Tasks support can rely on MCP-native progress + request-scoped
+cancellation on the in-flight `tools/call`.
 
 **Returns:** `GcSummary`:
 

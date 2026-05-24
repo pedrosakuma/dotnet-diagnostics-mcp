@@ -1,6 +1,5 @@
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.EventSources;
-using DotnetDiagnosticsMcp.Core.Jobs;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;

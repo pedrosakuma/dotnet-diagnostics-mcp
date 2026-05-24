@@ -1,7 +1,7 @@
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Drilldown;
-using DotnetDiagnosticsMcp.Core.Jobs;
+
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
@@ -15,10 +15,10 @@ public sealed class CollectCpuSampleSecurityTests
     {
         var sampler = new ThrowingCpuSampler();
         var store = new MemoryDiagnosticHandleStore();
-        var jobs = new ThrowingJobRunner();
+
 
         var result = await DiagnosticTools.CollectCpuSample(
-            sampler, store, jobs, ToolGuardTests.EchoResolver(),
+            sampler, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
             TestPrincipalAccessors.Root,
             processId: 4242,
@@ -36,11 +36,11 @@ public sealed class CollectCpuSampleSecurityTests
     {
         var sampler = new StubCpuSampler();
         var store = new MemoryDiagnosticHandleStore();
-        var jobs = new ThrowingJobRunner();
+
         var options = new SecurityOptions { SymbolServerAllowlist = { "msdl.microsoft.com" } };
 
         var result = await DiagnosticTools.CollectCpuSample(
-            sampler, store, jobs, ToolGuardTests.EchoResolver(),
+            sampler, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(options),
             TestPrincipalAccessors.Root,
             processId: 4242,
@@ -57,10 +57,10 @@ public sealed class CollectCpuSampleSecurityTests
     {
         var sampler = new StubCpuSampler();
         var store = new MemoryDiagnosticHandleStore();
-        var jobs = new ThrowingJobRunner();
+
 
         var result = await DiagnosticTools.CollectCpuSample(
-            sampler, store, jobs, ToolGuardTests.EchoResolver(),
+            sampler, store, ToolGuardTests.EchoResolver(),
             new SymbolServerAllowlist(null),
             TestPrincipalAccessors.Root,
             processId: 4242,
@@ -97,10 +97,4 @@ public sealed class CollectCpuSampleSecurityTests
         }
     }
 
-    private sealed class ThrowingJobRunner : ICollectionJobRunner
-    {
-        public DiagnosticHandle Start<T>(int processId, string kind, TimeSpan ttl, Func<CancellationToken, Task<DiagnosticResult<T>>> work)
-            => throw new InvalidOperationException("should not run as job in these tests");
-        public bool Cancel(string handle) => false;
-    }
 }

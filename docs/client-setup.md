@@ -224,17 +224,14 @@ on `tools/call`:
   cancellation as an exception. Both are spec-conformant — render either as
   a "stopped" state.
 
-Cutover plan:
+Migration from the pre-spec polling bridge (now removed):
 
 1. Update your MCP client SDK to a version that emits a progress token on
    long-running `tools/call`.
-2. Stop passing `runAsJob=true`. The server still accepts it in Stage A but
-   logs a once-per-process Warning (`runAsJob=true is deprecated…`) so
-   operators can confirm no traffic still depends on it.
-3. Stop calling `get_collection_status` / `cancel_collection`. They remain in
-   Stage A; both will be removed in **Stage B** once
-   [issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211)
-   completes the client-matrix audit.
-
-If your client cannot be updated, the legacy polling path remains functional
-in this release.
+2. Stop passing `runAsJob=true` — the parameter has been removed and the
+   server will reject the call with an unknown-parameter error.
+3. Stop calling `get_collection_status` / `cancel_collection` — both tools
+   have been removed (Stage B of
+   [issue #211](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/211)).
+   Use MCP-native progress + request-scoped cancellation (or full MCP Tasks)
+   instead.

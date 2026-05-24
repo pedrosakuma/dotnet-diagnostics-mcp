@@ -467,7 +467,6 @@ public sealed class DiagnosticTools
     public static async Task<DiagnosticResult<CpuSample>> CollectCpuSample(
         ICpuSampler sampler,
         IDiagnosticHandleStore handles,
-        DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
         IProcessContextResolver resolver,
         SymbolServerAllowlist symbolServerAllowlist,
         IPrincipalAccessor principalAccessor,
@@ -479,11 +478,9 @@ public sealed class DiagnosticTools
         [Description("Cap on how many top hotspots get source-resolved. Must be >= 1. Defaults to the requested topN so every emitted MethodIdentity carries its resolved SourceLocation when available.")] int? maxResolvedSources = null,
         [Description("If true, performs an opt-in ClrMD attach after sampling to recover closed generic instantiations for the hottest managed frames (displayed on MethodIdentity as ClosedSignature + GenericTypeArguments.Method). CoreCLR only. On Linux this requires CAP_SYS_PTRACE (or ptrace_scope=0) and briefly suspends the target during the attach. Defaults to false to keep the EventPipe-only path lightweight.")] bool resolveMethodInstantiations = false,
         [Description("Cap on how many top hotspots get ClrMD generic-instantiation enrichment. Must be >= 1. Defaults to the requested topN so the enrichment work stays bounded to the hottest frames.")] int? maxResolvedMethodInstantiations = null,
-        [Description("If true, runs the collection as a background job. Returns immediately with a job handle; poll get_collection_status(handle) until status='completed' to retrieve the CpuSample result. Defaults to false (synchronous). DEPRECATED: spec-compliant clients should rely on MCP notifications/progress + notifications/cancelled instead; runAsJob=true is scheduled for removal in Stage B of RFC 0002 §7.3 #7 (issue #211).")] bool runAsJob = false,
         [Description("Verbosity (summary|detail|raw). Default 'summary' returns the top-3 hotspots inline. 'detail' returns the requested topN (default 25). 'raw' is equivalent to detail. The full sample is always retained behind the issued handle — drill in with get_call_tree.")]
         SamplingDepth depth = SamplingDepth.Summary,
         LegacyDiagnosticsFlagDeprecation? deprecation = null,
-        LegacyRunAsJobDeprecation? runAsJobDeprecation = null,
         RequestContext<CallToolRequestParams>? requestContext = null,
         CancellationToken cancellationToken = default)
     {
@@ -513,44 +510,6 @@ public sealed class DiagnosticTools
         var instantiationOpts = resolveMethodInstantiations
             ? new MethodInstantiationResolutionOptions(Enabled: true, MaxResolved: effectiveMaxResolvedInstantiations)
             : null;
-
-        if (runAsJob)
-        {
-            // Stage A of RFC 0002 §7.3 #7 / issue #211: legacy polling path is deprecated.
-            runAsJobDeprecation?.NotifyRunAsJobUse();
-            // Detach: the job outlives the MCP request, so we must not cancel it when the
-            // request token trips. The runner's own cancel hook is what stops it.
-            var jobTtl = TimeSpan.FromSeconds(durationSeconds) + CpuSampleHandleTtl;
-            var jobHandle = jobs.Start(
-                pid,
-                "cpu-sample-job",
-                jobTtl,
-                async ct =>
-                {
-                    var jobResult = await sampler.SampleAsync(pid, TimeSpan.FromSeconds(durationSeconds), topN, srcOpts, instantiationOpts, ct).ConfigureAwait(false);
-                    var dataHandle = handles.Register(pid, "cpu-sample", jobResult.Artifact, CpuSampleHandleTtl);
-                    var jobOk = BuildCpuSampleResult(
-                        jobResult.Summary,
-                        durationSeconds,
-                        dataHandle.Id,
-                        dataHandle.ExpiresAt,
-                        depth,
-                        new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
-                            new Dictionary<string, object?> { ["handle"] = dataHandle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }));
-                    return WithContext(jobOk, ctx);
-                });
-
-            var jobAck = DiagnosticResult.OkWithHandle<CpuSample>(
-                data: null!,
-                $"CPU sampling job started (handle {jobHandle.Id}). Poll get_collection_status(handle=\"{jobHandle.Id}\") after ~{durationSeconds}s to retrieve the result.",
-                jobHandle.Id,
-                jobHandle.ExpiresAt,
-                new NextActionHint("get_collection_status", "Poll the background CPU sampling job until status='completed'.",
-                    new Dictionary<string, object?> { ["handle"] = jobHandle.Id }),
-                new NextActionHint("cancel_collection", "Abort the background CPU sampling job if the symptom changed.",
-                    new Dictionary<string, object?> { ["handle"] = jobHandle.Id }));
-            return WithContext(jobAck, ctx);
-        }
 
         CpuSampleResult result;
         try
@@ -2968,193 +2927,6 @@ public sealed class DiagnosticTools
                 new Dictionary<string, object?> { ["durationSeconds"] = 20 }));
     }
 
-    [RequireScope("investigation-export")]
-    [McpServerTool(
-        Name = "get_collection_status",
-        Title = "Get background collection status",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Polls the status of a background collection started with runAsJob=true (e.g. collect_cpu_sample). " +
-        "When given an MCP Task id, also mirrors the task state from tasks/get so legacy clients can bridge " +
-        "into the spec-compliant long-running flow. Returns the current lifecycle phase, elapsed time, and " +
-        "the final DiagnosticResult once the job or task terminates.")]
-    public static async Task<DiagnosticResult<CollectionStatusReport>> GetCollectionStatus(
-        IDiagnosticHandleStore handles,
-        IMcpTaskStore taskStore,
-        McpServer server,
-        [Description("Legacy job handle from runAsJob=true, or an MCP taskId returned by a task-augmented tools/call.")] string handle)
-    {
-        if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CollectionStatusReport>(nameof(handle), "is required");
-
-        var job = handles.TryGet<DotnetDiagnosticsMcp.Core.Jobs.CollectionJob>(handle);
-        if (job is not null)
-        {
-            var snap = job.Snapshot();
-            var report = new CollectionStatusReport(
-                Handle: snap.Handle,
-                Kind: snap.Kind,
-                ProcessId: snap.ProcessId,
-                Status: snap.Status.ToString().ToLowerInvariant(),
-                StartedAt: snap.StartedAt,
-                ElapsedSeconds: snap.ElapsedSeconds,
-                CompletedAt: snap.CompletedAt,
-                Result: snap.Result,
-                Error: snap.Error);
-
-            var summary = snap.Status switch
-            {
-                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Running =>
-                    $"Job '{snap.Kind}' still running ({snap.ElapsedSeconds:F1}s elapsed). Poll again shortly.",
-                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Completed =>
-                    $"Job '{snap.Kind}' completed in {snap.ElapsedSeconds:F1}s. The full DiagnosticResult is embedded in the result field.",
-                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Failed =>
-                    $"Job '{snap.Kind}' failed after {snap.ElapsedSeconds:F1}s: {snap.Error?.Message ?? "unknown error"}.",
-                DotnetDiagnosticsMcp.Core.Jobs.CollectionJobStatus.Canceled =>
-                    $"Job '{snap.Kind}' was canceled after {snap.ElapsedSeconds:F1}s.",
-                _ => $"Job '{snap.Kind}' status: {snap.Status}.",
-            };
-
-            var hints = snap.IsTerminal
-                ? Array.Empty<NextActionHint>()
-                : new[]
-                {
-                    new NextActionHint("get_collection_status", "Poll again — the job has not finished.",
-                        new Dictionary<string, object?> { ["handle"] = snap.Handle }),
-                    new NextActionHint("cancel_collection", "Abort the job if you no longer need the result.",
-                        new Dictionary<string, object?> { ["handle"] = snap.Handle }),
-                };
-
-            return DiagnosticResult.Ok(report, summary, hints);
-        }
-
-        var sessionId = TryGetServerSessionId(server);
-        var task = await taskStore.GetTaskAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
-        if (task is null)
-        {
-            return DiagnosticResult.Fail<CollectionStatusReport>(
-                $"No collection job or MCP task found for handle '{handle}'. It may have expired, been invalidated when the target process exited, or never existed.",
-                new DiagnosticError("HandleNotFound", $"Unknown or expired handle '{handle}'."),
-                new NextActionHint("collect_cpu_sample", "Restart the collection — pass runAsJob=true or use task-augmented tools/call to get a fresh handle.",
-                    new Dictionary<string, object?> { ["runAsJob"] = true }));
-        }
-
-        JsonElement? taskResult = null;
-        if (task.Status is McpTaskStatus.Completed or McpTaskStatus.Failed or McpTaskStatus.Cancelled)
-        {
-            try
-            {
-                taskResult = await taskStore.GetTaskResultAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Cancelled tasks commonly have no stored payload; keep Result=null.
-            }
-        }
-
-        var elapsedSeconds = (task.LastUpdatedAt - task.CreatedAt).TotalSeconds;
-        var terminal = task.Status is McpTaskStatus.Completed or McpTaskStatus.Failed or McpTaskStatus.Cancelled;
-        var taskReport = new CollectionStatusReport(
-            Handle: task.TaskId,
-            Kind: "mcp-task",
-            ProcessId: 0,
-            Status: task.Status.ToString().ToLowerInvariant(),
-            StartedAt: task.CreatedAt,
-            ElapsedSeconds: elapsedSeconds,
-            CompletedAt: terminal ? task.LastUpdatedAt : null,
-            Result: taskResult,
-            Error: null);
-
-        var taskSummary = task.Status switch
-        {
-            McpTaskStatus.Working => $"Task '{task.TaskId}' is working ({elapsedSeconds:F1}s elapsed). Poll again shortly.",
-            McpTaskStatus.InputRequired => $"Task '{task.TaskId}' is waiting for additional input. A spec-compliant client should call tasks/result.",
-            McpTaskStatus.Completed => $"Task '{task.TaskId}' completed in {elapsedSeconds:F1}s. The stored CallToolResult is embedded in the result field when available.",
-            McpTaskStatus.Failed => $"Task '{task.TaskId}' failed after {elapsedSeconds:F1}s.",
-            McpTaskStatus.Cancelled => $"Task '{task.TaskId}' was cancelled after {elapsedSeconds:F1}s.",
-            _ => $"Task '{task.TaskId}' status: {task.Status}.",
-        };
-
-        var taskHints = terminal
-            ? Array.Empty<NextActionHint>()
-            : new[]
-            {
-                new NextActionHint("get_collection_status", "Poll again — the task has not finished.",
-                    new Dictionary<string, object?> { ["handle"] = task.TaskId }),
-                new NextActionHint("cancel_collection", "Abort the task if you no longer need the result.",
-                    new Dictionary<string, object?> { ["handle"] = task.TaskId }),
-            };
-
-        return DiagnosticResult.Ok(taskReport, taskSummary, taskHints);
-    }
-
-    [RequireScope("investigation-export")]
-    [McpServerTool(
-        Name = "cancel_collection",
-        Title = "Cancel background collection",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Signals a background collection job (started with runAsJob=true) to stop. When given an MCP taskId, " +
-        "bridges to the SDK task-cancellation path so legacy clients can still abort a task-augmented collect. " +
-        "Cancellation is cooperative — the underlying collector may take a moment to unwind.")]
-    public static async Task<DiagnosticResult<CancelCollectionReport>> CancelCollection(
-        DotnetDiagnosticsMcp.Core.Jobs.ICollectionJobRunner jobs,
-        IMcpTaskStore taskStore,
-        McpServer server,
-        [Description("Legacy job handle from runAsJob=true, or an MCP taskId returned by a task-augmented tools/call.")] string handle)
-    {
-        if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CancelCollectionReport>(nameof(handle), "is required");
-
-        var requested = jobs.Cancel(handle);
-        string summary;
-        if (requested)
-        {
-            summary = $"Cancellation requested for job '{handle}'. Poll get_collection_status to confirm the final state.";
-        }
-        else
-        {
-            var sessionId = TryGetServerSessionId(server);
-            var task = await taskStore.GetTaskAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
-            if (task is not null)
-            {
-                TryCancelSdkTask(server, handle);
-                await taskStore.CancelTaskAsync(handle, sessionId, CancellationToken.None).ConfigureAwait(false);
-                requested = true;
-                summary = $"Cancellation requested for task '{handle}'. Spec-compliant clients may also call tasks/cancel directly.";
-            }
-            else
-            {
-                summary = $"No active job or MCP task found for handle '{handle}'. It may have already completed or expired.";
-            }
-        }
-
-        var report = new CancelCollectionReport(handle, requested);
-        return DiagnosticResult.Ok(report, summary,
-            new NextActionHint("get_collection_status", "Confirm the handle reached a terminal state.",
-                new Dictionary<string, object?> { ["handle"] = handle }));
-    }
-
-    private static string? TryGetServerSessionId(McpServer server)
-        => server.GetType().GetProperty("SessionId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(server) as string;
-
-    private static bool TryCancelSdkTask(McpServer server, string taskId)
-    {
-        var providerField = server.GetType().GetField("_taskCancellationTokenProvider", BindingFlags.Instance | BindingFlags.NonPublic);
-        var provider = providerField?.GetValue(server);
-        var cancel = provider?.GetType().GetMethod("Cancel", BindingFlags.Instance | BindingFlags.Public);
-        if (cancel is null)
-        {
-            return false;
-        }
-
-        cancel.Invoke(provider, new object?[] { taskId });
-        return true;
-    }
 
     private static DiagnosticResult<T> InvalidArg<T>(string parameterName, string requirement)
         => DiagnosticResult.Fail<T>(
@@ -3561,26 +3333,3 @@ public sealed class DiagnosticTools
         ProcessContext? context)
         => context is null ? result : result with { ResolvedProcess = context };
 }
-
-/// <summary>Tool-facing projection of a <see cref="DotnetDiagnosticsMcp.Core.Jobs.CollectionJobSnapshot"/>.</summary>
-/// <remarks>
-/// Order matters: nullable parameters must have explicit <c>= null</c> defaults so the
-/// JSON schema generator (used by the MCP SDK to advertise <c>outputSchema</c>) does NOT
-/// mark them as required. The SDK serializes with <c>JsonIgnoreCondition.WhenWritingNull</c>,
-/// so a missing default produces "required + omitted" mismatches and clients (Copilot CLI,
-/// Claude Code) reject the response with <c>-32602 Structured content does not match the
-/// tool's output schema: data/data must have required property 'X'</c>. Regression: issue #61.
-/// </remarks>
-public sealed record CollectionStatusReport(
-    string Handle,
-    string Kind,
-    int ProcessId,
-    string Status,
-    DateTimeOffset StartedAt,
-    double ElapsedSeconds,
-    DateTimeOffset? CompletedAt = null,
-    object? Result = null,
-    DiagnosticError? Error = null);
-
-/// <summary>Tool-facing acknowledgement of a cancel_collection call.</summary>
-public sealed record CancelCollectionReport(string Handle, bool CancellationRequested);
