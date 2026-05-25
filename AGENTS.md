@@ -174,6 +174,42 @@ When picking up an issue:
 5. **Keep PRs small and reference the issue** (`Closes #N`).
 6. **Don't commit** secrets, dumps (`*.dmp`), or `.nettrace` files.
 
+### Agent workflow conventions
+
+These are repo-wide meta-workflows that have proven to pay off here. They are
+declarative on purpose — the goal is to bias decisions, not to script every
+turn. Skip them when the task is genuinely trivial.
+
+- **Mandatory code review before flipping a PR out of draft.** Use the
+  `task` tool with `agent_type: "code-review"` and `model: "gpt-5.5"` against
+  the staged / branch diff and address every real finding. Empirically this
+  has caught a real bug on most non-trivial PRs in this repo — including
+  several flake / race-condition regressions that the human + author-agent
+  pair both missed.
+- **Decompose-then-parallelise.** Features here tend to land as several small,
+  independent PRs (RFC 0002 shipped as 13). When the work decomposes into ≥2
+  independent trails (different directories, different test surfaces, no
+  shared schema migration), prefer dispatching one background sub-agent per
+  trail over serialising them in the main loop (in Copilot CLI: `task` with
+  `mode: "background"`; other agent CLIs expose an equivalent). The main loop
+  keeps coordination + code review; the sub-agents own implementation.
+- **Pre-scope R&D items with a `research` or `explore` agent first.** For
+  fuzzy / multi-week items (e.g. "NativeAOT heap walk", "new cloud provider
+  recipe"), dispatch a sub-agent for survey + feasibility before drafting the
+  plan. Saves the main context for actual design + execution.
+- **Don't reach for a sub-agent when a single tool call would do.** Simple
+  lookups (one grep, one file read), pointed edits, and any interactive
+  debugging stay in the main loop — sub-agent fidelity loss is not worth it.
+- **Worktree etiquette for parallel work.** Create the branch on the remote
+  first (`git worktree add -b <branch> /tmp/<dir> origin/main`) so the sub-
+  agent operates on an isolated checkout. After merge, `git worktree remove
+  --force <path>` before `gh pr merge --delete-branch` (the latter cannot
+  delete a local branch held by a worktree).
+
+User- or task-scoped preferences ("for this PR don't run review", "I prefer
+option X") belong in the prompt, not here. Conventions in this section apply
+to every contributor and every agent on this repo.
+
 ## Things deliberately not in scope
 
 - **Modifying the target application** — non-goal. Everything must work over the diagnostic socket.
