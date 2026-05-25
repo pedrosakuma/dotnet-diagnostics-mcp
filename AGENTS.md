@@ -189,9 +189,10 @@ turn. Skip them when the task is genuinely trivial.
 - **Decompose-then-parallelise.** Features here tend to land as several small,
   independent PRs (RFC 0002 shipped as 13). When the work decomposes into ≥2
   independent trails (different directories, different test surfaces, no
-  shared schema migration), prefer one background `task` agent per trail
-  (`mode: "background"`) over serialising them. The main loop keeps
-  coordination + code review; the sub-agents own implementation.
+  shared schema migration), prefer dispatching one background sub-agent per
+  trail over serialising them in the main loop (in Copilot CLI: `task` with
+  `mode: "background"`; other agent CLIs expose an equivalent). The main loop
+  keeps coordination + code review; the sub-agents own implementation.
 - **Pre-scope R&D items with a `research` or `explore` agent first.** For
   fuzzy / multi-week items (e.g. "NativeAOT heap walk", "new cloud provider
   recipe"), dispatch a sub-agent for survey + feasibility before drafting the
