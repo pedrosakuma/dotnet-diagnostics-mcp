@@ -606,7 +606,7 @@ identical, but each carries a `DEPRECATED` notice and will be removed in
 | `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`. Case-sensitive. |
 | `processId` | `int?` | auto | Target process id. |
 | `durationSeconds` | `int` | 5 (counters) / 10 (others) | Collection window. |
-| `providers` / `intervalSeconds` | counters only | — | Same as [`collect_events(kind="counters")`](#collect_events(kind="counters")). |
+| `providers` / `meters` / `intervalSeconds` / `maxInstrumentTimeSeries` | counters only | — | Same as [`collect_events(kind="counters")`](#collect_events(kind="counters")). |
 | `maxRecent` | exceptions only | 100 | Same as [`collect_events(kind="exceptions")`](#collect_events(kind="exceptions")). |
 | `maxEvents` | gc / event_source only | 200 | Same as the underlying tool. |
 | `providerName` / `keywords` / `eventLevel` / `depth` / `unsafeProvider` | event_source only | — | Same as [`collect_events(kind="event_source")`](#collect_events(kind="event_source")). |
@@ -675,8 +675,10 @@ legacy samplers verbatim.
 > Behaviorally identical; will be removed in `0.7.0`.
 
 
-Subscribes to one or more EventCounter providers and returns the latest value
-seen per counter over a fixed window.
+Subscribes to one or more legacy EventCounter providers and, optionally, one or
+more Meter names through `System.Diagnostics.Metrics`. Returns the latest
+EventCounter value per counter plus the latest Meter time series / histogram
+snapshot seen over a fixed window.
 
 **Parameters:**
 
@@ -684,10 +686,12 @@ seen per counter over a fixed window.
 |---|---|---|---|
 | `processId` | `int` | — | Target process id |
 | `durationSeconds` | `int` | `5` | Collection window. Must be ≥ 1. |
-| `providers` | `string[]?` | see below | EventSource provider names |
-| `intervalSeconds` | `int` | `1` | Per-provider refresh interval |
+| `providers` | `string[]?` | see below | Legacy EventCounter provider names. `null` uses defaults; `[]` disables legacy EventCounters. |
+| `meters` | `string[]?` | `null` | Meter names forwarded to `System.Diagnostics.Metrics`. Null/empty disables Meter collection. |
+| `intervalSeconds` | `int` | `1` | Refresh interval for both EventCounters and Meter aggregation. |
+| `maxInstrumentTimeSeries` | `int` | `1000` | Max Meter time series / histograms retained before the collector caps results and emits a `Notes[]` warning. |
 
-When `providers` is null/empty the defaults are:
+When `providers` is null the defaults are:
 `System.Runtime`, `Microsoft.AspNetCore.Hosting`, `Microsoft-AspNetCore-Server-Kestrel`.
 
 **Returns:** `CounterSnapshot`:
@@ -706,9 +710,35 @@ When `providers` is null/empty the defaults are:
       "unit": "%",
       "kind": "Mean"
     }
+  ],
+  "meters": [
+    {
+      "meter": "Microsoft.AspNetCore.Hosting",
+      "instrument": "http.server.request.duration",
+      "unit": "s",
+      "kind": "Histogram<double>",
+      "tags": {
+        "method": "GET"
+      },
+      "lastValue": null,
+      "rate": null,
+      "histogram": {
+        "count": 42,
+        "sum": 1.84,
+        "p50": 0.031,
+        "p95": 0.084,
+        "p99": 0.120
+      }
+    }
+  ],
+  "notes": [
+    "TimeSeriesLimitReached: capped at 1000 series."
   ]
 }
 ```
+
+When Meter data is present, `SamplingDepth.Summary` keeps the headline EventCounters
+and also includes `http.server.request.duration` p95 when available.
 
 ---
 

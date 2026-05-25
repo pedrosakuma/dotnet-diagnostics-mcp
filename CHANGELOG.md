@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `collect_events(kind="counters")` now subscribes to `System.Diagnostics.Metrics`
+  meters via the new `meters` / `maxInstrumentTimeSeries` parameters, surfaces
+  Meter time series and histogram percentiles in `CounterSnapshot`, and carries
+  cap/error notes when Meter cardinality is truncated.
+
 ### Fixed
 - `deploy/Dockerfile`: removed dev-only `"Urls": "http://127.0.0.1:8787"` from
   shipped `appsettings.json` so `ASPNETCORE_URLS=http://0.0.0.0:8080` (set in

@@ -20,12 +20,14 @@ a symptom and walks through the tool calls in order.
 **Hypothesis tree:** CPU bound → GC bound → I/O / downstream bound → contention.
 
 ### Step 1 — Quick vitals
-Call `collect_events(kind="counters")` with default providers for 5 s. Look at:
+Call `collect_events(kind="counters")` with default providers for 5 s. If the target emits
+Meter data, prefer `http.server.request.duration` p95 from `Meters[]`; otherwise fall back to
+legacy EventCounters. Look at:
 
 - `System.Runtime/cpu-usage`
 - `System.Runtime/working-set`
 - `System.Runtime/gen-2-gc-count` and `time-in-gc`
-- `Microsoft.AspNetCore.Hosting/requests-per-second` and `request-duration`
+- `Meters[].Instrument == "http.server.request.duration"` (`Histogram.P95`), or `Microsoft.AspNetCore.Hosting/request-duration` if the Meter is absent
 - `Microsoft-AspNetCore-Server-Kestrel/connection-queue-length`
 
 ### Step 2 — Branch on what's elevated
