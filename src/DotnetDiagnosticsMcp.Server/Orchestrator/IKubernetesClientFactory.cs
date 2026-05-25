@@ -78,6 +78,15 @@ public sealed class KubeconfigHandleNotFoundException : KubernetesConfigurationE
 /// background TTL sweep or capacity eviction proactively kills the cached client
 /// rather than waiting for the next request to discover the dangling state.
 /// </para>
+/// <para>
+/// FIX 4 (#234 review, gpt-5.5 2nd pass): close the post-TryAdd race. The
+/// HandleEvicted subscription only cleans up cache entries that already exist; if
+/// the store evicts the handle BEFORE our TryAdd installs the entry, the handler
+/// has nothing to remove and the freshly added entry is stale. We therefore re-peek
+/// the expiry AFTER TryAdd and roll back the install (TryRemove + Dispose) if the
+/// store no longer recognizes the handle, or recognizes it under a different expiry
+/// — both signal a race-with-eviction we must surface as KubeconfigHandleNotFound.
+/// </para>
 /// </remarks>
 internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory, IDisposable
 {
@@ -183,6 +192,23 @@ internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory,
                 }
                 throw new KubeconfigHandleNotFoundException(
                     "Kubeconfig handle expired during client construction. Re-run discover_azure to mint a fresh handle.");
+            }
+
+            // FIX 4 (#234 review, gpt-5.5 2nd pass): close the post-eviction race.
+            // Between the earlier TryResolve/TryPeekExpiry capture and the TryAdd above,
+            // the store may have evicted (TTL sweep / capacity overflow / disposal) or
+            // re-minted this handle. If the eviction event fired BEFORE our TryAdd
+            // succeeded, our HandleEvicted subscriber found nothing to remove — the
+            // cache entry we just installed is stale and the subscriber will never
+            // run again for that prior eviction. Re-validate against the store one
+            // more time; on any drift, evict + dispose + surface the same not-found
+            // envelope as the cold-miss path.
+            var postAddExpiry = _kubeconfigStore.TryPeekExpiry(handle);
+            if (postAddExpiry is null || postAddExpiry.Value != expiresAt.Value)
+            {
+                EvictHandleClient(handle);
+                throw new KubeconfigHandleNotFoundException(
+                    "Kubeconfig handle was evicted during client construction. Re-run discover_azure to mint a fresh handle.");
             }
             return built;
         }
