@@ -30,6 +30,15 @@ public sealed class AzureDiscoveryServiceRegistrationTests
 
         factoryA.Should().NotBeNull();
         factoryB.Should().BeSameAs(factoryA);
+
+        // #232 — backend discovery seams are also registered (default implementations
+        // throw NotImplementedException; real backends land in #233 / #234).
+        provider.GetRequiredService<DotnetDiagnosticsMcp.Server.Azure.Discovery.IAzureWebAppsDiscovery>()
+            .Should().NotBeNull();
+        provider.GetRequiredService<DotnetDiagnosticsMcp.Server.Azure.Discovery.IAzureContainerAppsDiscovery>()
+            .Should().NotBeNull();
+        provider.GetRequiredService<DotnetDiagnosticsMcp.Server.Azure.Discovery.IAzureAksDiscovery>()
+            .Should().NotBeNull();
     }
 
     [Fact]

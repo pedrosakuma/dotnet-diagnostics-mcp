@@ -1444,6 +1444,63 @@ pointing at `list_orchestrator` and will be removed in **0.7.0**.
 
 ---
 
+## `discover_azure`
+
+Azure discovery v1 (issue #232, parent #230). Single `kind`-discriminated tool that
+enumerates .NET workload candidates in an Azure subscription across three platforms.
+
+| `kind` | Required scope | Returns |
+|---|---|---|
+| `webapps` (default) | `azure-discovery` | `AzurePagedResult<AzureWebAppCandidate>` under `data.webapps` |
+| `containerapps` | `azure-discovery` | `AzurePagedResult<AzureContainerAppCandidate>` under `data.containerapps` |
+| `aksclusters` | `azure-discovery` | `AzurePagedResult<AzureAksClusterCandidate>` under `data.aksclusters` |
+
+**Parameters**
+
+- `subscriptionId` *(required)* — Azure subscription id (string GUID).
+- `kind` — discriminator, see table above. Case-sensitive.
+- `resourceGroup` — optional resource-group filter; null lists across the whole subscription.
+- `includeStopped` *(default false)* — when true, backends include stopped / failed resources.
+- `limit` *(default 100)* — page size; clamped to `200`.
+- `cursor` — opaque continuation token from a prior page; null for the first page.
+- `includeKubeconfig` *(default false)* — `aksclusters` only. When true, the AKS
+  backend returns an opaque kubeconfig handle (`AzureAksHandoff`) — never raw
+  kubeconfig content.
+
+**Result envelope**
+
+```json
+{
+  "summary": "...",
+  "hints": [],
+  "data": {
+    "kind": "containerapps",
+    "webapps":        null,
+    "containerapps":  { "items": [...], "nextCursor": null },
+    "aksclusters":    null
+  }
+}
+```
+
+Exactly one of `data.webapps` / `data.containerapps` / `data.aksclusters` is populated,
+matching `data.kind`. Errors (missing subscription id, unknown `kind`, Azure discovery
+disabled, scope mismatch) surface as the standard `DiagnosticError` envelope with kinds
+`InvalidArgument`, `AzureDiscoveryDisabled`, or `PermissionDenied` respectively.
+
+**Registration.** Gated on the `AzureDiscovery:Enabled` configuration flag — a server
+with the master switch off looks identical to a pre-#232 build (the tool is not
+registered and the Azure SDK is never reached).
+
+**Backends.** The contract is shipped in #232; the real backends arrive in:
+- **#233** — App Service (`webapps`) + Container Apps (`containerapps`).
+- **#234** — AKS (`aksclusters`), including the kubeconfig-handle store.
+
+Until those PRs merge, calling the tool with `AzureDiscovery:Enabled=true` throws
+`NotImplementedException` through the backend stubs. See
+[`docs/azure-discovery.md`](./azure-discovery.md) for the full design.
+
+---
+
 ## Security gates (B4)
 
 Issue #165 introduced three opt-in security gates that change the default behaviour of

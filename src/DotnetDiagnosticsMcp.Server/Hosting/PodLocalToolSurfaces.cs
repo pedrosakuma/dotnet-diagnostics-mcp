@@ -54,6 +54,12 @@ internal static class PodLocalToolSurfaces
         typeof(ListOrchestratorTool),
     });
 
+    /// <summary>Tool-surface classes registered only when AzureDiscovery is enabled (#232).</summary>
+    public static ImmutableArray<Type> AzureDiscoveryOnly { get; } = ImmutableArray.Create(new[]
+    {
+        typeof(DiscoverAzureTool),
+    });
+
     /// <summary>
     /// Subset of tool-surface classes that the orchestrator reverse proxy is allowed to forward
     /// to the pod-local sidecar. By contract this excludes <see cref="OrchestratorOnly"/>
@@ -61,19 +67,27 @@ internal static class PodLocalToolSurfaces
     /// </summary>
     public static ImmutableArray<Type> Proxyable => Always;
 
-    /// <summary>Returns the full set of surfaces to register given the orchestrator toggle.</summary>
-    public static Type[] GetSurfaceTypes(bool enableOrchestratorTools)
+    /// <summary>Returns the full set of surfaces to register given the orchestrator
+    /// and Azure-discovery toggles.</summary>
+    public static Type[] GetSurfaceTypes(
+        bool enableOrchestratorTools,
+        bool enableAzureDiscoveryTools = false)
     {
-        if (!enableOrchestratorTools)
-        {
-            var copy = new Type[Always.Length];
-            for (var i = 0; i < Always.Length; i++) copy[i] = Always[i];
-            return copy;
-        }
+        var size = Always.Length
+            + (enableOrchestratorTools ? OrchestratorOnly.Length : 0)
+            + (enableAzureDiscoveryTools ? AzureDiscoveryOnly.Length : 0);
 
-        var combined = new Type[Always.Length + OrchestratorOnly.Length];
-        for (var i = 0; i < Always.Length; i++) combined[i] = Always[i];
-        for (var i = 0; i < OrchestratorOnly.Length; i++) combined[Always.Length + i] = OrchestratorOnly[i];
+        var combined = new Type[size];
+        var i = 0;
+        for (var k = 0; k < Always.Length; k++) combined[i++] = Always[k];
+        if (enableOrchestratorTools)
+        {
+            for (var k = 0; k < OrchestratorOnly.Length; k++) combined[i++] = OrchestratorOnly[k];
+        }
+        if (enableAzureDiscoveryTools)
+        {
+            for (var k = 0; k < AzureDiscoveryOnly.Length; k++) combined[i++] = AzureDiscoveryOnly[k];
+        }
         return combined;
     }
 }

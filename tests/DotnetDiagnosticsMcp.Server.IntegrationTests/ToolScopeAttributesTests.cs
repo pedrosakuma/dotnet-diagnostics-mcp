@@ -96,6 +96,7 @@ public sealed class ToolScopeAttributesTests
             typeof(DotnetDiagnosticsMcp.Server.Tools.QuerySnapshotTool),
             typeof(DotnetDiagnosticsMcp.Server.Tools.InspectHeapTool),
             typeof(DotnetDiagnosticsMcp.Server.Tools.GetBytesTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.DiscoverAzureTool),
         });
 
         // Spot-check a representative tool from each scope family to detect accidental
@@ -108,6 +109,7 @@ public sealed class ToolScopeAttributesTests
         registry.TryGet("export_investigation_summary")!.Value.All.Should().Equal("investigation-export");
         registry.TryGet("attach_to_pod")!.Value.All.Should().Equal("orchestrator-attach");
         registry.TryGet("list_orchestrator")!.Value.Any.Should().Equal("orchestrator-list", "orchestrator-attach");
+        registry.TryGet("discover_azure")!.Value.All.Should().Equal("azure-discovery");
     }
 
     // --- fixtures -----------------------------------------------------------------

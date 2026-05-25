@@ -119,7 +119,9 @@ public sealed class PodLocalToolSurfacesTests
             .Select(m => m.Groups[1].Value)
             .ToHashSet(StringComparer.Ordinal);
 
-        foreach (var surface in PodLocalToolSurfaces.Always.Concat(PodLocalToolSurfaces.OrchestratorOnly))
+        foreach (var surface in PodLocalToolSurfaces.Always
+            .Concat(PodLocalToolSurfaces.OrchestratorOnly)
+            .Concat(PodLocalToolSurfaces.AzureDiscoveryOnly))
         {
             withToolsTypeNames.Should().Contain(
                 surface.Name,

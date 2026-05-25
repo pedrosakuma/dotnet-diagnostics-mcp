@@ -11,6 +11,7 @@ using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Symbols;
 using DotnetDiagnosticsMcp.Server.Azure;
+using DotnetDiagnosticsMcp.Server.Azure.Discovery;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
 using Microsoft.Extensions.Configuration;
@@ -158,6 +159,14 @@ internal static class DiagnosticServiceRegistration
 
         services.AddSingleton(options);
         services.AddSingleton<IAzureArmClientFactory, DefaultAzureArmClientFactory>();
+
+        // #232 — register the discovery backend seams. The real implementations land in
+        // #233 (App Service + Container Apps) and #234 (AKS); these stubs throw
+        // NotImplementedException so any accidental call-through during the contract
+        // PR surfaces loudly instead of silently returning an empty result.
+        services.AddSingleton<IAzureWebAppsDiscovery, NotImplementedAzureWebAppsDiscovery>();
+        services.AddSingleton<IAzureContainerAppsDiscovery, NotImplementedAzureContainerAppsDiscovery>();
+        services.AddSingleton<IAzureAksDiscovery, NotImplementedAzureAksDiscovery>();
         return true;
     }
 
@@ -180,6 +189,20 @@ internal static class DiagnosticServiceRegistration
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(loggerFactoryAccessor);
 
+        // #232 — detect whether AzureDiscovery is enabled by inspecting the service
+        // collection. AddAzureDiscoveryServices registers AzureDiscoveryOptions as a
+        // singleton only when the master switch is on, so this is a stable, side-
+        // effect-free flag without threading another bool through Program.cs.
+        var enableAzureDiscoveryTools = false;
+        foreach (var d in services)
+        {
+            if (d.ServiceType == typeof(AzureDiscoveryOptions))
+            {
+                enableAzureDiscoveryTools = true;
+                break;
+            }
+        }
+
         var builder = services
             .AddMcpServer(options =>
             {
@@ -197,7 +220,8 @@ internal static class DiagnosticServiceRegistration
                     BuildScopeAuthorizationFilter(
                         servicesAccessor,
                         loggerFactoryAccessor,
-                        enableOrchestratorTools));
+                        enableOrchestratorTools,
+                        enableAzureDiscoveryTools));
 
                 if (enableOrchestratorTools && servicesAccessor is not null)
                 {
@@ -252,17 +276,26 @@ internal static class DiagnosticServiceRegistration
             builder.WithTools<ListOrchestratorTool>();
         }
 
+        if (enableAzureDiscoveryTools)
+        {
+            // #232 — Azure discovery v1 tool. Surface gated on AzureDiscovery:Enabled so
+            // a server with the master switch off looks identical to a pre-#232 build.
+            builder.WithTools<DiscoverAzureTool>();
+        }
+
         return builder;
     }
 
     private static ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> BuildScopeAuthorizationFilter(
         Func<IServiceProvider?>? servicesAccessor,
         Func<ILoggerFactory?> loggerFactoryAccessor,
-        bool enableOrchestratorTools)
+        bool enableOrchestratorTools,
+        bool enableAzureDiscoveryTools)
     {
         // Build the tool-scope index on first call. The set of scanned types must match
         // the WithTools<>() chain below (DiagnosticTools always; OrchestratorTools when
-        // enabled) so the registry knows about every tool the SDK will dispatch.
+        // enabled; DiscoverAzureTool when Azure discovery is enabled) so the registry
+        // knows about every tool the SDK will dispatch.
         Security.ToolScopeRegistry? cachedRegistry = null;
         ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult>? cachedFilter = null;
         var gate = new object();
@@ -275,7 +308,9 @@ internal static class DiagnosticServiceRegistration
                 {
                     if (cachedFilter is null)
                     {
-                        var surfaceTypes = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools);
+                        var surfaceTypes = PodLocalToolSurfaces.GetSurfaceTypes(
+                            enableOrchestratorTools,
+                            enableAzureDiscoveryTools);
                         cachedRegistry = Security.ToolScopeRegistry.Build(surfaceTypes);
 
                         cachedFilter = Security.ToolScopeAuthorizationFilter.Create(
