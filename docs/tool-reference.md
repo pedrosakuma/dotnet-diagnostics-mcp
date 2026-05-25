@@ -196,16 +196,22 @@ Visões disponíveis por `kind`:
 | `gc-events` | `collect_events(kind="gc")` | `summary` (default), `events`, `pauseHistogram` |
 | `activities` | `collect_events(kind="activities")` | `summary` (default), `bySource`, `byOperation`, `activities` |
 | `event-source` | `collect_events(kind="event_source")` | `summary` (default), `byEventName`, `events` |
-| `heap-snapshot` | `inspect_heap` / `inspect_heap(source="live")` / `inspect_heap(source="dump")` | `top-types` (default), `retention-paths`, `roots-by-kind`, `finalizer-queue`, `fragmentation`, `static-fields`, `delegate-targets`, `duplicate-strings`, `object`, `gcroot`, `objsize`, `async` |
+| `heap-snapshot` | `inspect_heap` / `inspect_heap(source="live")` / `inspect_heap(source="dump")` | `top-types` (default), `retention-paths`, `roots-by-kind`, `finalizer-queue`, `fragmentation`, `static-fields`, `delegate-targets`, `duplicate-strings`, `object`, `gcroot`, `objsize`, `async`, `diff` |
 | `thread-snapshot` | `collect_thread_snapshot` | `top-blocked` (default), `threads-summary`, `stack`, `lock-graph`, `deadlocks`, `unique-stacks`, `threadpool` |
 | `off-cpu-snapshot` | `collect_sample(kind="off_cpu")` | `topStacks` (default), `byThread`, `stack` |
-| `cpu-sample` / `allocation-sample` | `collect_sample(kind="cpu")` / `collect_sample(kind="allocation")` | `call-tree` (única; legacy `query_snapshot(view="call-tree")` não tinha discriminador) |
+| `cpu-sample` / `allocation-sample` | `collect_sample(kind="cpu")` / `collect_sample(kind="allocation")` | `call-tree`, `diff` |
 
 Autorização é aplicada por kind no dispatcher (`heap-read` para heap,
 `ptrace` para thread, `eventpipe` para off-CPU, `investigation-export` para
-call-tree, `read-counters`|`eventpipe` para collection) — o gate estático aceita
+cpu/allocation call-tree + diff, `heap-read` para heap diff, `read-counters`|`eventpipe` para collection) — o gate estático aceita
 qualquer um dos 5 escopos para o tool surface; o boundary por kind preserva o
 contrato de cada legado verbatim (RFC 0002 §4.1).
+
+`view="diff"` accepts `baselineHandle` (required), `minDeltaPct` (default `5.0`) and `topN`
+(default `25`). Accepted pairs are `cpu-sample × cpu-sample`, `heap-snapshot × heap-snapshot`
+and `allocation-sample × allocation-sample`. Allocation diffs normalize totals to per-second
+rates when the two capture windows use different durations and surface both raw + normalized
+metrics in each row.
 
 > **Nota — truncação em `event-source`:** o coletor para de armazenar eventos
 > ao atingir `maxEvents`, mas continua contando o total. As views

@@ -4,10 +4,14 @@ using DotnetDiagnosticsMcp.Core.Artifacts;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
+using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Threads;
+using DotnetDiagnosticsMcp.Core.Security;
+using DotnetDiagnosticsMcp.Server.Security;
+using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
 
 namespace DotnetDiagnosticsMcp.Core.Tests;
@@ -1027,6 +1031,180 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
+    [Trait("Category", "Flaky")]
+    [SkipOnLinuxCiFact("Quarantined on Linux CI: EventPipe SampleProfiler can crash the host under ubuntu-latest load (tracked in #147). Runnable locally and on Windows CI.", Timeout = 90_000)]
+    public async Task Diff_CpuSample_DetectsRegression()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var sampler = new EventPipeCpuSampler();
+
+        var baseline = await SampleCpuUnderLoadAsync(http, sampler, "/generics?iterations=20000", TimeSpan.FromSeconds(10));
+        var current = await SampleCpuUnderLoadAsync(http, sampler, "/generics?iterations=200000", TimeSpan.FromSeconds(10));
+
+        var diff = SampleDiffer.Compare(baseline.Artifact, "baseline", current.Artifact, "current", minDeltaPct: 1, topN: 25);
+
+        diff.Verdict.Should().BeOneOf("regression", "mixed");
+        diff.Added.Concat(diff.Changed).Any(row =>
+            row.Key.Symbol.Module.Contains("CoreClrSample", StringComparison.Ordinal)
+            && (row.Direction == "added" || row.Direction == "up")
+            && (row.Key.Symbol.MethodFullName.Contains("GenericFixture", StringComparison.Ordinal)
+                || row.Key.Symbol.MethodFullName.Contains("Box`1", StringComparison.Ordinal)
+                || row.Key.Symbol.MethodFullName.Contains("Wrap", StringComparison.Ordinal)
+                || row.Key.Symbol.MethodFullName.Contains("Echo", StringComparison.Ordinal)))
+            .Should().BeTrue();
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task Diff_HeapSnapshot_DetectsTypeGrowth()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var inspector = new ClrMdDumpInspector();
+
+        using (var response = await http.GetAsync("/leak?mb=4", CancellationToken.None))
+        {
+            response.EnsureSuccessStatusCode();
+        }
+
+        var baseline = await inspector.InspectLiveAsync(
+            Pid,
+            new DumpInspectionOptions(TopTypes: 50),
+            CancellationToken.None);
+
+        for (var i = 0; i < 3; i++)
+        {
+            using var response = await http.GetAsync("/leak?mb=4", CancellationToken.None);
+            response.EnsureSuccessStatusCode();
+        }
+
+        var current = await inspector.InspectLiveAsync(
+            Pid,
+            new DumpInspectionOptions(TopTypes: 50),
+            CancellationToken.None);
+
+        var diff = SampleDiffer.Compare(baseline, "baseline", current, "current", minDeltaPct: 5, topN: 25);
+
+        diff.Verdict.Should().BeOneOf("regression", "mixed");
+        diff.Changed.Should().Contain(row => row.Direction == "up" && row.Key.TypeFullName == "System.Byte[]");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task Diff_RejectsMixedKinds()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var cpu = await SampleCpuUnderLoadAsync(http, new EventPipeCpuSampler(), "/generics?iterations=20000", TimeSpan.FromSeconds(8));
+        var heap = await new ClrMdDumpInspector().InspectLiveAsync(Pid, new DumpInspectionOptions(TopTypes: 25), CancellationToken.None);
+
+        var store = new MemoryDiagnosticHandleStore();
+        var cpuHandle = store.Register(Pid, "cpu-sample", cpu.Artifact, TimeSpan.FromMinutes(10));
+        var heapHandle = store.Register(Pid, "heap-snapshot", heap, TimeSpan.FromMinutes(10));
+
+        var result = await QuerySnapshotTool.QuerySnapshot(
+            store,
+            new ClrMdDumpInspector(),
+            new SensitiveDataRedactor(null),
+            new SensitiveValueGate(null),
+            new NullPrincipalAccessor(),
+            handle: cpuHandle.Id,
+            view: "diff",
+            baselineHandle: heapHandle.Id,
+            cancellationToken: CancellationToken.None);
+
+        result.Error.Should().NotBeNull();
+        result.Error!.Kind.Should().Be("InvalidArgument");
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task Diff_AllocationSample_NormalizesByDuration()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var driver = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                try { _ = await http.GetAsync("/render?count=1000", cts.Token); }
+                catch (OperationCanceledException) { break; }
+                catch { /* tolerate transient races */ }
+            }
+        }, cts.Token);
+
+        try
+        {
+            var sampler = new EventPipeAllocationSampler();
+            var baseline = await sampler.SampleAsync(Pid, TimeSpan.FromSeconds(4), topN: 25, cancellationToken: CancellationToken.None);
+            var current = await sampler.SampleAsync(Pid, TimeSpan.FromSeconds(8), topN: 25, cancellationToken: CancellationToken.None);
+
+            var diff = SampleDiffer.Compare(baseline.Summary, "baseline", current.Summary, "current", minDeltaPct: 0, topN: 50);
+            diff.Notes.Should().Contain(note => note.Contains("normalized totals to per-second rates", StringComparison.Ordinal));
+
+            var typeName = baseline.Summary.TopByBytes[0].TypeName;
+            var row = diff.Changed.Should().ContainSingle(candidate => candidate.Key.TypeFullName == typeName).Subject;
+            row.Baseline.Should().NotBeNull();
+            row.Current.Should().NotBeNull();
+            row.Current!.TotalBytes.Should().BeGreaterThan(row.Baseline!.TotalBytes,
+                "the longer capture window should accumulate more raw bytes before normalization");
+
+            var rawRatio = (double)row.Current.TotalBytes / row.Baseline.TotalBytes;
+            var normalizedRatio = row.Current.BytesPerSecond / row.Baseline.BytesPerSecond;
+            rawRatio.Should().BeGreaterThan(1.5,
+                "the 8s capture should accumulate materially more raw bytes than the 4s baseline");
+            normalizedRatio.Should().BeLessThan(rawRatio,
+                "per-second normalization should dampen the duration-driven spread visible in raw totals");
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await driver; } catch { /* expected on cancel */ }
+        }
+    }
+
+    private async Task<CpuSampleResult> SampleCpuUnderLoadAsync(
+        HttpClient http,
+        EventPipeCpuSampler sampler,
+        string path,
+        TimeSpan sampleDuration)
+    {
+        using var cts = new CancellationTokenSource(sampleDuration + TimeSpan.FromSeconds(4));
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), cts.Token);
+            while (!cts.IsCancellationRequested)
+            {
+                try
+                {
+                    using var response = await http.GetAsync(path, cts.Token);
+                    response.EnsureSuccessStatusCode();
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }, cts.Token);
+
+        var result = await sampler.SampleAsync(
+            Pid,
+            sampleDuration,
+            topN: 100,
+            cancellationToken: CancellationToken.None);
+
+        cts.Cancel();
+        try { await driver; } catch { /* expected on cancel */ }
+        return result;
+    }
+
     private static IEnumerable<CallTreeNode> Flatten(CallTreeNode root)
     {
         var stack = new Stack<CallTreeNode>();
@@ -1419,3 +1597,8 @@ public sealed class SkipException : Exception
 
 [CollectionDefinition("LiveProcess", DisableParallelization = true)]
 public class LiveProcessCollection;
+
+file sealed class NullPrincipalAccessor : IPrincipalAccessor
+{
+    public BearerPrincipal? Current => null;
+}

@@ -22,7 +22,7 @@ public sealed class TraceSessionResources
         MimeType = "application/json")]
     [Description(
         "JSON snapshot of the artifact registered under a drill-down handle. " +
-        "For cpu-sample handles the body is the full call tree; for other kinds it's the typed payload. " +
+        "For cpu-sample and allocation-sample handles the body is the full call tree; for other kinds it's the typed payload. " +
         "Returns an error contents block when the handle is unknown or expired.")]
     public static string ReadSession(IDiagnosticHandleStore handles, string handle)
     {
@@ -31,15 +31,13 @@ public sealed class TraceSessionResources
         var cpu = handles.TryGet<CpuSampleTraceArtifact>(handle);
         if (cpu is not null)
         {
-            return JsonSerializer.Serialize(
-                new CpuSampleSessionPayload(
-                    Kind: "cpu-sample",
-                    ProcessId: cpu.ProcessId,
-                    StartedAt: cpu.StartedAt,
-                    Duration: cpu.Duration,
-                    TotalSamples: cpu.TotalSamples,
-                    Root: CallTreeIdentityProjector.Stamp(cpu.Root, cpu.MethodIdentities)),
-                TraceSessionJsonContext.Default.CpuSampleSessionPayload);
+            return SerializeSession("cpu-sample", cpu);
+        }
+
+        var allocation = handles.TryGet<AllocationSampleArtifact>(handle);
+        if (allocation is not null)
+        {
+            return SerializeSession("allocation-sample", allocation.TraceArtifact);
         }
 
         return JsonSerializer.Serialize(
@@ -48,4 +46,15 @@ public sealed class TraceSessionResources
                 Error: $"Handle '{handle}' is unknown or expired. Re-run the collector to issue a fresh handle."),
             TraceSessionJsonContext.Default.UnknownSessionPayload);
     }
+
+    private static string SerializeSession(string kind, CpuSampleTraceArtifact artifact)
+        => JsonSerializer.Serialize(
+            new CpuSampleSessionPayload(
+                Kind: kind,
+                ProcessId: artifact.ProcessId,
+                StartedAt: artifact.StartedAt,
+                Duration: artifact.Duration,
+                TotalSamples: artifact.TotalSamples,
+                Root: CallTreeIdentityProjector.Stamp(artifact.Root, artifact.MethodIdentities)),
+            TraceSessionJsonContext.Default.CpuSampleSessionPayload);
 }

@@ -49,6 +49,22 @@ legacy EventCounters. Look at:
 
 ---
 
+## 1b. "Did this deploy regress CPU or allocation hot spots?"
+
+1. Capture a baseline window on the healthy / previous deploy: `collect_sample(kind="cpu")`
+   or `collect_sample(kind="allocation")`.
+2. Capture the same window on the current deploy.
+3. Diff them with `query_snapshot(handle="<current>", view="diff", baselineHandle="<baseline>")`.
+4. Look at `Changed[]` first:
+   - `Direction="up"` + `Verdict="regression"|"mixed"` → hot path / type got worse.
+   - `Direction="down"` → improvement.
+   - `Notes[]` mentioning normalization → allocation windows had different durations; use the
+     per-second metrics instead of raw totals.
+5. If the diff points at a CPU hotspot, follow up with `query_snapshot(view="call-tree")` on the
+   current handle to walk callers/callees for the regressed method.
+
+---
+
 ## 2. "Memory keeps growing"
 
 ### Step 1
