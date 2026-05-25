@@ -87,6 +87,17 @@ public sealed class KubeconfigHandleNotFoundException : KubernetesConfigurationE
 /// store no longer recognizes the handle, or recognizes it under a different expiry
 /// — both signal a race-with-eviction we must surface as KubeconfigHandleNotFound.
 /// </para>
+/// <para>
+/// FIX 5 (#234 review, gpt-5.5 3rd pass): close the TryAdd-loser sibling race.
+/// FIX 4 covers the thread that wins TryAdd, but a concurrent caller losing TryAdd
+/// against a stale winner-installed entry could still observe a matching
+/// <c>existing.ExpiresAt</c> (both equal to the pre-eviction value the two
+/// captured) and escape with a client for an already-evicted handle — BEFORE the
+/// winner runs its post-add rollback. We mirror the winner-side guard on the loser
+/// branch: re-peek the store and only return the cached client when the live
+/// expiry, the captured expiry, and the cached entry's expiry all agree;
+/// otherwise evict + dispose + throw the same not-found envelope.
+/// </para>
 /// </remarks>
 internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory, IDisposable
 {
@@ -181,15 +192,31 @@ internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory,
             var entry = new HandleCacheEntry(built, expiresAt.Value);
             if (!_handleClients.TryAdd(handle, entry))
             {
-                // Lost the race; dispose ours and reuse the existing one if it is
-                // still aligned with the store. The unhappy paths (existing entry
-                // is itself stale) are handled the next time GetOrBuildHandleClient
-                // is called for this handle.
+                // Lost the race; dispose ours and reuse the existing one — but
+                // only after re-validating against the store. FIX 5 (#234 review,
+                // gpt-5.5 3rd pass): the winner-path post-add re-peek (below) is
+                // not enough on its own. If the store evicted the handle between
+                // our captured TryPeekExpiry and the TryAdd above, the winner
+                // installed a stale entry. A loser arriving here would otherwise
+                // observe `existing.ExpiresAt == expiresAt.Value` (both equal to
+                // the pre-eviction value), return `existing.Client`, and escape
+                // with a client for an already-evicted handle BEFORE the winner
+                // ran its rollback. Re-peek the store one more time and only
+                // accept the cached entry when all three values agree (live
+                // expiry == captured expiry == cached expiry); on any drift,
+                // evict + dispose and surface the same not-found envelope as
+                // the winner-path rollback.
                 built.Dispose();
-                if (_handleClients.TryGetValue(handle, out var existing) && existing.ExpiresAt == expiresAt.Value)
+                var loserLiveExpiry = _kubeconfigStore.TryPeekExpiry(handle);
+                if (loserLiveExpiry is not null
+                    && loserLiveExpiry.Value == expiresAt.Value
+                    && _handleClients.TryGetValue(handle, out var existing)
+                    && existing.ExpiresAt == expiresAt.Value
+                    && loserLiveExpiry.Value == existing.ExpiresAt)
                 {
                     return existing.Client;
                 }
+                EvictHandleClient(handle);
                 throw new KubeconfigHandleNotFoundException(
                     "Kubeconfig handle expired during client construction. Re-run discover_azure to mint a fresh handle.");
             }
