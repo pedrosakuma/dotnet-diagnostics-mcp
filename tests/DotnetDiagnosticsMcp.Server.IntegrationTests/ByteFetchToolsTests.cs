@@ -35,8 +35,8 @@ public sealed class ByteFetchToolsTests : IAsyncLifetime
 
         var mvid = GetSampleMvid();
         var result = await client.CallToolAsync(
-            "get_module_bytes",
-            new Dictionary<string, object?> { ["moduleVersionId"] = mvid, ["processId"] = SampleProcessId },
+            "get_bytes",
+            new Dictionary<string, object?> { ["kind"] = "module", ["moduleVersionId"] = mvid, ["processId"] = SampleProcessId },
             cancellationToken: CancellationToken.None);
 
         var (_, envelope) = ParseForbidden(result);
@@ -54,8 +54,8 @@ public sealed class ByteFetchToolsTests : IAsyncLifetime
         await using var client = await ConnectWithTokenAsync(factory, "root-token");
 
         var result = await client.CallToolAsync(
-            "get_module_bytes",
-            new Dictionary<string, object?> { ["moduleVersionId"] = GetSampleMvid(), ["processId"] = SampleProcessId },
+            "get_bytes",
+            new Dictionary<string, object?> { ["kind"] = "module", ["moduleVersionId"] = GetSampleMvid(), ["processId"] = SampleProcessId },
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBeTrue();
@@ -75,8 +75,8 @@ public sealed class ByteFetchToolsTests : IAsyncLifetime
         await using var client = await ConnectWithTokenAsync(factory, "module-token");
 
         var result = await client.CallToolAsync(
-            "get_module_bytes",
-            new Dictionary<string, object?> { ["moduleVersionId"] = GetSampleMvid(), ["processId"] = SampleProcessId, ["maxBytes"] = 512 },
+            "get_bytes",
+            new Dictionary<string, object?> { ["kind"] = "module", ["moduleVersionId"] = GetSampleMvid(), ["processId"] = SampleProcessId, ["maxBytes"] = 512 },
             cancellationToken: CancellationToken.None);
 
         var envelope = DeserializeEnvelope(result);
@@ -96,8 +96,8 @@ public sealed class ByteFetchToolsTests : IAsyncLifetime
         await using var client = await ConnectWithTokenAsync(factory, "dump-token");
 
         var result = await client.CallToolAsync(
-            "get_dump_bytes",
-            new Dictionary<string, object?> { ["dumpFilePath"] = "../escape.dmp" },
+            "get_bytes",
+            new Dictionary<string, object?> { ["kind"] = "dump", ["dumpFilePath"] = "../escape.dmp" },
             cancellationToken: CancellationToken.None);
 
         var envelope = DeserializeEnvelope(result);
@@ -136,9 +136,10 @@ public sealed class ByteFetchToolsTests : IAsyncLifetime
         while (true)
         {
             var chunkResult = await client.CallToolAsync(
-                "get_dump_bytes",
+                "get_bytes",
                 new Dictionary<string, object?>
                 {
+                    ["kind"] = "dump",
                     ["dumpFilePath"] = dumpFilePath!,
                     ["offset"] = offset,
                     ["maxBytes"] = 1024 * 1024,
@@ -179,8 +180,8 @@ public sealed class ByteFetchToolsTests : IAsyncLifetime
         await using var client = await ConnectWithTokenAsync(factory, "ceiling-token");
 
         var result = await client.CallToolAsync(
-            "get_dump_bytes",
-            new Dictionary<string, object?> { ["dumpFilePath"] = dumpPath },
+            "get_bytes",
+            new Dictionary<string, object?> { ["kind"] = "dump", ["dumpFilePath"] = dumpPath },
             cancellationToken: CancellationToken.None);
 
         var envelope = DeserializeEnvelope(result);

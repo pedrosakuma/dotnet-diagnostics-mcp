@@ -36,7 +36,7 @@ app.MapGet("/", () => Results.Ok(new
     },
 }));
 
-// 1. CPU burn — detect with snapshot_counters + collect_cpu_sample
+// 1. CPU burn — detect with collect_events(kind="counters") + collect_sample(kind="cpu")
 app.MapGet("/cpu-burn", (int? ms) =>
 {
     var budget = TimeSpan.FromMilliseconds(ms ?? 2000);
@@ -54,8 +54,8 @@ app.MapGet("/cpu-burn", (int? ms) =>
     return Results.Ok(new { iterations, elapsedMs = sw.ElapsedMilliseconds });
 });
 
-// 2. Managed memory leak — detect with snapshot_counters (gc-heap-size, gen2)
-//    + collect_gc_events + collect_process_dump
+// 2. Managed memory leak — detect with collect_events(kind="counters") (gc-heap-size, gen2)
+//    + collect_events(kind="gc") + collect_process_dump
 app.MapGet("/leak", (int? mb) =>
 {
     var size = Math.Clamp(mb ?? 4, 1, 64) * 1024 * 1024;
@@ -68,7 +68,7 @@ app.MapGet("/leak", (int? mb) =>
     return Results.Ok(new { addedMb = size / (1024 * 1024), totalBuffers = leakedBuffers.Count });
 });
 
-// 3. Exception storm — detect with snapshot_counters + collect_exceptions
+// 3. Exception storm — detect with collect_events(kind="counters") + collect_events(kind="exceptions")
 app.MapGet("/exceptions", (int? count) =>
 {
     var n = Math.Clamp(count ?? 200, 1, 5_000);
@@ -88,7 +88,7 @@ app.MapGet("/exceptions", (int? count) =>
 });
 
 // 4. Sync-over-async / thread pool starvation — detect with counters
-//    (threadpool-queue-length, threadpool-thread-count) + collect_cpu_sample
+//    (threadpool-queue-length, threadpool-thread-count) + collect_sample(kind="cpu")
 app.MapGet("/sync-over-async", (IHttpClientFactory http, int? n) =>
 {
     var clients = Math.Clamp(n ?? 20, 1, 200);
@@ -113,7 +113,7 @@ app.MapGet("/sync-over-async", (IHttpClientFactory http, int? n) =>
 });
 
 // 5. Monitor lock contention — detect with counters
-//    (monitor-lock-contention-count) + collect_cpu_sample
+//    (monitor-lock-contention-count) + collect_sample(kind="cpu")
 app.MapGet("/lock-contention", (int? threads, int? ms) =>
 {
     var threadCount = Math.Clamp(threads ?? 32, 2, 256);
@@ -140,7 +140,7 @@ app.MapGet("/lock-contention", (int? threads, int? ms) =>
 });
 
 // 6. LOH allocation churn — detect with counters (loh-size, gen2-gc-count)
-//    + collect_gc_events
+//    + collect_events(kind="gc")
 app.MapGet("/loh-alloc", (int? count) =>
 {
     var n = Math.Clamp(count ?? 20, 1, 500);
@@ -154,7 +154,7 @@ app.MapGet("/loh-alloc", (int? count) =>
     return Results.Ok(new { iterations = n, allocatedBytes = allocated });
 });
 
-// 7. Slow outbound HTTP — detect with collect_event_source name=System.Net.Http
+// 7. Slow outbound HTTP — detect with collect_events(kind="event_source") name=System.Net.Http
 app.MapGet("/slow-http", async (IHttpClientFactory http, string? url) =>
 {
     using var client = http.CreateClient("slow");

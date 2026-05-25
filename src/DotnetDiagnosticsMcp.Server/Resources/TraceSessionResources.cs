@@ -8,7 +8,7 @@ namespace DotnetDiagnosticsMcp.Server.Resources;
 
 /// <summary>
 /// Templated Resource that exposes the in-memory artifact behind a drill-down handle as a
-/// read-only blob. Complements <c>get_call_tree</c>: tools are for the LLM to drive the
+/// read-only blob. Complements <c>query_snapshot(view="call-tree")</c>: tools are for the LLM to drive the
 /// investigation; Resources are for clients (or the LLM itself) to pull the raw artifact on
 /// demand without going through a tool round-trip.
 /// </summary>

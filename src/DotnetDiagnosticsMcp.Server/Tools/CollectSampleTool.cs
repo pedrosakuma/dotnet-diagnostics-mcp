@@ -8,7 +8,6 @@ using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Tools.Dispatch;
 using DotnetDiagnosticsMcp.Server.Security;
-using DotnetDiagnosticsMcp.Server.Tools.Deprecation;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -22,9 +21,9 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// dual-entrypoint compatibility tests.
 /// </summary>
 /// <remarks>
-/// <para>The legacy tools (<c>collect_cpu_sample</c>, <c>collect_off_cpu_sample</c>,
-/// <c>collect_allocation_sample</c>) stay registered and functional, stamped with
-/// <see cref="DeprecatedToolAttribute"/> for a deprecation window — see issue #210.</para>
+/// <para>RFC 0002 §7.3 #9 / #213 — the legacy tools (<c>collect_cpu_sample</c>,
+/// <c>collect_off_cpu_sample</c>, <c>collect_allocation_sample</c>) have been deleted in
+/// the alias removal wave; this is now the sole entry-point for bounded-time sampling.</para>
 /// </remarks>
 [McpServerToolType]
 public sealed class CollectSampleTool

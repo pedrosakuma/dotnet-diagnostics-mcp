@@ -32,7 +32,7 @@ Together they uniquely resolve a method without name parsing.
 
 Every path-shaped field in this contract — `ModulePath` on `MethodIdentity` /
 `TypeIdentity`, `imagePath` on `NativeFrame`, the `dumpFilePath` argument on
-`inspect_dump`, and any future `mstatPath` / `dgmlPath` / `ilMapPath` hint — is
+`inspect_heap(source="dump")`, and any future `mstatPath` / `dgmlPath` / `ilMapPath` hint — is
 **a best-effort hint based on what the producer observed at runtime**. It is
 **not** an authenticated assertion that the file at that path is the artifact
 the consumer should load.
@@ -99,8 +99,8 @@ Consumers SHOULD first try to satisfy the request from their own already-loaded
 module / image index keyed by MVID / build-id. The path is consulted only when
 the identity is not yet known to the consumer **and** the path survives the
 four checks above. This pattern naturally protects every handoff endpoint —
-including the shipped cross-MCP byte-fetch tools (`get_module_bytes` /
-`get_dump_bytes`, [#144](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/144)) — without
+including the shipped cross-MCP byte-fetch tools (`get_bytes(kind="module")` /
+`get_bytes(kind="dump")`, [#144](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/144)) — without
 spreading validation logic across every tool entry-point.
 
 ### Worked example
@@ -181,7 +181,7 @@ tool that accepts a filesystem path off the wire — substitute `buildId` for
 
 ## `MethodIdentity` (full payload)
 
-`dotnet-diagnostics-mcp` emits this record on every ranked hotspot of `collect_cpu_sample`
+`dotnet-diagnostics-mcp` emits this record on every ranked hotspot of `collect_sample(kind="cpu")`
 (via the `MethodIdentities` map on `CpuSampleTraceArtifact`, surfaced in the markdown /
 JSON summary as `HotspotSummary.Identity`):
 
@@ -233,7 +233,7 @@ closed signature independently.
 > The closed type arguments (`int`, `string`, `__Canon`, …) are not in any EventPipe event
 > payload — multiple JIT'd bodies of the same generic method show up as distinct
 > `MethodStartAddress` entries with identical `(MethodToken, Namespace, Name, Signature)`
-> tuples. By default `collect_cpu_sample` therefore still emits the open method for such
+> tuples. By default `collect_sample(kind="cpu")` therefore still emits the open method for such
 > frames. When the caller sets `resolveMethodInstantiations=true`, the producer performs a
 > second **ClrMD** attach after sampling, walks the hottest frames by instruction pointer,
 > and back-fills `GenericTypeArguments.Method` + `ClosedSignature` from the resolved closed
@@ -281,7 +281,7 @@ loading the assembly first.
 
 ## Worked example
 
-After `collect_cpu_sample` returns, a top hotspot might look like (truncated):
+After `collect_sample(kind="cpu")` returns, a top hotspot might look like (truncated):
 
 ```jsonc
 {
@@ -336,7 +336,7 @@ removals or semantic changes require a `schemaVersion` bump.
 
 ## TypeIdentity (dump inspection)
 
-`inspect_dump` emits a sibling identity shape on top retained types so the LLM can
+`inspect_heap(source="dump")` emits a sibling identity shape on top retained types so the LLM can
 hand off straight from a heap walk to `dotnet-assembly-mcp` without parsing type
 names.
 

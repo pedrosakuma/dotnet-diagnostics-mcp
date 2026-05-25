@@ -30,8 +30,8 @@ docker run -d --name badcode-mcp --network diagmcp-net \
 ```
 
 > `--cap-add SYS_PTRACE` is required for the ClrMD-backed tools
-> (`collect_thread_snapshot`, `inspect_live_heap`,
-> `inspect_dump` against a live PID and `collect_process_dump`). Without it,
+> (`collect_thread_snapshot`, `inspect_heap(source="live")`,
+> `inspect_heap(source="dump")` against a live PID and `collect_process_dump`). Without it,
 > these tools return a structured `PermissionDenied` error on hosts where
 > `kernel.yama.ptrace_scope=1` (Debian/Ubuntu/WSL default). EventPipe-only
 > tools work without it. See [`docs/local-docker-sidecar.md`](./local-docker-sidecar.md)
@@ -51,30 +51,30 @@ the output.
 
 | # | Symptom | Trigger | Primary tool(s) | Expected signal |
 |---|---|---|---|---|
-| 1 | "CPU pegged at 100% on one core" | `GET /cpu-burn?ms=3000` | `snapshot_counters`, `collect_cpu_sample` | `cpu-usage` near 100% during the burn; top sampled frames in `System.Security.Cryptography.SHA256` |
-| 2 | "Memory keeps growing" | repeated `GET /leak?mb=4` | `snapshot_counters` over time, `collect_gc_events`, `collect_process_dump` | `gc-heap-size` and `working-set` climb monotonically; gen-2 collections increase; dump shows large `byte[]` retained by `leakedBuffers` |
-| 3 | "First-chance exception storms in logs" | `GET /exceptions?count=2000` | `snapshot_counters`, `collect_exceptions` | `exception-count` rate jumps; collector returns 100% `FormatException` ("Input string was not in a correct format") |
-| 4 | "Requests time out under load even though CPU is low" | `GET /sync-over-async?n=40` | `snapshot_counters`, `collect_cpu_sample` | `threadpool-queue-length` grows, `threadpool-thread-count` climbs slowly; CPU low; sampled stacks show `GetAwaiter().GetResult` / `Task.Wait` frames |
-| 5 | "Throughput drops as concurrency grows" | `GET /lock-contention?threads=64&ms=4000` | `snapshot_counters`, `collect_cpu_sample` | `monitor-lock-contention-count` jumps to thousands/sec; stacks dominated by `Monitor.Enter` / `SpinWait` |
-| 6 | "GC pauses are frequent in production" | repeated `GET /loh-alloc?count=200` | `snapshot_counters`, `collect_gc_events` | `loh-size` and `gen2-gc-count` rise; collector reports gen-2 collections with `LowMemory` / `Induced` reasons (or just frequent gen-2) |
-| 7 | "Outbound HTTP calls are slow" | `GET /slow-http?url=https://httpbin.org/delay/3` | `collect_event_source` `name=System.Net.Http`, `snapshot_counters` with `System.Net.Http` | EventSource emits `Request*/Response*` events with latency between them; `requests-started-rate` and `current-requests` visible in counters |
+| 1 | "CPU pegged at 100% on one core" | `GET /cpu-burn?ms=3000` | `collect_events(kind="counters")`, `collect_sample(kind="cpu")` | `cpu-usage` near 100% during the burn; top sampled frames in `System.Security.Cryptography.SHA256` |
+| 2 | "Memory keeps growing" | repeated `GET /leak?mb=4` | `collect_events(kind="counters")` over time, `collect_events(kind="gc")`, `collect_process_dump` | `gc-heap-size` and `working-set` climb monotonically; gen-2 collections increase; dump shows large `byte[]` retained by `leakedBuffers` |
+| 3 | "First-chance exception storms in logs" | `GET /exceptions?count=2000` | `collect_events(kind="counters")`, `collect_events(kind="exceptions")` | `exception-count` rate jumps; collector returns 100% `FormatException` ("Input string was not in a correct format") |
+| 4 | "Requests time out under load even though CPU is low" | `GET /sync-over-async?n=40` | `collect_events(kind="counters")`, `collect_sample(kind="cpu")` | `threadpool-queue-length` grows, `threadpool-thread-count` climbs slowly; CPU low; sampled stacks show `GetAwaiter().GetResult` / `Task.Wait` frames |
+| 5 | "Throughput drops as concurrency grows" | `GET /lock-contention?threads=64&ms=4000` | `collect_events(kind="counters")`, `collect_sample(kind="cpu")` | `monitor-lock-contention-count` jumps to thousands/sec; stacks dominated by `Monitor.Enter` / `SpinWait` |
+| 6 | "GC pauses are frequent in production" | repeated `GET /loh-alloc?count=200` | `collect_events(kind="counters")`, `collect_events(kind="gc")` | `loh-size` and `gen2-gc-count` rise; collector reports gen-2 collections with `LowMemory` / `Induced` reasons (or just frequent gen-2) |
+| 7 | "Outbound HTTP calls are slow" | `GET /slow-http?url=https://httpbin.org/delay/3` | `collect_events(kind="event_source")` `name=System.Net.Http`, `collect_events(kind="counters")` with `System.Net.Http` | EventSource emits `Request*/Response*` events with latency between them; `requests-started-rate` and `current-requests` visible in counters |
 
 ## How an LLM should drive this
 
 A useful system message for the LLM (already encoded in
 `investigation-playbooks.md`) is:
 
-1. **Discover**: `list_dotnet_processes` → pick the target PID
-2. **Probe**: `get_process_info` + `get_diagnostic_capabilities` so the LLM
+1. **Discover**: `inspect_process(view="list")` → pick the target PID
+2. **Probe**: `inspect_process(view="info")` + `inspect_process(view="capabilities")` so the LLM
    knows whether stack sampling is available (CoreCLR vs NativeAOT)
-3. **Cheap signal**: `snapshot_counters` with `System.Runtime` for 5–10s to
+3. **Cheap signal**: `collect_events(kind="counters")` with `System.Runtime` for 5–10s to
    classify the symptom (CPU? memory? exceptions? threads?)
 4. **Targeted capture** based on what the counters showed:
-   - CPU high → `collect_cpu_sample`
-   - Memory growing → `collect_gc_events`, then `collect_process_dump` if a
+   - CPU high → `collect_sample(kind="cpu")`
+   - Memory growing → `collect_events(kind="gc")`, then `collect_process_dump` if a
      dump is justified
-   - Exception count spiking → `collect_exceptions`
-   - Latency on outbound HTTP → `collect_event_source` `System.Net.Http`
+   - Exception count spiking → `collect_events(kind="exceptions")`
+   - Latency on outbound HTTP → `collect_events(kind="event_source")` `System.Net.Http`
 5. **Report**: aggregate the captured artifacts into a root cause + fix.
 
 ## What this proves

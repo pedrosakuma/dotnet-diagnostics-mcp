@@ -10,46 +10,46 @@ from pathlib import Path
 # tool_name -> ("scope", [scopes]) or ("any", [scopes])
 MAPPING = {
     # read-counters
-    "list_dotnet_processes":        ("scope", ["read-counters"]),
-    "get_process_info":             ("scope", ["read-counters"]),
-    "get_diagnostic_capabilities":  ("scope", ["read-counters"]),
-    "get_container_signals":        ("scope", ["read-counters"]),
-    "get_memory_trend":             ("scope", ["read-counters"]),
-    "snapshot_counters":            ("scope", ["read-counters"]),
+    "inspect_process(view="list")":        ("scope", ["read-counters"]),
+    "inspect_process(view="info")":             ("scope", ["read-counters"]),
+    "inspect_process(view="capabilities")":  ("scope", ["read-counters"]),
+    "inspect_process(view="container")":        ("scope", ["read-counters"]),
+    "inspect_process(view="memory_trend")":             ("scope", ["read-counters"]),
+    "collect_events(kind="counters")":            ("scope", ["read-counters"]),
     # eventpipe
-    "collect_cpu_sample":           ("scope", ["eventpipe"]),
-    "collect_allocation_sample":    ("scope", ["eventpipe"]),
-    "collect_off_cpu_sample":       ("scope", ["eventpipe"]),
-    "collect_exceptions":           ("scope", ["eventpipe"]),
-    "collect_gc_events":            ("scope", ["eventpipe"]),
-    "collect_activities":           ("scope", ["eventpipe"]),
-    "collect_event_source":         ("scope", ["eventpipe"]),
-    "query_off_cpu_snapshot":       ("scope", ["eventpipe"]),
+    "collect_sample(kind="cpu")":           ("scope", ["eventpipe"]),
+    "collect_sample(kind="allocation")":    ("scope", ["eventpipe"]),
+    "collect_sample(kind="off_cpu")":       ("scope", ["eventpipe"]),
+    "collect_events(kind="exceptions")":           ("scope", ["eventpipe"]),
+    "collect_events(kind="gc")":            ("scope", ["eventpipe"]),
+    "collect_events(kind="activities")":           ("scope", ["eventpipe"]),
+    "collect_events(kind="event_source")":         ("scope", ["eventpipe"]),
+    "query_snapshot":       ("scope", ["eventpipe"]),
     # heap-read
-    "inspect_dump":                 ("scope", ["heap-read"]),
-    "query_heap_snapshot":          ("scope", ["heap-read"]),
-    "inspect_live_heap":            ("scope", ["heap-read", "ptrace"]),
+    "inspect_heap(source="dump")":                 ("scope", ["heap-read"]),
+    "query_snapshot":          ("scope", ["heap-read"]),
+    "inspect_heap(source="live")":            ("scope", ["heap-read", "ptrace"]),
     # dump-write
     "collect_process_dump":         ("scope", ["dump-write", "ptrace"]),
     # ptrace
     "collect_thread_snapshot":      ("scope", ["ptrace"]),
     "capture_method_bytes":         ("scope", ["ptrace"]),
-    "query_thread_snapshot":        ("scope", ["ptrace"]),
-    # query_collection drills into both Counters and EventPipe handles (§2.12).
-    "query_collection":             ("any", ["read-counters", "eventpipe"]),
+    "query_snapshot":        ("scope", ["ptrace"]),
+    # query_snapshot drills into both Counters and EventPipe handles (§2.12).
+    "query_snapshot":             ("any", ["read-counters", "eventpipe"]),
     # investigation-export — task body explicitly groups status/cancel/call_tree
     # under this scope (supersedes RFC §2.10/§2.11 for B5.2).
     "start_investigation":          ("scope", ["investigation-export"]),
     "export_investigation_summary": ("scope", ["investigation-export"]),
     "compare_to_baseline":          ("scope", ["investigation-export"]),
-    "get_call_tree":                ("scope", ["investigation-export"]),
+    "query_snapshot(view="call-tree")":                ("scope", ["investigation-export"]),
     "get_collection_status":        ("scope", ["investigation-export"]),
     "cancel_collection":            ("scope", ["investigation-export"]),
     # orchestrator
-    "list_pods":                    ("scope", ["orchestrator-list"]),
+    "list_orchestrator(kind="pods")":                    ("scope", ["orchestrator-list"]),
     "attach_to_pod":                ("scope", ["orchestrator-attach"]),
     "detach_from_pod":              ("scope", ["orchestrator-attach"]),
-    "list_active_investigations":   ("scope", ["orchestrator-attach"]),
+    "list_orchestrator(kind="investigations")":   ("scope", ["orchestrator-attach"]),
 }
 
 TOOL_RE = re.compile(r'^(?P<indent>[ \t]*)\[McpServerTool\(\s*$')

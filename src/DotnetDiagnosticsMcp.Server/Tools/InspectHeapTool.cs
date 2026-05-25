@@ -20,12 +20,9 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// <remarks>
 /// <para>The implementation is a thin dispatcher: after validating the discriminator and the
 /// mutual-exclusion contract between <c>processId</c> and <c>dumpFilePath</c>, it delegates
-/// to the existing static methods on <see cref="DiagnosticTools"/>. Delegation guarantees
-/// the response envelope is byte-equal to the legacy successor (asserted by
-/// <c>InspectHeapCompatibilityTests</c>) and preserves every security gate the legacy
-/// methods enforce — symbol-server SSRF, ptrace error translation, scope-stamped audit
-/// emission. The legacy methods stay registered (marked <c>[DeprecatedTool]</c>) until the
-/// deprecation window closes.</para>
+/// to the existing static methods on <see cref="DiagnosticTools"/>. Delegation preserves
+/// every security gate the underlying collectors enforce — symbol-server SSRF, ptrace error
+/// translation, scope-stamped audit emission.</para>
 /// <para>Lives in its own class with its own <c>[McpServerToolType]</c> attribute, by design
 /// of issue #206 — minimizes merge conflicts with parallel RFC 0002 sub-issues editing
 /// <c>DiagnosticTools.cs</c>.</para>

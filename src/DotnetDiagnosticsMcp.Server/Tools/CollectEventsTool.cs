@@ -29,9 +29,8 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// re-checks the kind-specific scope inside the body so a caller holding only
 /// <c>read-counters</c> cannot exfiltrate GC/exception/EventSource data through the new entry
 /// point. This preserves RFC 0001 §2 boundaries verbatim.</para>
-/// <para>Tool registration count: net +1. The legacy collectors stay registered and
-/// functional, marked with <see cref="Deprecation.DeprecatedToolAttribute"/> for a deprecation
-/// window — see #208.</para>
+/// <para>RFC 0002 §7.3 #9 / #213 — the legacy collectors have been deleted in the alias
+/// removal wave; this is now the sole entry point for the EventPipe collector family.</para>
 /// </remarks>
 [McpServerToolType]
 public sealed class CollectEventsTool

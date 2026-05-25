@@ -95,7 +95,7 @@ public class StdioTransportSmokeTests
         // Both expected response ids must appear.
         capturedStdout.Should().Contain("\"id\":1", "initialize response must be emitted");
         capturedStdout.Should().Contain("\"id\":2", "tools/list response must be emitted");
-        capturedStdout.Should().Contain("snapshot_counters", "tools/list response must include the registered tool surface");
+        capturedStdout.Should().Contain("collect_events", "tools/list response must include the registered tool surface");
 
         // Logs (if any) MUST land on stderr only. The exact lines depend on Hosting telemetry
         // verbosity; we only assert no JSON-RPC payload accidentally went to stderr.

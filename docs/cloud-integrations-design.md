@@ -90,8 +90,8 @@ If the platform abstracts away UID control, that is a real product risk, not a d
 
 Per `AGENTS.md`, the following tools attach via `ptrace(2)` on Linux:
 - `collect_thread_snapshot`
-- `inspect_live_heap`
-- `inspect_dump` against a live PID
+- `inspect_heap(source="live")`
+- `inspect_heap(source="dump")` against a live PID
 - `collect_process_dump`
 On hosts with `kernel.yama.ptrace_scope=1`, matching UID alone is not enough. The diagnostics container also needs `CAP_SYS_PTRACE`.
 For non-Linux platforms, the equivalent question is: can the hosting environment allow an auxiliary process to perform dump, thread, or heap inspection against the app process?
@@ -170,7 +170,7 @@ Why it is attractive:
 - Operationally it looks friendly to App Service customers already using custom containers.
 Why it is risky:
 - Microsoft documents shared network namespace, but not shared PID namespace.
-- Without shared PID visibility, `list_dotnet_processes` and ClrMD attach become suspect.
+- Without shared PID visibility, `inspect_process(view="list")` and ClrMD attach become suspect.
 - The docs are not explicit that sidecars can mount the same replica-local filesystem path in a way that preserves socket visibility and UID semantics.
 
 ##### Option C: Linux App Service single custom container with MCP in-process or
@@ -411,7 +411,7 @@ Phase C1: design-to-recipe conversion
 - Include shared `/tmp`, `pidMode: task`, and bearer-token secret wiring.
 - Scope to Linux Fargate only.
 Phase C2: validation
-- Smoke-test `list_dotnet_processes`, `snapshot_counters`, and `collect_cpu_sample`.
+- Smoke-test `inspect_process(view="list")`, `collect_events(kind="counters")`, and `collect_sample(kind="cpu")`.
 - Attempt one ClrMD-backed call to see whether extra privilege is available.
 - Document any capability downgrade explicitly if needed.
 Phase C3: hardening

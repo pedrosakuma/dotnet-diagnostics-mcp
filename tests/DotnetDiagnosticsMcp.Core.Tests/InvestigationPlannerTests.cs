@@ -15,7 +15,7 @@ public class InvestigationPlannerTests
         var plan = _planner.Plan(new InvestigationRequest(ProcessId: 1234, Symptom: "high latency"));
 
         plan.Mode.Should().Be(InvestigationMode.Cold);
-        plan.NextStep.ToolName.Should().Be("snapshot_counters", "cold investigations must start with vitals");
+        plan.NextStep.ToolName.Should().Be("collect_events", "cold investigations must start with vitals");
         plan.NextStep.StepNumber.Should().Be(1);
         plan.AllSteps.Should().HaveCountGreaterThan(1);
         plan.EarlyStopConditions.Should().Contain(e => e.ConditionId == "max-tool-calls-reached");
@@ -39,12 +39,12 @@ public class InvestigationPlannerTests
     }
 
     [Theory]
-    [InlineData("lock contention on Cart.Checkout", "collect_event_source", "lock-events")]
-    [InlineData("memory leak in payment service", "snapshot_counters", "memory-vitals")]
-    [InlineData("threadpool starvation after release", "snapshot_counters", "tp-vitals")]
-    [InlineData("exception storm from validation", "collect_exceptions", "exception-collect")]
-    [InlineData("hot CPU on Regex matching", "snapshot_counters", "cpu-vitals")]
-    [InlineData("cold start regression on startup", "snapshot_counters", "startup-vitals")]
+    [InlineData("lock contention on Cart.Checkout", "collect_events", "lock-events")]
+    [InlineData("memory leak in payment service", "collect_events", "memory-vitals")]
+    [InlineData("threadpool starvation after release", "collect_events", "tp-vitals")]
+    [InlineData("exception storm from validation", "collect_events", "exception-collect")]
+    [InlineData("hot CPU on Regex matching", "collect_events", "cpu-vitals")]
+    [InlineData("cold start regression on startup", "collect_events", "startup-vitals")]
     public void Plan_RoutesHypothesisByKeyword(string hypothesis, string expectedTool, string expectedStepId)
     {
         var plan = _planner.Plan(new InvestigationRequest(ProcessId: 1234, Hypothesis: hypothesis));
@@ -62,7 +62,7 @@ public class InvestigationPlannerTests
         var plan = _planner.Plan(new InvestigationRequest(ProcessId: 1234, Hypothesis: "weird mystery thing"));
 
         plan.Mode.Should().Be(InvestigationMode.Hypothesis);
-        plan.NextStep.ToolName.Should().Be("snapshot_counters");
+        plan.NextStep.ToolName.Should().Be("collect_events");
         plan.NextStep.StepId.Should().Be("vitals");
     }
 

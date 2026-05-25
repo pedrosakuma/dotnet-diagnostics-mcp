@@ -15,9 +15,8 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// RFC 0002 / §4.6 — single bootstrap entrypoint that subsumes the five read-only
 /// process inspection tools (<c>list_dotnet_processes</c>, <c>get_process_info</c>,
 /// <c>get_diagnostic_capabilities</c>, <c>get_container_signals</c>, <c>get_memory_trend</c>)
-/// behind one <c>view=</c> discriminator. The legacy tools remain functional through the
-/// deprecation window — they delegate to identical Core primitives and are marked with
-/// <see cref="Deprecation.DeprecatedToolAttribute"/>.
+/// behind one <c>view=</c> discriminator. RFC 0002 §7.3 #9 / #213 — the five legacy tools
+/// have been deleted in the alias removal wave; this is now the sole bootstrap entrypoint.
 /// </summary>
 /// <remarks>
 /// <para>The tool is a thin dispatcher: every view forwards to the matching

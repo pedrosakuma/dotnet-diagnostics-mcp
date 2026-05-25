@@ -43,7 +43,7 @@ public sealed class InvestigationProxyCallToolFilterTests
     public async Task PassesThrough_WhenSessionIdIsNullOrEmpty()
     {
         var fx = new Fixture();
-        var result = await fx.Invoke(Params("snapshot_counters"), sessionId: null);
+        var result = await fx.Invoke(Params("collect_events"), sessionId: null);
 
         result.IsError.Should().BeNull();
         fx.LocalInvocations.Should().Be(1);
@@ -54,7 +54,7 @@ public sealed class InvestigationProxyCallToolFilterTests
     public async Task PassesThrough_WhenSessionHasNoBinding()
     {
         var fx = new Fixture();
-        var result = await fx.Invoke(Params("snapshot_counters"), sessionId: "session-unbound");
+        var result = await fx.Invoke(Params("collect_events"), sessionId: "session-unbound");
 
         result.IsError.Should().BeNull();
         fx.LocalInvocations.Should().Be(1);
@@ -62,10 +62,9 @@ public sealed class InvestigationProxyCallToolFilterTests
     }
 
     [Theory]
-    [InlineData("list_pods")]
+    [InlineData("list_orchestrator")]
     [InlineData("attach_to_pod")]
     [InlineData("detach_from_pod")]
-    [InlineData("list_active_investigations")]
     public async Task PassesThrough_WhenToolIsOrchestratorBypassed(string toolName)
     {
         var fx = new Fixture();
@@ -92,7 +91,7 @@ public sealed class InvestigationProxyCallToolFilterTests
         {
             ["processId"] = JsonDocument.Parse(processIdJson).RootElement,
         };
-        var result = await fx.Invoke(Params("snapshot_counters", args), sessionId: "session-pid");
+        var result = await fx.Invoke(Params("collect_events", args), sessionId: "session-pid");
 
         result.IsError.Should().BeNull();
         fx.LocalInvocations.Should().Be(1);
@@ -106,7 +105,7 @@ public sealed class InvestigationProxyCallToolFilterTests
         fx.Binder.Bind("session-fail", FailedHandle.HandleId);
         fx.Store.Add(FailedHandle);
 
-        var result = await fx.Invoke(Params("snapshot_counters"), sessionId: "session-fail");
+        var result = await fx.Invoke(Params("collect_events"), sessionId: "session-fail");
 
         result.IsError.Should().BeNull();
         fx.LocalInvocations.Should().Be(1);
@@ -120,7 +119,7 @@ public sealed class InvestigationProxyCallToolFilterTests
         // Binder knows about a handle the store evicted (race during TTL reaping).
         fx.Binder.Bind("session-orphan", "inv-vanished");
 
-        var result = await fx.Invoke(Params("snapshot_counters"), sessionId: "session-orphan");
+        var result = await fx.Invoke(Params("collect_events"), sessionId: "session-orphan");
 
         result.IsError.Should().BeNull();
         fx.LocalInvocations.Should().Be(1);
@@ -140,7 +139,10 @@ public sealed class InvestigationProxyCallToolFilterTests
         };
         fx.ProxyClient.Next = (_, _, _) => Task.FromResult(upstream);
 
-        var p = Params("snapshot_counters");
+        var p = Params("collect_events", new Dictionary<string, JsonElement>
+        {
+            ["kind"] = JsonSerializer.SerializeToElement("counters"),
+        });
         var result = await fx.Invoke(p, sessionId: "session-ok");
 
         result.Should().BeSameAs(upstream);
@@ -160,11 +162,14 @@ public sealed class InvestigationProxyCallToolFilterTests
         var thrown = new InvalidOperationException("upstream MCP exploded");
         fx.ProxyClient.Next = (_, _, _) => throw thrown;
 
-        var result = await fx.Invoke(Params("snapshot_counters"), sessionId: "session-err");
+        var result = await fx.Invoke(Params("collect_events", new Dictionary<string, JsonElement>
+        {
+            ["kind"] = JsonSerializer.SerializeToElement("counters"),
+        }), sessionId: "session-err");
 
         result.IsError.Should().Be(true);
         var text = result.Content.OfType<TextContentBlock>().Single().Text;
-        text.Should().Contain("snapshot_counters failed: proxy forwarding to investigation inv-1");
+        text.Should().Contain("collect_events failed: proxy forwarding to investigation inv-1");
         text.Should().Contain(nameof(InvalidOperationException));
         text.Should().Contain("upstream MCP exploded");
         fx.LocalInvocations.Should().Be(0);
@@ -179,7 +184,10 @@ public sealed class InvestigationProxyCallToolFilterTests
 
         fx.ProxyClient.Next = (_, _, _) => throw new McpProtocolException("bad rpc");
 
-        var act = async () => await fx.Invoke(Params("snapshot_counters"), sessionId: "session-proto");
+        var act = async () => await fx.Invoke(Params("collect_events", new Dictionary<string, JsonElement>
+        {
+            ["kind"] = JsonSerializer.SerializeToElement("counters"),
+        }), sessionId: "session-proto");
 
         await act.Should().ThrowAsync<McpProtocolException>().WithMessage("bad rpc");
         fx.LocalInvocations.Should().Be(0);
@@ -196,7 +204,10 @@ public sealed class InvestigationProxyCallToolFilterTests
         cts.Cancel();
         fx.ProxyClient.Next = (_, _, ct) => Task.FromException<CallToolResult>(new OperationCanceledException(ct));
 
-        var act = async () => await fx.Invoke(Params("snapshot_counters"), sessionId: "session-cancel", token: cts.Token);
+        var act = async () => await fx.Invoke(Params("collect_events", new Dictionary<string, JsonElement>
+        {
+            ["kind"] = JsonSerializer.SerializeToElement("counters"),
+        }), sessionId: "session-cancel", token: cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         fx.LocalInvocations.Should().Be(0);
@@ -224,10 +235,10 @@ public sealed class InvestigationProxyCallToolFilterTests
     {
         // Sanity-check the reflection-built allowlist actually loaded the expected
         // tool surface. If this drops to zero, the [McpServerTool] discovery broke.
-        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("snapshot_counters");
-        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("collect_cpu_sample");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("collect_events");
+        InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("collect_sample");
         InvestigationProxyToolAllowlist.AllowedToolNames.Should().Contain("get_bytes");
-        InvestigationProxyToolAllowlist.IsAllowed("snapshot_counters").Should().BeTrue();
+        InvestigationProxyToolAllowlist.IsAllowed("collect_events").Should().BeTrue();
         InvestigationProxyToolAllowlist.IsAllowed("get_bytes").Should().BeTrue();
         InvestigationProxyToolAllowlist.IsAllowed("totally_not_a_real_tool").Should().BeFalse();
         InvestigationProxyToolAllowlist.IsAllowed(null).Should().BeFalse();

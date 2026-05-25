@@ -9,7 +9,6 @@ using DotnetDiagnosticsMcp.Server.Observability;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using DotnetDiagnosticsMcp.Server.Security;
-using DotnetDiagnosticsMcp.Server.Tools.Deprecation;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Server;
@@ -31,14 +30,6 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 public sealed class OrchestratorTools
 {
     [RequireScope("orchestrator-list")]
-    [DeprecatedTool("list_orchestrator", "0.7.0", Note = "Call list_orchestrator(kind=\"pods\", ...) — same parameter shape.")]
-    [McpServerTool(
-        Name = "list_pods",
-        Title = "List candidate Pods for diagnostic attach",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Enumerates Pods in the orchestrator's allowed namespaces that are candidates for diagnostic attach. " +
         "By default returns only Pods that opt in via the prepared label (diagnostics.dotnet.io/prepared=true) " +
@@ -380,8 +371,8 @@ public sealed class OrchestratorTools
                 result,
                 "detach_from_pod: no handleId was supplied and this MCP session has no investigation binding. Nothing to detach.",
                 new NextActionHint(
-                    "list_active_investigations",
-                    "Call list_active_investigations to enumerate known handles, then re-run detach_from_pod with an explicit handleId."));
+                    "list_orchestrator",
+                    "Call list_orchestrator(kind=\"investigations\") to enumerate known handles, then re-run detach_from_pod with an explicit handleId."));
         }
 
         // B3 (issue #164): require owner-session match before closing — without this any
@@ -446,14 +437,6 @@ public sealed class OrchestratorTools
     }
 
     [RequireScope("orchestrator-attach")]
-    [DeprecatedTool("list_orchestrator", "0.7.0", Note = "Call list_orchestrator(kind=\"investigations\", ...) — same parameter shape.")]
-    [McpServerTool(
-        Name = "list_active_investigations",
-        Title = "List investigation handles known to the orchestrator",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Returns every investigation handle the orchestrator has minted on behalf of this MCP session. " +
         "By default only Active/Attaching handles are returned — pass includeTerminal=true to also see " +

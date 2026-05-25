@@ -86,8 +86,11 @@ public sealed class OrchestratorObservabilityTests
         var proxyResult = await InvestigationProxyCallToolFilter.InvokeAsync(
             new CallToolRequestParams
             {
-                Name = "snapshot_counters",
-                Arguments = new Dictionary<string, JsonElement>(),
+                Name = "collect_events",
+                Arguments = new Dictionary<string, JsonElement>
+                {
+                    ["kind"] = JsonSerializer.SerializeToElement("counters"),
+                },
             },
             sessionId: "session-1",
             next: (_, _) => ValueTask.FromResult(new CallToolResult()),
@@ -119,7 +122,7 @@ public sealed class OrchestratorObservabilityTests
         metricsText.Should().Contain("mcp_orchestrator_proxy_requests_total");
         metricsText.Should().Contain("mcp_orchestrator_reaper_evicted_total");
         metricsText.Should().Contain("mcp_orchestrator_attach_total{otel_scope_name=\"DotnetDiagnosticsMcp.Server.Orchestrator\",outcome=\"success\",reason=\"none\"} 1");
-        metricsText.Should().Contain("mcp_orchestrator_proxy_requests_total{otel_scope_name=\"DotnetDiagnosticsMcp.Server.Orchestrator\",outcome=\"success\",tool=\"snapshot_counters\"} 1");
+        metricsText.Should().Contain("mcp_orchestrator_proxy_requests_total{otel_scope_name=\"DotnetDiagnosticsMcp.Server.Orchestrator\",outcome=\"success\",tool=\"collect_events\"} 1");
         metricsText.Should().Contain("mcp_orchestrator_reaper_evicted_total{otel_scope_name=\"DotnetDiagnosticsMcp.Server.Orchestrator\",reason=\"ttl\"} 1");
     }
 
@@ -162,7 +165,7 @@ public sealed class OrchestratorObservabilityTests
         await InvestigationProxyCallToolFilter.InvokeAsync(
             new CallToolRequestParams
             {
-                Name = "snapshot_counters",
+                Name = "collect_events",
                 Arguments = new Dictionary<string, JsonElement>
                 {
                     ["processId"] = JsonDocument.Parse("null").RootElement,

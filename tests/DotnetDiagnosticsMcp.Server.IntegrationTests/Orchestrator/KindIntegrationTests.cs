@@ -101,9 +101,10 @@ public sealed class KindIntegrationTests
         // ----------------------------------------------------------------
         var labelSelector = $"app=p6-sample,{activation.TargetLabel}";
         var listResult = await orchClient.CallToolAsync(
-            "list_pods",
+            "list_orchestrator",
             new Dictionary<string, object?>
             {
+                ["kind"] = "pods",
                 ["namespace"] = activation.Namespace,
                 ["labelSelector"] = labelSelector,
                 ["preparedOnly"] = true,
@@ -111,10 +112,10 @@ public sealed class KindIntegrationTests
             },
             cancellationToken: ct).ConfigureAwait(false);
 
-        listResult.IsError.Should().NotBe(true, "list_pods must succeed for a prepared sample namespace");
+        listResult.IsError.Should().NotBe(true, "list_orchestrator(kind=pods) must succeed for a prepared sample namespace");
         var listEnvelope = DeserializeEnvelope(listResult);
         listEnvelope.Should().NotBeNull();
-        listEnvelope!.Error.Should().BeNull("list_pods returned a structured DiagnosticError: " + listEnvelope.Summary);
+        listEnvelope!.Error.Should().BeNull("list_orchestrator(kind=pods) returned a structured DiagnosticError: " + listEnvelope.Summary);
 
         var items = listEnvelope.Data.GetProperty("items");
         items.GetArrayLength().Should().Be(
@@ -201,18 +202,19 @@ public sealed class KindIntegrationTests
             await using var _podClient = podClient;
 
             var listProcsResult = await podClient.CallToolAsync(
-                "list_dotnet_processes",
-                arguments: null,
+                "inspect_process",
+                new Dictionary<string, object?> { ["view"] = "list" },
                 cancellationToken: ct).ConfigureAwait(false);
 
             listProcsResult.IsError.Should().NotBe(true,
-                "list_dotnet_processes must succeed against the proxied pod");
-            var procs = DeserializeStructured<IReadOnlyList<DotnetProcess>>(listProcsResult);
+                "inspect_process(view=list) must succeed against the proxied pod");
+            var procsReport = DeserializeStructured<DotnetDiagnosticsMcp.Server.Tools.InspectProcessReport>(listProcsResult);
+            var procs = procsReport?.List;
             procs.Should().NotBeNull();
             foreach (var p in procs!)
             {
                 _output.WriteLine(
-                    $"proxied list_dotnet_processes -> pid={p.ProcessId} entry={p.ManagedEntrypointAssemblyName} cmd={p.CommandLine}");
+                    $"proxied inspect_process(view=list) -> pid={p.ProcessId} entry={p.ManagedEntrypointAssemblyName} cmd={p.CommandLine}");
             }
 
             // The ephemeral diagnostics container shares the target pod's PID namespace

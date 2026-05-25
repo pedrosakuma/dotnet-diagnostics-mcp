@@ -76,9 +76,9 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 1,
                 StepId: "vitals",
-                ToolName: "snapshot_counters",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 5 },
-                Rationale: "USE-style vitals first. snapshot_counters in 5s covers ~80% of first-triage diagnostics and produces the branching evidence for every other step.",
+                ToolName: "collect_events",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "counters", ["processId"] = pid, ["durationSeconds"] = 5 },
+                Rationale: "USE-style vitals first. collect_events(kind=\"counters\") in 5s covers ~80% of first-triage diagnostics and produces the branching evidence for every other step.",
                 Branches: new[]
                 {
                     new DecisionBranch("cpu_pct > 70", "cpu-sample", "Hot CPU → sample the process."),
@@ -90,9 +90,9 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 2,
                 StepId: "cpu-sample",
-                ToolName: "collect_cpu_sample",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
-                Rationale: "If vitals show CPU pressure, sample to identify hot methods. Drill with get_call_tree(handle).",
+                ToolName: "collect_sample",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "cpu", ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
+                Rationale: "If vitals show CPU pressure, sample to identify hot methods. Drill with query_snapshot(handle, view=\"call-tree\").",
                 Branches: new[]
                 {
                     new DecisionBranch("top exclusive_pct > 30% AND is_user_code", "report-cpu", "Found a user-code hotspot."),
@@ -101,8 +101,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 3,
                 StepId: "gc-events",
-                ToolName: "collect_gc_events",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 30 },
+                ToolName: "collect_events",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "gc", ["processId"] = pid, ["durationSeconds"] = 30 },
                 Rationale: "If GC time is high, attribute gen0/1/2 collection cost and reasons.",
                 Branches: new[]
                 {
@@ -112,9 +112,10 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 4,
                 StepId: "threadpool",
-                ToolName: "collect_event_source",
+                ToolName: "collect_events",
                 ToolParams: new Dictionary<string, object?>
                 {
+                    ["kind"] = "event_source",
                     ["processId"] = pid,
                     ["providerName"] = "System.Threading.Tasks.TplEventSource",
                     ["durationSeconds"] = 30,
@@ -127,8 +128,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 5,
                 StepId: "exceptions",
-                ToolName: "collect_exceptions",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 15 },
+                ToolName: "collect_events",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "exceptions", ["processId"] = pid, ["durationSeconds"] = 15 },
                 Rationale: "Cheap and high signal when exceptions/sec is elevated — surfaces top exception types and throw sites.",
                 Branches: new[]
                 {
@@ -137,9 +138,10 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 6,
                 StepId: "http",
-                ToolName: "collect_event_source",
+                ToolName: "collect_events",
                 ToolParams: new Dictionary<string, object?>
                 {
+                    ["kind"] = "event_source",
                     ["processId"] = pid,
                     ["providerName"] = "System.Net.Http",
                     ["durationSeconds"] = 30,
@@ -152,9 +154,10 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 7,
                 StepId: "lock-events",
-                ToolName: "collect_event_source",
+                ToolName: "collect_events",
                 ToolParams: new Dictionary<string, object?>
                 {
+                    ["kind"] = "event_source",
                     ["processId"] = pid,
                     ["providerName"] = "Microsoft-Windows-DotNETRuntime",
                     ["keywords"] = ContentionKeyword,
@@ -193,9 +196,9 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
 
         var alternates = new[]
         {
-            new AlternateBranch("memory-leak", "working-set grows > 10% in 60s mid-investigation", "collect_gc_events",
-                "Switch to the memory-leak path even if vitals were CPU-shaped initially."),
-            new AlternateBranch("hung-app", "snapshot_counters returns no live counters in 5s", "collect_process_dump",
+            new AlternateBranch("memory-leak", "working-set grows > 10% in 60s mid-investigation", "collect_events",
+                "Switch to the memory-leak path even if vitals were CPU-shaped initially (kind=\"gc\")."),
+            new AlternateBranch("hung-app", "collect_events(kind=\"counters\") returns no live counters in 5s", "collect_process_dump",
                 "Process may be hung; request Mini dump (approval-gated)."),
         };
 
@@ -213,8 +216,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 1,
                 StepId: "vitals-delta",
-                ToolName: "snapshot_counters",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 5 },
+                ToolName: "collect_events",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "counters", ["processId"] = pid, ["durationSeconds"] = 5 },
                 Rationale: "Re-collect the same counters as baseline so we can diff. Anything within ±10% of baseline is noise; flag the rest.",
                 Branches: new[]
                 {
@@ -225,8 +228,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 2,
                 StepId: "cpu-sample-delta",
-                ToolName: "collect_cpu_sample",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
+                ToolName: "collect_sample",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "cpu", ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
                 Rationale: "Compare top hotspots against baseline.cpuHotspots. New frames in the top-N are the regression suspects.",
                 Branches: new[]
                 {
@@ -235,8 +238,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
             new(
                 StepNumber: 3,
                 StepId: "gc-events-delta",
-                ToolName: "collect_gc_events",
-                ToolParams: new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 30 },
+                ToolName: "collect_events",
+                ToolParams: new Dictionary<string, object?> { ["kind"] = "gc", ["processId"] = pid, ["durationSeconds"] = 30 },
                 Rationale: "Quantify the GC regression: gen2 frequency, pause time, LOH allocations.",
                 Branches: new[]
                 {
@@ -350,9 +353,10 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "lock-events", "collect_event_source",
+            new(1, "lock-events", "collect_events",
                 new Dictionary<string, object?>
                 {
+                    ["kind"] = "event_source",
                     ["processId"] = pid,
                     ["providerName"] = "Microsoft-Windows-DotNETRuntime",
                     ["keywords"] = ContentionKeyword,
@@ -360,8 +364,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
                 },
                 "ContentionKeyword surfaces Monitor lock contention events with contending thread and duration — direct evidence for the hypothesis.",
                 new[] { new DecisionBranch("contention rate > 100/s on a single lock", "lock-sample", "Confirmed; sample CPU to locate the lock-holder method.") }),
-            new(2, "lock-sample", "collect_cpu_sample",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
+            new(2, "lock-sample", "collect_sample",
+                new Dictionary<string, object?> { ["kind"] = "cpu", ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
                 "Correlate the contention events with hot frames in Monitor.* / SpinWait to name the offending method.",
                 new[] { new DecisionBranch("Monitor.* or SpinWait in top exclusive frames", "report-lock", "Report the lock-holder.") }),
         };
@@ -376,11 +380,11 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "cpu-vitals", "snapshot_counters",
+            new(1, "cpu-vitals", "collect_events",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 5 },
                 "Confirm CPU is actually pressured before sampling.",
                 new[] { new DecisionBranch("cpu_pct > 50", "cpu-sample", "Move to sampling.") }),
-            new(2, "cpu-sample", "collect_cpu_sample",
+            new(2, "cpu-sample", "collect_sample",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 20, ["topN"] = 25 },
                 "Direct evidence for a CPU hypothesis. Drill the handle with get_call_tree.",
                 new[] { new DecisionBranch("hypothesized frame in top-10", "report-cpu", "Confirmed.") }),
@@ -396,12 +400,12 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "memory-vitals", "snapshot_counters",
+            new(1, "memory-vitals", "collect_events",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 15 },
                 "15s captures multiple GC ticks so we can see whether heap is growing or steady.",
                 new[] { new DecisionBranch("gen2-size growing AND working-set growing", "gc-events", "Likely leak.") }),
-            new(2, "gc-events", "collect_gc_events",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 30 },
+            new(2, "gc-events", "collect_events",
+                new Dictionary<string, object?> { ["kind"] = "gc", ["processId"] = pid, ["durationSeconds"] = 30 },
                 "Attribute survival rate per generation and identify allocation-heavy phases.",
                 new[] { new DecisionBranch("survival_rate > 60% on gen2", "dump-heap", "Confirm with a Mini dump (approval-gated).") }),
         };
@@ -416,13 +420,14 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "tp-vitals", "snapshot_counters",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 30, ["intervalSeconds"] = 2 },
+            new(1, "tp-vitals", "collect_events",
+                new Dictionary<string, object?> { ["kind"] = "counters", ["processId"] = pid, ["durationSeconds"] = 30, ["intervalSeconds"] = 2 },
                 "30s @ 2s intervals shows thread.count slope — the canonical starvation fingerprint.",
                 new[] { new DecisionBranch("thread.count grows 1-2/s for 20s+", "tp-events", "Confirm with TplEventSource.") }),
-            new(2, "tp-events", "collect_event_source",
+            new(2, "tp-events", "collect_events",
                 new Dictionary<string, object?>
                 {
+                    ["kind"] = "event_source",
                     ["processId"] = pid,
                     ["providerName"] = "System.Threading.Tasks.TplEventSource",
                     ["durationSeconds"] = 30,
@@ -441,8 +446,8 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "exception-collect", "collect_exceptions",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 15 },
+            new(1, "exception-collect", "collect_events",
+                new Dictionary<string, object?> { ["kind"] = "exceptions", ["processId"] = pid, ["durationSeconds"] = 15 },
                 "Direct top-N exception type aggregation for the hypothesis.",
                 new[] { new DecisionBranch("hypothesized exception type dominates", "report-exceptions", "Confirmed.") }),
         };
@@ -457,7 +462,7 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "startup-vitals", "snapshot_counters",
+            new(1, "startup-vitals", "collect_events",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 },
                 "jit.compilation.time and loader counters tell whether JIT churn or assembly loads dominate startup.",
                 new[] { new DecisionBranch("jit.compilation.time > 1s after warm-up", "report-jit-churn", "JIT churn → recommend R2R/AOT.") }),
@@ -473,7 +478,7 @@ public sealed class InvestigationPlanner : IInvestigationPlanner
     {
         var steps = new InvestigationStep[]
         {
-            new(1, "vitals", "snapshot_counters",
+            new(1, "vitals", "collect_events",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 5 },
                 "Hypothesis didn't match any known route — fall back to cold-mode vitals.",
                 new[] { new DecisionBranch("default", "report-revert-to-cold", "Re-run start_investigation without the hypothesis field.") }),

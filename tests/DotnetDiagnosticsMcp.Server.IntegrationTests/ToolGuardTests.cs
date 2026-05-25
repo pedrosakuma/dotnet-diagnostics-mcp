@@ -193,9 +193,9 @@ public sealed class ToolGuardTests
         var inner = new System.ComponentModel.Win32Exception(1, "Operation not permitted");
         var outer = new InvalidOperationException("PTRACE_ATTACH failed", inner);
 
-        var text = ToolErrorSurfaceFilter.BuildErrorText("inspect_live_heap", outer);
+        var text = ToolErrorSurfaceFilter.BuildErrorText("inspect_heap", outer);
 
-        text.Should().Contain("inspect_live_heap failed:");
+        text.Should().Contain("inspect_heap failed:");
         text.Should().Contain("InvalidOperationException");
         text.Should().Contain("PTRACE_ATTACH failed");
         text.Should().Contain("Exception chain:");
@@ -207,9 +207,9 @@ public sealed class ToolGuardTests
     public void ToolErrorSurfaceFilter_BuildErrorText_HandlesNullAndEmptyMessages()
     {
         var ex = new InvalidOperationException(string.Empty);
-        var text = ToolErrorSurfaceFilter.BuildErrorText("snapshot_counters", ex);
+        var text = ToolErrorSurfaceFilter.BuildErrorText("collect_events", ex);
 
-        text.Should().Contain("snapshot_counters failed:");
+        text.Should().Contain("collect_events failed:");
         text.Should().Contain("(no message)", "the formatter must not render empty messages as blanks");
     }
 

@@ -46,24 +46,24 @@ public sealed class DiagnosticPrompts
             an optional `processId` ({{pid.HintNote}}); read every response's `summary` + `hints`
             and follow the first hint unless a previous step already disproved it.
 
-              1. `snapshot_counters({{pid.Arg}}durationSeconds={{dur}})` — cheap first signal. Read
+              1. `collect_events(kind="counters", {{pid.Arg}}durationSeconds={{dur}})` — cheap first signal. Read
                  `cpu-usage`, `threadpool-queue-length`, `monitor-lock-contention-count`,
                  `gc-heap-size`, `time-in-gc`, `exception-count`, and (if AspNetCore is loaded)
                  `request-duration` + `requests-per-second`. The response also stamps a
                  `resolvedProcess` envelope confirming runtime flavor; use it instead of a
-                 separate `get_diagnostic_capabilities` round-trip unless capabilities are
+                 separate `inspect_process(view="capabilities")` round-trip unless capabilities are
                  unclear.
 
               2. Branch on what's elevated:
-                 - `cpu-usage` >= 70% on one or two cores → `collect_cpu_sample({{pid.Arg}}durationSeconds={{dur}}, topN=20)`.
+                 - `cpu-usage` >= 70% on one or two cores → `collect_sample(kind="cpu", {{pid.Arg}}durationSeconds={{dur}}, topN=20)`.
                    Report the top 5 inclusive hotspots. If `resolvedProcess.runtime` is
                    `NativeAot`, skip — CPU sampling is unsupported there; substitute
-                   `collect_event_source(providerName="System.Threading", {{pid.Arg}}durationSeconds={{dur}})`
+                   `collect_events(kind="event_source", providerName="System.Threading", {{pid.Arg}}durationSeconds={{dur}})`
                    and surface that as a known gap.
                  - `time-in-gc` > 20% or `gc-heap-size` climbing → jump to the `diagnose-memory-growth` prompt.
                  - `monitor-lock-contention-count` rising OR `threadpool-queue-length` > 0 sustained →
-                   `collect_event_source(providerName="System.Threading.Tasks.TplEventSource", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=500)`.
-                 - High request duration but low CPU → likely downstream. `collect_event_source(providerName="System.Net.Http", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=300)`
+                   `collect_events(kind="event_source", providerName="System.Threading.Tasks.TplEventSource", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=500)`.
+                 - High request duration but low CPU → likely downstream. `collect_events(kind="event_source", providerName="System.Net.Http", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=300)`
                    to time outbound calls, then cross-reference with `Microsoft.AspNetCore.Hosting` for in-pipeline latency.
                  - `exception-count` climbing → jump to the `diagnose-5xx-errors` prompt.
 
@@ -93,7 +93,7 @@ public sealed class DiagnosticPrompts
         return AssistantPrompt($$"""
             Goal: explain memory growth in the target .NET process{{ctx}}
 
-              1. `snapshot_counters({{pid.Arg}}durationSeconds={{win}})` — read `gc-heap-size`,
+              1. `collect_events(kind="counters", {{pid.Arg}}durationSeconds={{win}})` — read `gc-heap-size`,
                  `gen-0-size`, `gen-1-size`, `gen-2-size`, `loh-size`, `poh-size`,
                  `gc-fragmentation`, and `working-set`. The response stamps `resolvedProcess`
                  with `runtime` + `canCollectGcDump`; note NativeAOT cannot do gcdump.
@@ -103,17 +103,17 @@ public sealed class DiagnosticPrompts
                    - Working set grows but managed heap stable → native/unmanaged growth
                      (mention dotnet-monitor or a native profiler as out-of-scope).
 
-              2. `collect_gc_events({{pid.Arg}}durationSeconds={{win}}, maxEvents=200)` — inspect
+              2. `collect_events(kind="gc", {{pid.Arg}}durationSeconds={{win}}, maxEvents=200)` — inspect
                  `data.maxPauseTime` and `data.events`. Frequent gen-2 collections with no
                  shrink = retention. If `resolvedProcess.runtime` is `NativeAot` skip this step
-                 in favor of `collect_event_source(providerName="Microsoft-Windows-DotNETRuntime", {{pid.Arg}}durationSeconds={{win}})`
+                 in favor of `collect_events(kind="event_source", providerName="Microsoft-Windows-DotNETRuntime", {{pid.Arg}}durationSeconds={{win}})`
                  filtered to GC keywords (NativeAOT exposes the same provider).
 
-              3. If retention is suspected, call `inspect_live_heap({{pid.Arg.TrimEnd(',', ' ')}})` first — it is
+              3. If retention is suspected, call `inspect_heap({{pid.Arg}}source="live")` first — it is
                  much cheaper than a full dump and surfaces top-N retainers inline plus a
-                 `HeapSnapshotHandle` for `query_heap_snapshot(handle, view="…")` drill-downs.
+                 `HeapSnapshotHandle` for `query_snapshot(handle, view="…")` drill-downs.
 
-              4. Only if `inspect_live_heap` is inconclusive or unavailable, escalate to
+              4. Only if `inspect_heap(source="live")` is inconclusive or unavailable, escalate to
                  `collect_process_dump({{pid.Arg}}dumpType="WithHeap")`. Report the resulting file
                  path so the user can open it in `dotnet-dump analyze`.
 
@@ -122,7 +122,7 @@ public sealed class DiagnosticPrompts
 
             Hard rules:
               - Only one `WithHeap`/`Full` dump per investigation unless asked otherwise — they're expensive.
-              - Prefer `inspect_live_heap` over a dump whenever the process is still healthy enough to be paused for ~1s.
+              - Prefer `inspect_heap(source="live")` over a dump whenever the process is still healthy enough to be paused for ~1s.
             """);
     }
 
@@ -139,22 +139,22 @@ public sealed class DiagnosticPrompts
         return AssistantPrompt($$"""
             Goal: identify what's throwing in the target .NET process and whether it correlates with HTTP 5xxs{{ctx}}
 
-              1. `snapshot_counters({{pid.Arg}}durationSeconds=10)` — confirm `exception-count` is
+              1. `collect_events(kind="counters", {{pid.Arg}}durationSeconds=10)` — confirm `exception-count` is
                  actually climbing and capture the rate. If it's flat, the 5xxs may be returned
-                 deliberately by application code; pivot to `collect_event_source(providerName="Microsoft.AspNetCore.Hosting", {{pid.Arg}}durationSeconds=15)`.
+                 deliberately by application code; pivot to `collect_events(kind="event_source", providerName="Microsoft.AspNetCore.Hosting", {{pid.Arg}}durationSeconds=15)`.
 
               2. **Start the collector BEFORE the workload that triggers the storm** — exceptions
-                 thrown before the session starts are invisible. `collect_exceptions({{pid.Arg}}durationSeconds=15, maxRecent=30)` —
+                 thrown before the session starts are invisible. `collect_events(kind="exceptions", {{pid.Arg}}durationSeconds=15, maxRecent=30)` —
                  read `data.byType` for the dominant exception type(s) and `data.recent` for
                  stack frames.
 
               3. For first-chance vs unhandled differentiation, also call
-                 `collect_event_source(providerName="Microsoft-Extensions-Logging", {{pid.Arg}}durationSeconds=15, maxEvents=200)`.
+                 `collect_events(kind="event_source", providerName="Microsoft-Extensions-Logging", {{pid.Arg}}durationSeconds=15, maxEvents=200)`.
                  This catches structured log entries the app considers "handled" so you can
                  correlate.
 
               4. If exceptions correlate with HTTP traffic, also call
-                 `collect_event_source(providerName="System.Net.Http", {{pid.Arg}}durationSeconds=10, maxEvents=200)`
+                 `collect_events(kind="event_source", providerName="System.Net.Http", {{pid.Arg}}durationSeconds=10, maxEvents=200)`
                  and join the activities with the exception timestamps.
 
               5. Conclude:
@@ -183,16 +183,16 @@ public sealed class DiagnosticPrompts
         return AssistantPrompt($$"""
             Goal: confirm that latency in the target .NET process is dominated by outbound HTTP (not CPU, not GC){{ctx}}
 
-              1. `snapshot_counters({{pid.Arg}}durationSeconds=10)` — verify `cpu-usage` is low,
+              1. `collect_events(kind="counters", {{pid.Arg}}durationSeconds=10)` — verify `cpu-usage` is low,
                  `time-in-gc` is normal, and (if AspNetCore is present) `request-duration` is
                  high. If CPU or GC is elevated, pivot to `diagnose-high-latency` instead.
 
-              2. `collect_event_source(providerName="System.Net.Http", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=500)` —
+              2. `collect_events(kind="event_source", providerName="System.Net.Http", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=500)` —
                  look at `events` for `RequestStart` / `RequestStop` pairs. Most clients emit
                  timing on the stop event payload. Group by URI/host and report the p95 latency
                  per destination.
 
-              3. Cross-reference with `collect_event_source(providerName="Microsoft-AspNetCore-Server-Kestrel", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=300)`
+              3. Cross-reference with `collect_events(kind="event_source", providerName="Microsoft-AspNetCore-Server-Kestrel", {{pid.Arg}}durationSeconds={{dur}}, maxEvents=300)`
                  for inbound connection lifecycle. This confirms the latency is downstream-induced
                  (inbound queue stable) rather than client-induced.
 
@@ -215,7 +215,7 @@ public sealed class DiagnosticPrompts
         return AssistantPrompt($$"""
             Goal: determine whether the target is NativeAOT and which collectors it supports, so subsequent investigations don't waste cycles on unsupported tools.
 
-              1. `get_diagnostic_capabilities({{pid.Arg.TrimEnd(',', ' ')}})` — check
+              1. `inspect_process({{pid.Arg}}view="capabilities")` — check
                  `runtime` (CoreClr vs NativeAot), `runtimeVersion`, and the capability flags.
                  Available flags: `canReadEventCounters`, `canSampleCpu`, `canCollectGcDump`,
                  `canCollectExceptions`, `canCollectHttpActivity`, `canCollectCustomEventSource`,
@@ -225,11 +225,11 @@ public sealed class DiagnosticPrompts
                  - `runtime` = `NativeAot` and `canReadEventCounters` = `false`: the app was
                    published with `<EventSourceSupport>false</EventSourceSupport>`. NO live
                    collectors will work. Only path forward is `collect_process_dump` +
-                   `inspect_dump` offline OR rebuild with EventSource support enabled.
+                   `inspect_heap(source="dump")` offline OR rebuild with EventSource support enabled.
                  - `runtime` = `NativeAot` and `canReadEventCounters` = `true`: counters,
                    exceptions, GC events, custom EventSources, dumps all work. `canSampleCpu` is
                    `false` (SampleProfiler is CoreCLR-only) — fall back to `perf record -p <pid>`
-                   on the host for CPU sampling, or use `collect_event_source` on the runtime
+                   on the host for CPU sampling, or use `collect_events(kind="event_source")` on the runtime
                    provider for coarse signal.
                  - `runtime` = `CoreClr`: all collectors are supported; no special handling.
 
@@ -251,21 +251,21 @@ public sealed class DiagnosticPrompts
 
             Order of escalation from cheapest to most disruptive (stop at the first level that answers the question):
 
-              1. **Passive metadata** — `get_process_info({{pid.Arg.TrimEnd(',', ' ')}})` and
-                 `get_diagnostic_capabilities({{pid.Arg.TrimEnd(',', ' ')}})`. No EventPipe session, no pause.
-              2. **`snapshot_counters({{pid.Arg}}durationSeconds=10)`** — small EventPipe session,
+              1. **Passive metadata** — `inspect_process({{pid.Arg}}view="info")` and
+                 `inspect_process({{pid.Arg}}view="capabilities")`. No EventPipe session, no pause.
+              2. **`collect_events(kind="counters", {{pid.Arg}}durationSeconds=10)`** — small EventPipe session,
                  low overhead, sufficient for most "is anything elevated?" questions.
-              3. **`collect_event_source` / `collect_exceptions` / `collect_gc_events`** —
+              3. **`collect_events` / `collect_sample`** —
                  EventPipe sessions sized by `durationSeconds`. Keep ≤ 15s in prod; cap
                  `maxEvents` and `maxRecent` to bound payload size.
-              4. **`collect_cpu_sample`** — same family as 3 but uses SampleProfiler at ~1 kHz.
+              4. **`collect_sample(kind="cpu")`** — same family as 3 but uses SampleProfiler at ~1 kHz.
                  Higher overhead than counters; still safe at ≤ 10s windows.
-              5. **`inspect_live_heap`** — pauses the process briefly (~1s on heaps ≤ 1 GB) to
+              5. **`inspect_heap(source="live")`** — pauses the process briefly (~1s on heaps ≤ 1 GB) to
                  enumerate types. Strongly prefer this over a `WithHeap` dump when the question
                  is "what's retained?".
-              6. **`collect_process_dump dumpType="Mini"`** — kernel reads memory; briefly pauses
+              6. **`collect_process_dump(dumpType="Mini")`** — kernel reads memory; briefly pauses
                  the process. Acceptable in prod for post-mortem on a non-critical instance.
-              7. **`collect_process_dump dumpType="WithHeap"` or `"Full"`** — can pause for
+              7. **`collect_process_dump(dumpType="WithHeap")` or `"Full"`** — can pause for
                  seconds and writes hundreds of MB. NEVER call this in prod without explicit
                  human approval; prefer doing it on a drained replica.
 

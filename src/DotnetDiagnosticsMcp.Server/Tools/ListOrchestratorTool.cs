@@ -15,10 +15,8 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// <summary>
 /// RFC 0002 §4.7 consolidation (issue #212): merges the two orchestrator listing
 /// endpoints — <c>list_pods</c> and <c>list_active_investigations</c> — into a single
-/// <c>list_orchestrator(kind=...)</c> tool. The legacy tools remain registered behind
-/// <see cref="Deprecation.DeprecatedToolAttribute"/> for one deprecation window
-/// (RFC §5.1) and delegate to the same underlying providers, so behaviour is
-/// preserved bit-for-bit; this wrapper only re-frames the dispatch.
+/// <c>list_orchestrator(kind=...)</c> tool. RFC 0002 §7.3 #9 / #213 — the legacy tools
+/// have been deleted in the alias removal wave; this is now the sole listing entry-point.
 /// </summary>
 /// <remarks>
 /// <para><c>attach_to_pod</c> / <c>detach_from_pod</c> are deliberately NOT merged —

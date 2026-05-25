@@ -32,9 +32,9 @@ public sealed class InvestigationGuideResources
         ## 1. Discover the target
 
         ```text
-        list_dotnet_processes              # discover pids attachable on this host
-        get_process_info(processId)        # confirm a specific pid is still alive
-        get_diagnostic_capabilities(pid)   # CoreCLR vs NativeAOT, gcdump/CPU-sampling support
+        inspect_process(view="list")              # discover pids attachable on this host
+        inspect_process(view="info", processId)   # confirm a specific pid is still alive
+        inspect_process(view="capabilities", pid) # CoreCLR vs NativeAOT, gcdump/CPU-sampling support
         ```
 
         Capabilities matter: NativeAOT does **not** support CPU sampling or `gcdump`. Plan around
@@ -42,7 +42,7 @@ public sealed class InvestigationGuideResources
 
         ## 2. Establish a baseline
 
-        Always start with `snapshot_counters` over 5–10 seconds. It is the cheapest signal and
+        Always start with `collect_events(kind="counters")` over 5–10 seconds. It is the cheapest signal and
         covers:
 
         - `System.Runtime` — cpu-usage, working-set, gc-heap-size, gen-*-size,
@@ -52,14 +52,14 @@ public sealed class InvestigationGuideResources
 
         ## 3. Branch by symptom
 
-        | Symptom                                  | Tool                                      | Why                                                       |
-        |------------------------------------------|-------------------------------------------|-----------------------------------------------------------|
-        | `cpu-usage` ≥ 70%                        | `collect_cpu_sample`                      | Identify hot methods via the SampleProfiler EventSource   |
-        | Growing `gc-heap-size`, frequent gen-2   | `collect_gc_events`                       | Confirm pause distribution before pulling a heap dump     |
-        | Many `monitor-lock-contention-count`     | `collect_event_source` (TPL, Threading)   | Confirm contention pattern                                |
-        | HTTP/network anomalies                   | `collect_event_source(System.Net.Http)`   | Activities + response status                              |
-        | Exception storms                         | `collect_exceptions`                      | Start the session **before** the workload                 |
-        | Need ground truth / out-of-band analysis | `collect_process_dump`                    | Heaviest tool — Mini < Triage < WithHeap < Full           |
+        | Symptom                                  | Tool                                                        | Why                                                       |
+        |------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------|
+        | `cpu-usage` ≥ 70%                        | `collect_sample(kind="cpu")`                                | Identify hot methods via the SampleProfiler EventSource   |
+        | Growing `gc-heap-size`, frequent gen-2   | `collect_events(kind="gc")`                                 | Confirm pause distribution before pulling a heap dump     |
+        | Many `monitor-lock-contention-count`     | `collect_events(kind="event_source")` (TPL, Threading)      | Confirm contention pattern                                |
+        | HTTP/network anomalies                   | `collect_events(kind="event_source", provider=System.Net.Http)` | Activities + response status                          |
+        | Exception storms                         | `collect_events(kind="exceptions")`                         | Start the session **before** the workload                 |
+        | Need ground truth / out-of-band analysis | `collect_process_dump`                                      | Heaviest tool — Mini < Triage < WithHeap < Full           |
 
         ## 4. Always bound the cost
 
@@ -72,14 +72,14 @@ public sealed class InvestigationGuideResources
 
         Every response includes a `summary`, the typed `data` payload, and a `hints` array. The
         hints describe the recommended next call given what the data showed (e.g. "cpu-usage=82%
-        — run `collect_cpu_sample`"). When in doubt, follow the first hint.
+        — run `collect_sample(kind=\"cpu\")`"). When in doubt, follow the first hint.
 
         ## 6. Error recovery
 
         Errors are returned as structured `DiagnosticError` records with a `Kind` field
         (`InvalidArgument`, `ProcessNotFound`, `EndpointUnavailable`, …) and at least one hint
         describing the recovery. The most common one is `EndpointUnavailable` — caused by a UID
-        mismatch between the sidecar and the target. Re-run `list_dotnet_processes` after fixing
+        mismatch between the sidecar and the target. Re-run `inspect_process(view="list")` after fixing
         the UID.
 
         ## Non-goals

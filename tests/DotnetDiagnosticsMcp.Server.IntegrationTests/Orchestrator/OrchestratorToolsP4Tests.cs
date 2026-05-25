@@ -83,7 +83,7 @@ public sealed class OrchestratorToolsP4Tests
         result.Data!.HandleId.Should().BeEmpty();
         result.Data.Found.Should().BeFalse();
         result.Hints.Should().NotBeEmpty();
-        result.Hints!.Any(h => string.Equals(h.NextTool, "list_active_investigations", StringComparison.Ordinal))
+        result.Hints!.Any(h => string.Equals(h.NextTool, "list_orchestrator", StringComparison.Ordinal))
             .Should().BeTrue();
     }
 

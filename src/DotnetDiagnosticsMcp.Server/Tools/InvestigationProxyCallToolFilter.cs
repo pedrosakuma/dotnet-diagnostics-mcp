@@ -53,10 +53,9 @@ internal static class InvestigationProxyCallToolFilter
     /// <summary>Tools that must always run locally — they configure the orchestrator itself.</summary>
     private static readonly HashSet<string> BypassToolNames = new(StringComparer.Ordinal)
     {
-        "list_pods",
+        "list_orchestrator",
         "attach_to_pod",
         "detach_from_pod",
-        "list_active_investigations",
     };
 
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Create(

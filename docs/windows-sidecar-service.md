@@ -4,7 +4,7 @@
 > installer documented there is the right default for **dev workstations** — it runs the
 > server at logon under your own user account, no elevation, no admin prompt. This guide
 > covers the **production sidecar** case where you also want **off-CPU sampling**
-> (`collect_off_cpu_sample`), which requires a privilege the Scheduled-Task user typically
+> (`collect_sample(kind="off_cpu")`), which requires a privilege the Scheduled-Task user typically
 > does not have.
 
 ---
@@ -24,12 +24,12 @@ The Kernel Logger itself needs **one** of:
 > ✅ **Current runtime gate.** `EtwOffCpuSampler.IsAvailable()` now accepts either
 > local **Administrators** membership **or** a token that carries
 > `SeSystemProfilePrivilege` (`Profile system performance`). That means a dedicated
-> service account can now run `collect_off_cpu_sample` without joining
+> service account can now run `collect_sample(kind="off_cpu")` without joining
 > **Administrators**, as long as you grant the privilege and restart the service.
 
 The Scheduled-Task installer (`deploy/supervisors/windows/Install-Service.ps1`) runs the
 server as the interactive user. That user is typically a **standard** user — no
-Administrators, no `SeSystemProfilePrivilege` — so `collect_off_cpu_sample` returns a
+Administrators, no `SeSystemProfilePrivilege` — so `collect_sample(kind="off_cpu")` returns a
 structured `PermissionDenied` envelope:
 
 ```json
@@ -40,15 +40,15 @@ structured `PermissionDenied` envelope:
   },
   "hints": [
     {
-      "nextTool": "collect_off_cpu_sample",
+      "nextTool": "collect_sample(kind="off_cpu")",
       "reason": "Retry after the sidecar account has one of the two supported Windows paths: BUILTIN\\Administrators membership or SeSystemProfilePrivilege ('Profile system performance')."
     }
   ]
 }
 ```
 
-Every other tool (`snapshot_counters`, `collect_cpu_sample`, `collect_exceptions`,
-`collect_gc_events`, `collect_activities`, `collect_event_source`, ETW NativeAOT CPU sampling) works fine from
+Every other tool (`collect_events(kind="counters")`, `collect_sample(kind="cpu")`, `collect_events(kind="exceptions")`,
+`collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`, ETW NativeAOT CPU sampling) works fine from
 the Scheduled Task — they use EventPipe or user-mode ETW providers that do not need a
 kernel logger session. **Switch to the Service only when you need off-CPU.**
 
@@ -108,7 +108,7 @@ Add-LocalGroupMember -Group 'Administrators' -Member 'diagmcp$' -ErrorAction Sil
 > - Same node → `Profile system performance` (`SeSystemProfilePrivilege`) → Add `diagmcp$`.
 >
 > Both grants take effect on the next service start. After you add them, restart the
-> service and `collect_off_cpu_sample` can use the NT Kernel Logger without local
+> service and `collect_sample(kind="off_cpu")` can use the NT Kernel Logger without local
 > **Administrators** membership.
 
 ### 3.3 Install the service
@@ -199,7 +199,7 @@ Invoke-WebRequest http://127.0.0.1:8787/health | Select-Object StatusCode
 # Expected: 200
 ```
 
-From an MCP client, `collect_off_cpu_sample` should now return a `BlockingStacksArtifact`
+From an MCP client, `collect_sample(kind="off_cpu")` should now return a `BlockingStacksArtifact`
 instead of `PermissionDenied`.
 
 ---
@@ -261,8 +261,8 @@ Remove-Item -Recurse -Force "$env:ProgramData\dotnet-diagnostics-mcp" -ErrorActi
 | Symptom                                                                                          | Likely cause                                                                  |
 |--------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
 | Service fails to start with **`Error 1069: logon failure`**                                       | The service account cannot log on as a service. If you followed § 3.2, Administrators membership grants `SeServiceLogonRight` implicitly — confirm `Add-LocalGroupMember` actually ran (check `Get-LocalGroupMember Administrators`). |
-| `collect_off_cpu_sample` returns `PermissionDenied` despite running as a service                  | Service started **before** the privilege grant, or the account has neither local **Administrators** membership nor `SeSystemProfilePrivilege`. Restart the service after changing group membership / User Rights Assignment (token privileges are evaluated at start). |
-| `collect_off_cpu_sample` returns `Conflict: NT Kernel Logger session already exists`              | Another profiler (PerfView, WPR, `xperf`) is currently running. Stop it.       |
+| `collect_sample(kind="off_cpu")` returns `PermissionDenied` despite running as a service                  | Service started **before** the privilege grant, or the account has neither local **Administrators** membership nor `SeSystemProfilePrivilege`. Restart the service after changing group membership / User Rights Assignment (token privileges are evaluated at start). |
+| `collect_sample(kind="off_cpu")` returns `Conflict: NT Kernel Logger session already exists`              | Another profiler (PerfView, WPR, `xperf`) is currently running. Stop it.       |
 | `Authorization` header rejected with 401                                                          | The MCP client is reading a stale `MCP_BEARER_TOKEN` from User scope instead of the service account / token file. Refresh the client. |
 | `whoami /priv` does **not** list `SeSystemProfilePrivilege` for the service process               | The privilege is on the **account**, but the service was started with a **filtered token** (rare; legacy 32-bit hosts). Verify the service is 64-bit; restart the host once. |
 

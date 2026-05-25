@@ -20,10 +20,10 @@ See also:
 
 ## Symbol sources (legend)
 
-The capability digest returned by `get_diagnostic_capabilities` and
+The capability digest returned by `inspect_process(view="capabilities")` and
 `collect_thread_snapshot` reports which symbol/stack source it used.
 
-These ids are what `get_diagnostic_capabilities` returns in
+These ids are what `inspect_process(view="capabilities")` returns in
 `data.threadSnapshotSource` and what `collect_thread_snapshot` stamps on its
 artifact.
 
@@ -48,22 +48,22 @@ Legend: `✅` works · `⚠️` works with caveats (footnote) · `❌` unavailab
 
 | Tool | CoreCLR / Linux | CoreCLR / Windows | NativeAOT / Linux | NativeAOT / Windows |
 |---|---|---|---|---|
-| `list_dotnet_processes` | ✅ | ✅ | ✅ [^stale] | ✅ |
-| `get_process_info` | ✅ | ✅ | ✅ | ✅ |
-| `get_diagnostic_capabilities` | ✅ | ✅ | ✅ | ✅ |
-| `get_container_signals` | ✅ | ⚠️ Linux only | ✅ | ⚠️ Linux only |
-| `get_memory_trend` | ✅ | ✅ | ✅ | ✅ |
-| `snapshot_counters` | ✅ | ✅ | ✅ | ✅ |
-| `collect_gc_events` | ✅ | ✅ | ✅ | ✅ |
-| `collect_exceptions` | ✅ | ✅ | ✅ | ✅ |
-| `collect_event_source` | ✅ | ✅ | ⚠️ [^aot-eventsource] | ⚠️ [^aot-eventsource] |
-| `collect_cpu_sample` | ✅ EventPipe | ✅ EventPipe | ✅ `perf` (`symbols.map`) | ✅ ETW (`pdb-export`) [^win-etw-elev] |
-| `collect_off_cpu_sample` | ✅ `perf` | ⚠️ ETW kernel logger, elevated [^win-etw-elev] | ✅ `perf` [^perf-install] | ⚠️ ETW kernel logger, elevated [^win-etw-elev] |
-| `collect_allocation_sample` | ✅ TypeName populated | ✅ TypeName populated | ⚠️ TypeName empty [^aot-typename] | ⚠️ TypeName empty [^aot-typename] |
+| `inspect_process(view="list")` | ✅ | ✅ | ✅ [^stale] | ✅ |
+| `inspect_process(view="info")` | ✅ | ✅ | ✅ | ✅ |
+| `inspect_process(view="capabilities")` | ✅ | ✅ | ✅ | ✅ |
+| `inspect_process(view="container")` | ✅ | ⚠️ Linux only | ✅ | ⚠️ Linux only |
+| `inspect_process(view="memory_trend")` | ✅ | ✅ | ✅ | ✅ |
+| `collect_events(kind="counters")` | ✅ | ✅ | ✅ | ✅ |
+| `collect_events(kind="gc")` | ✅ | ✅ | ✅ | ✅ |
+| `collect_events(kind="exceptions")` | ✅ | ✅ | ✅ | ✅ |
+| `collect_events(kind="event_source")` | ✅ | ✅ | ⚠️ [^aot-eventsource] | ⚠️ [^aot-eventsource] |
+| `collect_sample(kind="cpu")` | ✅ EventPipe | ✅ EventPipe | ✅ `perf` (`symbols.map`) | ✅ ETW (`pdb-export`) [^win-etw-elev] |
+| `collect_sample(kind="off_cpu")` | ✅ `perf` | ⚠️ ETW kernel logger, elevated [^win-etw-elev] | ✅ `perf` [^perf-install] | ⚠️ ETW kernel logger, elevated [^win-etw-elev] |
+| `collect_sample(kind="allocation")` | ✅ TypeName populated | ✅ TypeName populated | ⚠️ TypeName empty [^aot-typename] | ⚠️ TypeName empty [^aot-typename] |
 | `collect_thread_snapshot` | ✅ `clrmd-thread-walk` | ✅ `clrmd-thread-walk` | ✅ `linux-native-stack` ([#92](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/92)) | ✅ `etw-native-stack` ([#93](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/93)) |
-| `query_thread_snapshot` | ✅ full lock graph | ✅ full lock graph | ⚠️ no managed lock graph [^lock-graph] | ⚠️ no managed lock graph [^lock-graph] |
-| `inspect_live_heap` / `query_heap_snapshot` | ✅ | ✅ | ❌ [^heap] | ❌ [^heap] |
-| `inspect_dump` (heap) | ✅ | ✅ | ❌ [^heap] | ❌ [^heap] |
+| `query_snapshot` | ✅ full lock graph | ✅ full lock graph | ⚠️ no managed lock graph [^lock-graph] | ⚠️ no managed lock graph [^lock-graph] |
+| `inspect_heap(source="live")` / `query_snapshot` | ✅ | ✅ | ❌ [^heap] | ❌ [^heap] |
+| `inspect_heap(source="dump")` (heap) | ✅ | ✅ | ❌ [^heap] | ❌ [^heap] |
 | `collect_process_dump` | ✅ | ✅ | ✅ native dump | ✅ native dump |
 | `capture_method_bytes` | ✅ JIT code-heap | ✅ JIT code-heap | ❌ [^jit-only] | ❌ [^jit-only] |
 | `start_investigation` / `export_investigation_summary` / `compare_to_baseline` | ✅ | ✅ | ✅ | ✅ |
@@ -72,8 +72,8 @@ Legend: `✅` works · `⚠️` works with caveats (footnote) · `❌` unavailab
 [^aot-eventsource]: The provider must be embedded in the AOT binary at publish time. Sources added via assembly load after publish are not reachable.
 [^perf-install]: The default sidecar image now ships `perf`. Pass `--build-arg INSTALL_PERF=false` (or pull the `-lean` GHCR tag) to opt out. Runtime still needs `CAP_PERFMON` for `perf` to actually collect. See [`local-docker-sidecar.md`](./local-docker-sidecar.md) and [#104](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/104).
 [^win-etw-elev]: NT Kernel Logger sessions require either local **Administrators** membership or `SeSystemProfilePrivilege` (`Profile system performance`). For the Windows service setup, see [`windows-sidecar-service.md`](./windows-sidecar-service.md).
-[^aot-typename]: NativeAOT does not populate `GCAllocationTick.TypeName`. Total events and bytes are correct; rollup is `<unknown>`. Cross-reference with `collect_cpu_sample` for native allocation-site frames (`RhNewObject`, `RhNewArray`, `RhAllocateObject`). Improvement tracked in [#100](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/100).
-[^lock-graph]: There is no native equivalent to a managed `SyncBlock`. Thread states and stacks are accurate; ownership/waiter edges between managed objects are not recoverable without runtime cooperation. Pure-native locks (futex, srwlock) still show up as off-CPU stacks via `collect_off_cpu_sample`.
+[^aot-typename]: NativeAOT does not populate `GCAllocationTick.TypeName`. Total events and bytes are correct; rollup is `<unknown>`. Cross-reference with `collect_sample(kind="cpu")` for native allocation-site frames (`RhNewObject`, `RhNewArray`, `RhAllocateObject`). Improvement tracked in [#100](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/100).
+[^lock-graph]: There is no native equivalent to a managed `SyncBlock`. Thread states and stacks are accurate; ownership/waiter edges between managed objects are not recoverable without runtime cooperation. Pure-native locks (futex, srwlock) still show up as off-CPU stacks via `collect_sample(kind="off_cpu")`.
 [^heap]: ClrMD's DAC has no NativeAOT implementation; there is no public design for one upstream. See **Honest non-goals** below.
 [^jit-only]: `capture_method_bytes` reads the JIT code-heap of a live process. On NativeAOT and pure ReadyToRun there is no code-heap — the code is in the on-disk binary. Use the `dotnet-native-mcp.disassemble` companion server against the published ELF/PE.
 
@@ -85,9 +85,9 @@ that does not exist today.
 - **Type-level retained-byte walking of an AOT heap.** ClrMD's DAC reads
   in-process type tables; NativeAOT strips them at publish. There is no public
   design in `dotnet/runtime` for an AOT-equivalent DAC. The pragmatic
-  alternative is **allocation-rate diagnosis** (`collect_allocation_sample` +
-  `collect_cpu_sample` for native allocation-site frames) plus **growth-rate
-  observation** (`get_memory_trend`).
+  alternative is **allocation-rate diagnosis** (`collect_sample(kind="allocation")` +
+  `collect_sample(kind="cpu")` for native allocation-site frames) plus **growth-rate
+  observation** (`inspect_process(view="memory_trend")`).
 - **Managed lock graph (SyncBlock identity, owner→waiter edges) on AOT.** Same
   root cause. Native lock primitives (`futex`, `pthread_mutex`, `srwlock`)
   still show up as off-CPU waits.
@@ -99,20 +99,20 @@ that does not exist today.
 
 ### "My NativeAOT process is leaking"
 
-`inspect_live_heap` is unavailable. The growth-then-attribution flow:
+`inspect_heap(source="live")` is unavailable. The growth-then-attribution flow:
 
 ```
-1. get_memory_trend(pid, durationSeconds=30)
+1. inspect_process(view="memory_trend")(pid, durationSeconds=30)
    → verdict (growing / stable / shrinking), RSS/PSS/private-anon deltas
-2. snapshot_counters(pid, durationSeconds=10)
+2. collect_events(kind="counters")(pid, durationSeconds=10)
    → gc-heap-size, gen counts, threadpool — confirm it's managed
-3. collect_gc_events(pid, durationSeconds=30)
+3. collect_events(kind="gc")(pid, durationSeconds=30)
    → GC frequency + per-gen counts; if Gen2 collections are rare and heap
      keeps growing, suspect LOH or long-lived rooted objects
-4. collect_allocation_sample(pid, durationSeconds=30)
+4. collect_sample(kind="allocation")(pid, durationSeconds=30)
    → total bytes/events (TypeName is empty on AOT — that's expected)
-5. collect_cpu_sample(pid, durationSeconds=30)
-   → get_call_tree → look for RhNewObject / RhNewArray / RhAllocateObject
+5. collect_sample(kind="cpu")(pid, durationSeconds=30)
+   → query_snapshot(view="call-tree") → look for RhNewObject / RhNewArray / RhAllocateObject
      frames; the parents are the allocation sites
 ```
 
@@ -130,11 +130,11 @@ stacks) automatically. The managed lock graph is the only thing missing.
 1. collect_thread_snapshot(pid)
    → returns ThreadSnapshotArtifact with osThreadId, state, stack, IsLikelyBlocked
    → caveats: partial-unwind warnings on the AOT entrypoint frame are benign
-2. query_thread_snapshot(handle, view="top-blocked")
+2. query_snapshot(handle, view="top-blocked")
    → ranks threads by IsLikelyBlocked then LockCount
-3. query_thread_snapshot(handle, view="stack", threadId=<TID>)
+3. query_snapshot(handle, view="stack", threadId=<TID>)
    → full native frames
-4. (optional) collect_off_cpu_sample(pid, durationSeconds=10)
+4. (optional) collect_sample(kind="off_cpu")(pid, durationSeconds=10)
    → if the snapshot is ambiguous, off-CPU sampling shows where the thread
      spent its blocked time (futex, IO, sleep) — works on AOT/Linux
 ```
@@ -142,7 +142,7 @@ stacks) automatically. The managed lock graph is the only thing missing.
 ### "Is this a NativeAOT app?"
 
 ```
-1. get_diagnostic_capabilities(pid)
+1. inspect_process(view="capabilities")(pid)
    → data.runtime ∈ {CoreClr, NativeAot}
    → data.threadSnapshotSource ∈ {clrmd-thread-walk, linux-native-stack, etw-native-stack, perf-replay-approx}
    → data.canAttachClrMD (live heap walking needs this + CoreClr)

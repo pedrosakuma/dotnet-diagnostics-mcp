@@ -16,7 +16,7 @@ This page covers installing **dotnet-diagnostics-mcp** as an end user — no sou
 
 All three publish the same MCP surface (Streamable HTTP, bearer-token authenticated, `/health` allow-listed).
 
-> 🐧 **Linux heads-up — ClrMD-backed tools need ptrace.** Whichever distribution you pick, `collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` (against a live PID) and `collect_process_dump` will fail on Linux with `PermissionDenied` / `Could not PTRACE_ATTACH to any thread of the process N.` unless you grant the server permission to attach. Matching the target's UID is **not** enough on Debian/Ubuntu/WSL (default `kernel.yama.ptrace_scope=1`). See [§ 1.5 Linux: enabling ClrMD-backed tools](#15-linux-enabling-clrmd-backed-tools-ptrace) before you wire the server into your client. EventPipe-only tools (`snapshot_counters`, `collect_cpu_sample`, `collect_exceptions`, `collect_gc_events`, `collect_activities`, `collect_event_source`) work out of the box **unless** you opt into `collect_cpu_sample(resolveMethodInstantiations=true)`, which intentionally takes the ClrMD path to recover closed generic method signatures.
+> 🐧 **Linux heads-up — ClrMD-backed tools need ptrace.** Whichever distribution you pick, `collect_thread_snapshot`, `inspect_heap(source="live")`, `inspect_heap(source="dump")` (against a live PID) and `collect_process_dump` will fail on Linux with `PermissionDenied` / `Could not PTRACE_ATTACH to any thread of the process N.` unless you grant the server permission to attach. Matching the target's UID is **not** enough on Debian/Ubuntu/WSL (default `kernel.yama.ptrace_scope=1`). See [§ 1.5 Linux: enabling ClrMD-backed tools](#15-linux-enabling-clrmd-backed-tools-ptrace) before you wire the server into your client. EventPipe-only tools (`collect_events(kind="counters")`, `collect_sample(kind="cpu")`, `collect_events(kind="exceptions")`, `collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`) work out of the box **unless** you opt into `collect_sample(kind="cpu")(resolveMethodInstantiations=true)`, which intentionally takes the ClrMD path to recover closed generic method signatures.
 
 ### 1a. .NET global tool
 
@@ -56,8 +56,8 @@ tar -xzf dotnet-diagnostics-mcp-*-linux-x64.tar.gz -C ~/.local/bin
 Four tools attach to the target via `ptrace(PTRACE_ATTACH, …)`:
 
 - `collect_thread_snapshot`
-- `inspect_live_heap`
-- `inspect_dump` against a **live** PID (offline dump analysis is unaffected)
+- `inspect_heap(source="live")`
+- `inspect_heap(source="dump")` against a **live** PID (offline dump analysis is unaffected)
 - `collect_process_dump`
 
 Linux's [Yama LSM](https://www.kernel.org/doc/Documentation/admin-guide/LSM/Yama.rst) defaults `kernel.yama.ptrace_scope=1` on Debian, Ubuntu, WSL, GitHub Codespaces, and most desktop distros — meaning **same-UID peer attach is blocked**. The MCP server reports this as a structured `DiagnosticError`:
@@ -85,7 +85,7 @@ To dodge the requirement entirely, use the dump-based workflow:
 ```text
 collect_process_dump  (runs inside the target process — no ptrace needed)
    ↓
-inspect_dump          (offline analysis — no live attach)
+inspect_heap(source="dump")          (offline analysis — no live attach)
 ```
 
 `collect_process_dump` writes the dump via the diagnostic IPC socket, which only needs UID parity. The capture happens inside the target itself, so ptrace permission never enters the picture.
@@ -123,7 +123,7 @@ dotnet tool install -g dotnet-diagnostics-mcp
 
 The script registers a Scheduled Task that starts at logon, restarts on failure 5 times at 30s intervals, and publishes the bearer token as a user-scope environment variable.
 
-> 🔒 **Need off-CPU sampling on Windows?** `collect_off_cpu_sample` uses the NT Kernel
+> 🔒 **Need off-CPU sampling on Windows?** `collect_sample(kind="off_cpu")` uses the NT Kernel
 > Logger's `ContextSwitch` provider, which requires Administrator membership or
 > `SeSystemProfilePrivilege` — neither is held by the per-user Scheduled Task. For
 > production sidecar deployments that want off-CPU, see

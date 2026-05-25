@@ -40,25 +40,28 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
         await using var client = await ConnectAsync();
         var args = new Dictionary<string, object?>
         {
+            ["kind"] = "counters",
             ["processId"] = Environment.ProcessId,
             ["durationSeconds"] = 3,
             ["providers"] = new[] { "System.Runtime" },
             ["intervalSeconds"] = 1,
         };
 
-        var summary = DeserializeStructured<CounterSnapshot>(await client.CallToolAsync(
-            "snapshot_counters",
+        var summaryEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>(args) { ["depth"] = "Summary" },
             cancellationToken: CancellationToken.None));
-        var detail = DeserializeStructured<CounterSnapshot>(await client.CallToolAsync(
-            "snapshot_counters",
+        var detailEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>(args) { ["depth"] = "Detail" },
             cancellationToken: CancellationToken.None));
 
-        summary.Should().NotBeNull();
-        detail.Should().NotBeNull();
+        summaryEnvelope.Should().NotBeNull();
+        detailEnvelope.Should().NotBeNull();
+        var summary = summaryEnvelope!.Counters!;
+        var detail = detailEnvelope!.Counters!;
         // Summary keeps only the headline counters from System.Runtime — Detail keeps every counter the provider emits.
-        summary!.Counters.Count.Should().BeLessThan(detail!.Counters.Count,
+        summary.Counters.Count.Should().BeLessThan(detail.Counters.Count,
             "Summary must drop non-headline counters from the inline payload");
         summary.Counters.Should().OnlyContain(c => c.Provider == "System.Runtime");
     }
@@ -80,10 +83,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             }
         });
 
-        var summary = DeserializeStructured<ExceptionSnapshot>(await client.CallToolAsync(
-            "collect_exceptions",
+        var summaryEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "exceptions",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["maxRecent"] = 50,
@@ -104,10 +108,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             }
         });
 
-        var detail = DeserializeStructured<ExceptionSnapshot>(await client.CallToolAsync(
-            "collect_exceptions",
+        var detailEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "exceptions",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["maxRecent"] = 50,
@@ -117,12 +122,14 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
 
         await workloadDetail;
 
-        summary.Should().NotBeNull();
-        detail.Should().NotBeNull();
-        summary!.Recent.Should().BeEmpty("Summary depth must drop the Recent[] list inline");
+        summaryEnvelope.Should().NotBeNull();
+        detailEnvelope.Should().NotBeNull();
+        var summary = summaryEnvelope!.Exceptions!;
+        var detail = detailEnvelope!.Exceptions!;
+        summary.Recent.Should().BeEmpty("Summary depth must drop the Recent[] list inline");
         // Total + ByType remain exact at every depth — contract from issue #41 (#36 lineage).
         summary.TotalExceptions.Should().BeGreaterThanOrEqualTo(0);
-        detail!.Recent.Count.Should().BeGreaterThanOrEqualTo(0);
+        detail.Recent.Count.Should().BeGreaterThanOrEqualTo(0);
     }
 
     [Fact]
@@ -136,10 +143,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             GC.Collect(2, GCCollectionMode.Forced, blocking: true);
         }
 
-        var summary = DeserializeStructured<GcSummary>(await client.CallToolAsync(
-            "collect_gc_events",
+        var summaryEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "gc",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["maxEvents"] = 50,
@@ -158,10 +166,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             }
         });
 
-        var detail = DeserializeStructured<GcSummary>(await client.CallToolAsync(
-            "collect_gc_events",
+        var detailEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "gc",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["maxEvents"] = 50,
@@ -171,9 +180,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
 
         await detailWork;
 
-        summary.Should().NotBeNull();
-        detail.Should().NotBeNull();
-        summary!.Events.Should().BeEmpty("Summary depth must drop the Events[] list inline");
+        summaryEnvelope.Should().NotBeNull();
+        detailEnvelope.Should().NotBeNull();
+        var summary = summaryEnvelope!.Gc!;
+        var detail = detailEnvelope!.Gc!;
+        summary.Events.Should().BeEmpty("Summary depth must drop the Events[] list inline");
         // Totals must remain exact regardless of depth.
         summary.TotalCollections.Should().BeGreaterThanOrEqualTo(0);
     }
@@ -183,10 +194,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
     {
         await using var client = await ConnectAsync();
 
-        var summary = DeserializeStructured<EventSourceCapture>(await client.CallToolAsync(
-            "collect_event_source",
+        var summaryEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "event_source",
                 ["processId"] = Environment.ProcessId,
                 ["providerName"] = "System.Runtime",
                 ["durationSeconds"] = 2,
@@ -195,10 +207,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             },
             cancellationToken: CancellationToken.None));
 
-        var detail = DeserializeStructured<EventSourceCapture>(await client.CallToolAsync(
-            "collect_event_source",
+        var detailEnvelope = DeserializeStructured<CollectEventsEnvelope>(await client.CallToolAsync(
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "event_source",
                 ["processId"] = Environment.ProcessId,
                 ["providerName"] = "System.Runtime",
                 ["durationSeconds"] = 2,
@@ -207,12 +220,14 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             },
             cancellationToken: CancellationToken.None));
 
-        summary.Should().NotBeNull();
-        detail.Should().NotBeNull();
-        summary!.Events.Should().BeEmpty("Summary depth must drop the Events[] list inline");
+        summaryEnvelope.Should().NotBeNull();
+        detailEnvelope.Should().NotBeNull();
+        var summary = summaryEnvelope!.EventSource!;
+        var detail = detailEnvelope!.EventSource!;
+        summary.Events.Should().BeEmpty("Summary depth must drop the Events[] list inline");
         // Provider + totals remain exact.
         summary.Provider.Should().Be("System.Runtime");
-        detail!.Provider.Should().Be("System.Runtime");
+        detail.Provider.Should().Be("System.Runtime");
     }
 
     [Fact]
@@ -220,31 +235,35 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
     {
         await using var client = await ConnectAsync();
 
-        var summary = DeserializeStructured<ContainerSignals>(await client.CallToolAsync(
-            "get_container_signals",
+        var summaryEnvelope = DeserializeStructured<InspectProcessReport>(await client.CallToolAsync(
+            "inspect_process",
             new Dictionary<string, object?>
             {
+                ["view"] = "container",
                 ["processId"] = Environment.ProcessId,
                 ["depth"] = "Summary",
             },
             cancellationToken: CancellationToken.None));
 
-        var detail = DeserializeStructured<ContainerSignals>(await client.CallToolAsync(
-            "get_container_signals",
+        var detailEnvelope = DeserializeStructured<InspectProcessReport>(await client.CallToolAsync(
+            "inspect_process",
             new Dictionary<string, object?>
             {
+                ["view"] = "container",
                 ["processId"] = Environment.ProcessId,
                 ["depth"] = "Detail",
             },
             cancellationToken: CancellationToken.None));
 
-        summary.Should().NotBeNull();
-        detail.Should().NotBeNull();
-        summary!.Notes.Should().BeEmpty("Summary depth must drop the Notes[] list inline");
+        summaryEnvelope.Should().NotBeNull();
+        detailEnvelope.Should().NotBeNull();
+        var summary = summaryEnvelope!.Container!;
+        var detail = detailEnvelope!.Container!;
+        summary.Notes.Should().BeEmpty("Summary depth must drop the Notes[] list inline");
         // Notes count is platform dependent (Linux cgroup v2 usually emits at least one note when
         // the test runner is not in a container). The only invariant we can assert is that Summary's
         // notes count <= Detail's notes count.
-        summary.Notes.Count.Should().BeLessThanOrEqualTo(detail!.Notes.Count);
+        summary.Notes.Count.Should().BeLessThanOrEqualTo(detail.Notes.Count);
     }
 
     [Fact]
@@ -261,10 +280,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             return sink;
         }, cts.Token);
 
-        var summary = DeserializeStructured<CpuSample>(await client.CallToolAsync(
-            "collect_cpu_sample",
+        var summaryEnvelope = DeserializeStructured<CollectSampleEnvelope>(await client.CallToolAsync(
+            "collect_sample",
             new Dictionary<string, object?>
             {
+                ["kind"] = "cpu",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["topN"] = 25,
@@ -273,10 +293,11 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
             },
             cancellationToken: CancellationToken.None));
 
-        var detail = DeserializeStructured<CpuSample>(await client.CallToolAsync(
-            "collect_cpu_sample",
+        var detailEnvelope = DeserializeStructured<CollectSampleEnvelope>(await client.CallToolAsync(
+            "collect_sample",
             new Dictionary<string, object?>
             {
+                ["kind"] = "cpu",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["topN"] = 25,
@@ -288,12 +309,14 @@ public sealed class DepthContractTests : IClassFixture<McpToolsTests.AuthedFacto
         cts.Cancel();
         try { await spin; } catch { /* expected */ }
 
-        summary.Should().NotBeNull();
-        detail.Should().NotBeNull();
+        summaryEnvelope.Should().NotBeNull();
+        detailEnvelope.Should().NotBeNull();
+        var summary = summaryEnvelope!.Cpu!;
+        var detail = detailEnvelope!.Cpu!;
         // Summary caps the inline TopHotspots at 3 (handle still has everything).
-        summary!.TopHotspots.Count.Should().BeLessThanOrEqualTo(3, "Summary depth caps inline hotspots");
+        summary.TopHotspots.Count.Should().BeLessThanOrEqualTo(3, "Summary depth caps inline hotspots");
         // Detail must not be truncated by depth — at least as many hotspots as Summary saw.
-        detail!.TopHotspots.Count.Should().BeGreaterThanOrEqualTo(summary.TopHotspots.Count);
+        detail.TopHotspots.Count.Should().BeGreaterThanOrEqualTo(summary.TopHotspots.Count);
     }
 
     [Fact]

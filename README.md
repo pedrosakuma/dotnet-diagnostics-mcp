@@ -43,18 +43,18 @@ tests/
 
 | Tool | Purpose |
 |---|---|
-| `list_dotnet_processes` / `get_process_info` | Discover .NET processes via diagnostic IPC |
-| `get_diagnostic_capabilities` | Detect CoreCLR vs NativeAOT and what's usable |
-| `get_container_signals` | Linux cgroup v2: CPU throttling, memory pressure, OOM kills, PSI |
-| `snapshot_counters` | EventCounters over a window (cpu, memory, requests, ...) |
-| `collect_cpu_sample` / `get_call_tree` | Top-N CPU hotspots (inclusive/exclusive) + on-demand caller→callee tree |
-| `collect_off_cpu_sample` / `query_off_cpu_snapshot` | Where threads block (futex / IO / sleep) — Linux `perf` backend |
-| `collect_exceptions` | Managed exceptions thrown in a window, aggregated by type |
-| `collect_gc_events` | GC pauses + per-generation counts |
-| `collect_activities` / `query_collection` | ActivitySource span capture (trace/span ids, parent linkage, tags, duration) + re-project artifacts |
-| `collect_event_source` / `query_collection` | Generic EventSource passthrough (HTTP, Kestrel, custom) + re-project artifacts |
-| `collect_thread_snapshot` / `query_thread_snapshot` | Managed thread states + SyncBlock lock graph + deadlock / unique-stack drilldown |
-| `inspect_live_heap` / `inspect_dump` / `query_heap_snapshot` | Top retained types + retention paths + roots + async state machines, live or from a dump |
+| `inspect_process(view="list")` / `inspect_process(view="info")` | Discover .NET processes via diagnostic IPC |
+| `inspect_process(view="capabilities")` | Detect CoreCLR vs NativeAOT and what's usable |
+| `inspect_process(view="container")` | Linux cgroup v2: CPU throttling, memory pressure, OOM kills, PSI |
+| `collect_events(kind="counters")` | EventCounters over a window (cpu, memory, requests, ...) |
+| `collect_sample(kind="cpu")` / `query_snapshot(view="call-tree")` | Top-N CPU hotspots (inclusive/exclusive) + on-demand caller→callee tree |
+| `collect_sample(kind="off_cpu")` / `query_snapshot` | Where threads block (futex / IO / sleep) — Linux `perf` backend |
+| `collect_events(kind="exceptions")` | Managed exceptions thrown in a window, aggregated by type |
+| `collect_events(kind="gc")` | GC pauses + per-generation counts |
+| `collect_events(kind="activities")` / `query_snapshot` | ActivitySource span capture (trace/span ids, parent linkage, tags, duration) + re-project artifacts |
+| `collect_events(kind="event_source")` / `query_snapshot` | Generic EventSource passthrough (HTTP, Kestrel, custom) + re-project artifacts |
+| `collect_thread_snapshot` / `query_snapshot` | Managed thread states + SyncBlock lock graph + deadlock / unique-stack drilldown |
+| `inspect_heap(source="live")` / `inspect_heap(source="dump")` / `query_snapshot` | Top retained types + retention paths + roots + async state machines, live or from a dump |
 | `collect_process_dump` | Write a Mini / Triage / WithHeap / Full dump to disk |
 | `start_investigation` | Structured plan (cold / warm / hypothesis) before any collector runs |
 | `export_investigation_summary` / `compare_to_baseline` | Portable JSON memory; LLM persists, diffs across deploys |
@@ -82,7 +82,7 @@ GCP (Cloud Run) recipe: [`deploy/gcp/README.md`](./deploy/gcp/README.md).
 > **`processId` is optional everywhere.** When the sidecar only sees one .NET
 > process the server auto-resolves it and stamps a capability digest on every
 > response (`resolvedProcess.autoResolved = true`), so the
-> `list_dotnet_processes` → `get_diagnostic_capabilities` opener can be skipped
+> `inspect_process(view="list")` → `inspect_process(view="capabilities")` opener can be skipped
 > entirely. On ambiguity / nothing visible you get a structured error with the
 > candidate list inline. See [issue #42](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/42).
 
@@ -130,7 +130,7 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
   when the on-disk image MVID drifts. See [`docs/client-setup.md`](./docs/client-setup.md)
   for the full `mcp-config.json` snippets per client.
 
-> 🐧 **Linux:** on Debian/Ubuntu/WSL/Codespaces the `kernel.yama.ptrace_scope=1` default blocks the four ClrMD-backed tools (`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live PID, `collect_process_dump`). See [Consumer install → § 1.5 Linux: enabling ClrMD-backed tools (ptrace)](./docs/consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace) for the one-line fix per distribution. EventPipe-only tools (counters, CPU sample, exceptions, GC, ActivitySource spans, EventSources) work out of the box.
+> 🐧 **Linux:** on Debian/Ubuntu/WSL/Codespaces the `kernel.yama.ptrace_scope=1` default blocks the four ClrMD-backed tools (`collect_thread_snapshot`, `inspect_heap(source="live")`, `inspect_heap(source="dump")` against a live PID, `collect_process_dump`). See [Consumer install → § 1.5 Linux: enabling ClrMD-backed tools (ptrace)](./docs/consumer-install.md#15-linux-enabling-clrmd-backed-tools-ptrace) for the one-line fix per distribution. EventPipe-only tools (counters, CPU sample, exceptions, GC, ActivitySource spans, EventSources) work out of the box.
 
 ### Verifying releases
 

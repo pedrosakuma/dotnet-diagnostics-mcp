@@ -6,8 +6,8 @@ a symptom and walks through the tool calls in order.
 
 > **Always start with these two calls:**
 >
-> 1. `list_dotnet_processes` — discover the target's PID
-> 2. `get_diagnostic_capabilities` — confirm runtime flavor (CoreCLR vs
+> 1. `inspect_process(view="list")` — discover the target's PID
+> 2. `inspect_process(view="capabilities")` — confirm runtime flavor (CoreCLR vs
 >    NativeAOT) and which tools are usable
 >
 > The capability matrix gates the rest of the investigation. Skipping it leads
@@ -20,7 +20,7 @@ a symptom and walks through the tool calls in order.
 **Hypothesis tree:** CPU bound → GC bound → I/O / downstream bound → contention.
 
 ### Step 1 — Quick vitals
-Call `snapshot_counters` with default providers for 5 s. Look at:
+Call `collect_events(kind="counters")` with default providers for 5 s. Look at:
 
 - `System.Runtime/cpu-usage`
 - `System.Runtime/working-set`
@@ -34,14 +34,14 @@ Call `snapshot_counters` with default providers for 5 s. Look at:
   inspect `topHotspots` by `exclusiveSamples`. Look for unexpected user code
   near the top; hot framework methods often point to allocation pressure
   rather than algorithmic cost.
-- **`time-in-gc` > 20% or rising gen-2 count** → `collect_gc_events` for
+- **`time-in-gc` > 20% or rising gen-2 count** → `collect_events(kind="gc")` for
   10 s, look at `maxPauseTime` and the generation distribution. Gen-2 spikes
   with `WithHeap` dumps are the next step.
-- **High request duration but low CPU** → `collect_event_source` with
+- **High request duration but low CPU** → `collect_events(kind="event_source")` with
   `providerName = "System.Net.Http"` to see outbound call timing, or
   `Microsoft.AspNetCore.Hosting` for in-pipeline latency. Often the answer is
   a downstream dependency, not the app itself.
-- **Connection queue growing** → thread-pool starvation. `collect_event_source`
+- **Connection queue growing** → thread-pool starvation. `collect_events(kind="event_source")`
   with `Microsoft-System-Threading` (or `Microsoft-System-Threading-Tasks-TplEventSource`)
   shows queued/completed tasks per second.
 
@@ -50,7 +50,7 @@ Call `snapshot_counters` with default providers for 5 s. Look at:
 ## 2. "Memory keeps growing"
 
 ### Step 1
-`snapshot_counters` for 15 s. Compare:
+`collect_events(kind="counters")` for 15 s. Compare:
 
 - `System.Runtime/working-set`
 - `System.Runtime/gc-heap-size`
@@ -62,7 +62,7 @@ A steadily-growing `gen-2-size` with a flat `working-set` is leak-shaped; both
 growing is more like fragmentation or unmanaged growth.
 
 ### Step 2
-`collect_gc_events` for 15–30 s. If gen-2 collections happen but `gen-2-size`
+`collect_events(kind="gc")` for 15–30 s. If gen-2 collections happen but `gen-2-size`
 doesn't drop, you have surviving objects (leak or long-lived cache).
 
 ### Step 3
@@ -88,11 +88,11 @@ that aren't in the sidecar image.
 ## 3. "We're seeing 5xxs in production"
 
 ### Step 1
-`collect_exceptions` for 30 s. Inspect `byType` to find the dominant exception
+`collect_events(kind="exceptions")` for 30 s. Inspect `byType` to find the dominant exception
 type, then look at `recent` to read messages and HRESULTs.
 
 ### Step 2
-For first-chance vs unhandled differentiation, also call `collect_event_source`
+For first-chance vs unhandled differentiation, also call `collect_events(kind="event_source")`
 with `providerName = "Microsoft-Extensions-Logging"`. This catches structured
 log entries the app considers "handled" so you can correlate.
 
@@ -106,7 +106,7 @@ thread stacks and locals.
 ## 4. "Slow outbound HTTP calls"
 
 ### Step 1
-`collect_event_source` with `providerName = "System.Net.Http"`,
+`collect_events(kind="event_source")` with `providerName = "System.Net.Http"`,
 `durationSeconds = 30`. Look at `events` for `RequestStart` / `RequestStop`
 pairs — most clients emit timing on the stop event payload.
 
@@ -119,7 +119,7 @@ client-induced.
 
 ## 5. "Is this a NativeAOT app?"
 
-`get_diagnostic_capabilities` returns `runtime: "NativeAot"`. On NativeAOT:
+`inspect_process(view="capabilities")` returns `runtime: "NativeAot"`. On NativeAOT:
 
 - ✅ counters, exceptions, GC events, custom EventSources, dumps all work
 - ❌ `collect_sample(kind="cpu")` returns no hotspots on EventPipe (SampleProfiler is CoreCLR-only); the NativeAOT Linux fallback routes through `perf record`
@@ -135,9 +135,9 @@ host. We may add a `perf`-based collector in the future (see plan, Phase 7).
 
 Order of escalation from cheapest to most disruptive:
 
-1. `get_process_info`, `get_diagnostic_capabilities` — passive metadata
-2. `snapshot_counters` — small EventPipe session, low overhead
-3. `collect_event_source` / `collect_exceptions` / `collect_gc_events` — EventPipe sessions sized by `durationSeconds`
+1. `inspect_process(view="info")`, `inspect_process(view="capabilities")` — passive metadata
+2. `collect_events(kind="counters")` — small EventPipe session, low overhead
+3. `collect_events(kind="event_source")` / `collect_events(kind="exceptions")` / `collect_events(kind="gc")` — EventPipe sessions sized by `durationSeconds`
 4. `collect_sample(kind="cpu")` — same family as 3 but specifically uses the SampleProfiler at ~1 kHz
 5. `collect_process_dump dumpType=Mini` — pauses the process briefly while the kernel reads memory
 6. `collect_process_dump dumpType=WithHeap` or `Full` — can pause the process for seconds and writes hundreds of MB to disk
@@ -153,8 +153,8 @@ instance" investigations.
 When wiring `dotnet-diagnostics-mcp` into an LLM-driven agent, encode this priority as
 a system message:
 
-> Always call `get_diagnostic_capabilities` before any window-bound tool.
-> Prefer `snapshot_counters` as the first observation; only escalate to CPU
+> Always call `inspect_process(view="capabilities")` before any window-bound tool.
+> Prefer `collect_events(kind="counters")` as the first observation; only escalate to CPU
 > sampling, GC events, or dumps when the counters point in that direction.
 > Never call `collect_process_dump` with `dumpType=Full` without explicit
 > human approval.

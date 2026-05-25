@@ -60,7 +60,7 @@ Per `AGENTS.md`, the socket inherits the **target process UID**. A diagnostics p
 
 ### 3.2 ClrMD-backed tools need extra privilege on Linux
 
-`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` against a live PID, and `collect_process_dump` attach via `ptrace(2)`.
+`collect_thread_snapshot`, `inspect_heap(source="live")`, `inspect_heap(source="dump")` against a live PID, and `collect_process_dump` attach via `ptrace(2)`.
 
 Per `AGENTS.md`, on hosts with `kernel.yama.ptrace_scope=1` the diagnostics container needs `CAP_SYS_PTRACE` even when the UID already matches.
 
@@ -334,7 +334,7 @@ Ship the first end-to-end namespace-scoped central topology recipe.
 
 - Static manifest validation.
 - Human-run walkthrough against kind or Docker Desktop.
-- Smoke test: attach to one sample Pod, call `list_dotnet_processes`, verify session scoping.
+- Smoke test: attach to one sample Pod, call `inspect_process(view="list")`, verify session scoping.
 
 ### Phase 5: kind-based integration test (optional but recommended)
 
@@ -357,7 +357,7 @@ Prove the full control/data-plane loop inside CI-like conditions.
 - Bring up a kind cluster.
 - Deploy two target replicas in one namespace.
 - Attach to exactly one Pod by selector or explicit name.
-- Run `list_dotnet_processes` and one cheap diagnostic call through the orchestrator.
+- Run `inspect_process(view="list")` and one cheap diagnostic call through the orchestrator.
 - Assert the returned process set belongs only to the chosen Pod.
 
 ## 9. Tradeoffs we are explicitly accepting

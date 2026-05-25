@@ -22,7 +22,6 @@ using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Threads;
 using DotnetDiagnosticsMcp.Server.Security;
 using DotnetDiagnosticsMcp.Server.Diagnostics;
-using DotnetDiagnosticsMcp.Server.Tools.Deprecation;
 using Microsoft.Diagnostics.NETCore.Client;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -39,14 +38,6 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 public sealed class DiagnosticTools
 {
     [RequireScope("read-counters")]
-    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"list\") instead.")]
-    [McpServerTool(
-        Name = "list_dotnet_processes",
-        Title = "List local .NET processes",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Lists all .NET processes on the local machine that expose a Diagnostic IPC endpoint. " +
         "Returns process id, runtime version, OS, architecture and the managed entrypoint assembly. " +
@@ -59,7 +50,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Ok(
                 processes,
                 "No attachable .NET processes found. If the target runs in a container, make sure the sidecar shares its PID namespace and runs as the same UID.",
-                new NextActionHint("get_diagnostic_capabilities", "Re-run once the target is up to confirm the runtime exposes a diagnostic endpoint."));
+                new NextActionHint("inspect_process", "Re-run once the target is up to confirm the runtime exposes a diagnostic endpoint."));
         }
 
         var preview = string.Join(", ", processes.Take(3).Select(p => $"{p.ProcessId}={p.ManagedEntrypointAssemblyName ?? "?"}"));
@@ -73,14 +64,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("read-counters")]
-    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"info\", processId=…) instead.")]
-    [McpServerTool(
-        Name = "get_process_info",
-        Title = "Get .NET process info",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Returns metadata for a single .NET process identified by its OS process id, " +
         "or an error result if the process is not running or does not expose a diagnostic endpoint. " +
@@ -101,26 +84,18 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<DotnetProcess>(
                 $"No .NET process with id {resolved.ProcessId} exposes a diagnostic endpoint.",
                 new DiagnosticError("ProcessNotFound", $"Process id {resolved.ProcessId} is not visible to the diagnostic IPC."),
-                new NextActionHint("list_dotnet_processes", "List attachable .NET processes and pick a valid pid."));
+                new NextActionHint("inspect_process", "List attachable .NET processes and pick a valid pid."));
         }
 
         var result = DiagnosticResult.Ok(
             process,
             $"Process {process.ProcessId} — {process.ManagedEntrypointAssemblyName ?? "<unknown>"} on .NET {process.RuntimeVersion} ({process.OperatingSystem}/{process.ProcessArchitecture}).",
-            new NextActionHint("snapshot_counters", "Cheap first signal: CPU/memory/GC/thread-pool sweep before any sampling.",
+            new NextActionHint("collect_events", "Cheap first signal: CPU/memory/GC/thread-pool sweep before any sampling.",
                 new Dictionary<string, object?> { ["processId"] = process.ProcessId, ["durationSeconds"] = 5 }));
         return WithContext(result, resolved.Context);
     }
 
     [RequireScope("read-counters")]
-    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"capabilities\", processId=…) instead.")]
-    [McpServerTool(
-        Name = "get_diagnostic_capabilities",
-        Title = "Detect diagnostic capabilities",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Probes the target process to determine which diagnostic tools the server can use against it. " +
         "Detects CoreCLR vs NativeAOT (NativeAOT lacks CPU sampling and gcdump) and returns a capability matrix. " +
@@ -141,9 +116,9 @@ public sealed class DiagnosticTools
         {
             var caps = await detector.DetectAsync(resolved.ProcessId, cancellationToken).ConfigureAwait(false);
             var hint = caps.CanSampleCpu
-                ? new NextActionHint("snapshot_counters", "Cheap first signal: CPU/memory/GC/thread-pool. Run before reaching for sampling.",
+                ? new NextActionHint("collect_events", "Cheap first signal: CPU/memory/GC/thread-pool. Run before reaching for sampling.",
                     new Dictionary<string, object?> { ["processId"] = resolved.ProcessId, ["durationSeconds"] = 5 })
-                : new NextActionHint("snapshot_counters", "NativeAOT: CPU sampling unavailable. Counters + EventSource + dumps still work.",
+                : new NextActionHint("collect_events", "NativeAOT: CPU sampling unavailable. Counters + EventSource + dumps still work.",
                     new Dictionary<string, object?> { ["processId"] = resolved.ProcessId, ["durationSeconds"] = 5 });
 
             var ok = DiagnosticResult.Ok(
@@ -157,19 +132,11 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<DiagnosticCapabilities>(
                 $"Diagnostic socket for process {resolved.ProcessId} is not reachable.",
                 new DiagnosticError("EndpointUnavailable", ex.Message, ex.GetType().FullName),
-                new NextActionHint("list_dotnet_processes", "Re-list processes. Common cause: sidecar UID mismatch with target."));
+                new NextActionHint("inspect_process", "Re-list processes. Common cause: sidecar UID mismatch with target."));
         }
     }
 
     [RequireScope("read-counters")]
-    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"container\", processId=…) instead.")]
-    [McpServerTool(
-        Name = "get_container_signals",
-        Title = "Read cgroup v2 container signals (CPU throttling, memory, PSI)",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Reads Linux cgroup v2 files for the target process: cpu.stat (throttling), cpu.max (quota), " +
         "memory.current / memory.max / memory.events (OOM kills), cpu/memory/io.pressure (PSI), pids and " +
@@ -238,7 +205,7 @@ public sealed class DiagnosticTools
         {
             return new[]
             {
-                new NextActionHint("collect_cpu_sample",
+                new NextActionHint("collect_sample",
                     $"CPU throttling > 5% ({cpu.ThrottlePercent:F1}% of periods). Sample on-CPU stacks to see which code is hitting the quota.",
                     new Dictionary<string, object?> { ["processId"] = s.ProcessId, ["durationSeconds"] = 10 }),
             };
@@ -247,7 +214,7 @@ public sealed class DiagnosticTools
         {
             return new[]
             {
-                new NextActionHint("inspect_live_heap",
+                new NextActionHint("inspect_heap",
                     $"Memory at {(mem.UsageFraction ?? 0) * 100:F0}% of limit. Inspect the live heap to identify the dominant retainers before the cgroup OOM-kills.",
                     new Dictionary<string, object?> { ["processId"] = s.ProcessId, ["topTypes"] = 25 }),
             };
@@ -256,28 +223,20 @@ public sealed class DiagnosticTools
         {
             return new[]
             {
-                new NextActionHint("snapshot_counters",
+                new NextActionHint("collect_events",
                     "Not in a container envelope — runtime EventCounters remain the cheapest first signal.",
                     new Dictionary<string, object?> { ["processId"] = s.ProcessId, ["durationSeconds"] = 5 }),
             };
         }
         return new[]
         {
-            new NextActionHint("snapshot_counters",
+            new NextActionHint("collect_events",
                 "No kernel-level pressure detected. Move up the stack to runtime counters.",
                 new Dictionary<string, object?> { ["processId"] = s.ProcessId, ["durationSeconds"] = 5 }),
         };
     }
 
     [RequireScope("read-counters")]
-    [DeprecatedTool("inspect_process", "0.9.0", Note = "Call inspect_process(view=\"memory_trend\", processId=…) instead.")]
-    [McpServerTool(
-        Name = "get_memory_trend",
-        Title = "Sample process memory growth over a window",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Samples OS-level memory metrics (RSS, PSS, anonymous/private pages, page faults) " +
         "at regular intervals over a configurable window, then computes per-second deltas and a " +
@@ -338,16 +297,16 @@ public sealed class DiagnosticTools
         var hints = trend.Verdict == "growing"
             ? new[]
             {
-                new NextActionHint("inspect_live_heap",
+                new NextActionHint("inspect_heap",
                     $"RSS growing at {rssMiB:F2} MiB/s — inspect the live heap to identify dominant retainers.",
                     new Dictionary<string, object?> { ["processId"] = pid, ["topTypes"] = 25 }),
-                new NextActionHint("get_container_signals",
+                new NextActionHint("inspect_process",
                     "Cross-check memory against cgroup limits before concluding it is a leak.",
                     new Dictionary<string, object?> { ["processId"] = pid }),
             }
             : new[]
             {
-                new NextActionHint("snapshot_counters",
+                new NextActionHint("collect_events",
                     "Memory looks stable — check runtime counters for CPU/GC pressure.",
                     new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 5 }),
             };
@@ -357,14 +316,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("read-counters")]
-    [DeprecatedTool("collect_events", "0.7.0", Note = "Call collect_events(kind=\"counters\", ...) instead.")]
-    [McpServerTool(
-        Name = "snapshot_counters",
-        Title = "Snapshot EventCounters",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Collects EventCounters from the target process over a fixed time window and returns the " +
         "latest value seen per counter. Default providers cover the .NET runtime, ASP.NET Core hosting " +
@@ -411,9 +362,9 @@ public sealed class DiagnosticTools
         var cpu = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "cpu-usage");
         var heap = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "gc-heap-size");
         var hint = (cpu?.Value ?? 0) >= 70
-            ? new NextActionHint("collect_cpu_sample", $"cpu-usage={cpu!.Value:F1}% over {durationSeconds}s — investigate the hot path.",
+            ? new NextActionHint("collect_sample", $"cpu-usage={cpu!.Value:F1}% over {durationSeconds}s — investigate the hot path.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10, ["topN"] = 25 })
-            : new NextActionHint("collect_gc_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
+            : new NextActionHint("collect_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
         // The handle always carries the FULL snapshot (query_collection drilldown stays cheap),
@@ -439,22 +390,13 @@ public sealed class DiagnosticTools
             handle.Id,
             handle.ExpiresAt,
             hint,
-            new NextActionHint("query_collection",
+            new NextActionHint("query_snapshot",
                 "Drill into this counter snapshot without re-collecting (views: summary, byProvider).",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byProvider" }));
         return WithContext(ok, resolved.Context);
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_sample", "0.9.0", Note = "Call collect_sample(kind=\"cpu\", ...) instead.")]
-    [McpServerTool(
-        Name = "collect_cpu_sample",
-        Title = "Collect CPU sample",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true,
-        TaskSupport = ToolTaskSupport.Optional)]
     [Description(
         "Captures a CPU sample from the target process and returns the top-N hotspots aggregated by method. " +
         "On CoreCLR uses EventPipe SampleProfiler (managed frames with mvid+token handoff). " +
@@ -543,7 +485,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<CpuSample>(
                 ex.Message,
                 new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
-                new NextActionHint("get_diagnostic_capabilities", "Check capability matrix to confirm what's available for this process.",
+                new NextActionHint("inspect_process", "Check capability matrix to confirm what's available for this process.",
                     new Dictionary<string, object?> { ["processId"] = pid }));
         }
         catch (Exception ex) when (resolveMethodInstantiations && ex is not OperationCanceledException)
@@ -559,22 +501,14 @@ public sealed class DiagnosticTools
             handle.Id,
             handle.ExpiresAt,
             depth,
-            new NextActionHint("get_call_tree", "Walk the merged caller→callee tree built from the same samples.",
+            new NextActionHint("query_snapshot", "Walk the merged caller→callee tree built from the same samples.",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }),
-            new NextActionHint("collect_exceptions", "Confirm hot path isn't driven by exception-heavy control flow.",
+            new NextActionHint("collect_events", "Confirm hot path isn't driven by exception-heavy control flow.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 }));
         return WithContext(ok, ctx);
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_sample", "0.9.0", Note = "Call collect_sample(kind=\"allocation\", ...) instead.")]
-    [McpServerTool(
-        Name = "collect_allocation_sample",
-        Title = "Collect allocation sample",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Captures allocation samples from the target process and returns the top-N types by total allocated bytes " +
         "and by event count. Uses GCAllocationTick events from Microsoft-Windows-DotNETRuntime (GCKeyword=0x1, Verbose), " +
@@ -612,7 +546,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<AllocationSample>(
                 ex.Message,
                 new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
-                new NextActionHint("get_diagnostic_capabilities", "Check capability matrix to confirm what's available for this process.",
+                new NextActionHint("inspect_process", "Check capability matrix to confirm what's available for this process.",
                     new Dictionary<string, object?> { ["processId"] = pid }));
         }
 
@@ -637,24 +571,16 @@ public sealed class DiagnosticTools
             summaryText,
             handle.Id,
             handle.ExpiresAt,
-            new NextActionHint("get_call_tree", "Walk the merged allocation call-site tree to find which code paths are allocating the most.",
+            new NextActionHint("query_snapshot", "Walk the merged allocation call-site tree to find which code paths are allocating the most.",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["maxDepth"] = 8, ["maxNodes"] = 200 }),
-            new NextActionHint("collect_cpu_sample", "Cross-reference: identify hot CPU paths that correlate with the top allocating types.",
+            new NextActionHint("collect_sample", "Cross-reference: identify hot CPU paths that correlate with the top allocating types.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }),
-            new NextActionHint("collect_gc_events", "Observe GC pause frequency and generation distribution caused by this allocation load.",
+            new NextActionHint("collect_events", "Observe GC pause frequency and generation distribution caused by this allocation load.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }));
         return WithContext(ok, ctx);
     }
 
     [RequireScope("investigation-export")]
-    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=\"call-tree\") instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
-    [McpServerTool(
-        Name = "get_call_tree",
-        Title = "Drill into CPU sample call tree",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Returns a pruned caller→callee tree from a prior collect_cpu_sample or collect_allocation_sample run, " +
         "addressed by its handle. Frames are enriched with MethodIdentity (MVID + metadata token) when the producer captured one. " +
@@ -678,7 +604,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<CallTreeView>(
                 $"Handle '{handle}' is unknown or expired.",
                 new DiagnosticError("HandleExpired", "Drill-down handles live ~10min and are invalidated when the target process exits.", handle),
-                new NextActionHint("collect_cpu_sample", "Re-run the sampler on the same pid to issue a fresh handle.",
+                new NextActionHint("collect_sample", "Re-run the sampler on the same pid to issue a fresh handle.",
                     new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
         }
 
@@ -691,7 +617,7 @@ public sealed class DiagnosticTools
                 return DiagnosticResult.Fail<CallTreeView>(
                     $"No frame matching '{rootMethodFilter}' in handle '{handle}'.",
                     new DiagnosticError("NotFound", "No frame in the merged call tree contains the supplied substring.", rootMethodFilter),
-                    new NextActionHint("get_call_tree", "Re-issue without rootMethodFilter to inspect the full tree first.",
+                    new NextActionHint("query_snapshot", "Re-issue without rootMethodFilter to inspect the full tree first.",
                         new Dictionary<string, object?> { ["handle"] = handle, ["maxDepth"] = maxDepth, ["maxNodes"] = maxNodes }));
             }
             root = match;
@@ -706,19 +632,11 @@ public sealed class DiagnosticTools
         return DiagnosticResult.Ok(
             view,
             summary,
-            new NextActionHint("get_call_tree", "Drill deeper by anchoring at a specific method.",
+            new NextActionHint("query_snapshot", "Drill deeper by anchoring at a specific method.",
                 new Dictionary<string, object?> { ["handle"] = handle, ["rootMethodFilter"] = "<method substring>", ["maxDepth"] = 6 }));
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_sample", "0.9.0", Note = "Call collect_sample(kind=\"off_cpu\", ...) instead.")]
-    [McpServerTool(
-        Name = "collect_off_cpu_sample",
-        Title = "Collect off-CPU blocking stacks",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Captures off-CPU stacks for the target process — where threads are blocked, for how long, and on which " +
         "kernel/user frame. Companion to collect_cpu_sample: on-CPU sampling shows hot code, off-CPU shows time " +
@@ -765,7 +683,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<OffCpuSnapshot>(
                 ex.Message,
                 new DiagnosticError("NotSupported", ex.Message, ex.GetType().FullName),
-                new NextActionHint("get_diagnostic_capabilities",
+                new NextActionHint("inspect_process",
                     "Confirm which signals are available on this host before retrying.",
                     new Dictionary<string, object?> { ["processId"] = pid }));
         }
@@ -774,10 +692,10 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<OffCpuSnapshot>(
                 $"collect_off_cpu_sample could not start NT Kernel Logger capture for pid {pid}: Windows denied access to the ContextSwitch provider.",
                 new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
-                new NextActionHint("get_diagnostic_capabilities",
+                new NextActionHint("inspect_process",
                     "After granting either BUILTIN\\Administrators membership or SeSystemProfilePrivilege ('Profile system performance') to the sidecar account and restarting the Windows service, re-check capabilities before retrying.",
                     new Dictionary<string, object?> { ["processId"] = pid }),
-                new NextActionHint("collect_off_cpu_sample",
+                new NextActionHint("collect_sample",
                     "Retry after the sidecar account has one of the two supported Windows paths: BUILTIN\\Administrators membership or SeSystemProfilePrivilege ('Profile system performance').",
                     new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds, ["topN"] = topN }));
         }
@@ -788,7 +706,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<OffCpuSnapshot>(
                 ex.Message,
                 new DiagnosticError("PermissionDenied", ex.Message, ex.GetType().FullName),
-                new NextActionHint("get_diagnostic_capabilities",
+                new NextActionHint("inspect_process",
                     "Check capability matrix; install linux-perf and add CAP_PERFMON to the sidecar securityContext.",
                     new Dictionary<string, object?> { ["processId"] = pid }));
         }
@@ -823,9 +741,9 @@ public sealed class DiagnosticTools
             summaryText,
             handle.Id,
             handle.ExpiresAt,
-            new NextActionHint("query_off_cpu_snapshot", "Drill into per-thread off-CPU view or a specific stack.",
+            new NextActionHint("query_snapshot", "Drill into per-thread off-CPU view or a specific stack.",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byThread" }),
-            new NextActionHint("collect_cpu_sample", "Cross-reference with on-CPU hotspots to separate compute from wait.",
+            new NextActionHint("collect_sample", "Cross-reference with on-CPU hotspots to separate compute from wait.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 }));
         return WithContext(ok, resolved.Context);
     }
@@ -834,14 +752,6 @@ public sealed class DiagnosticTools
     public const string OffCpuHandleKind = "off-cpu-snapshot";
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=topStacks|byThread|stack) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
-    [McpServerTool(
-        Name = "query_off_cpu_snapshot",
-        Title = "Drill into an off-CPU snapshot",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Re-projects a prior collect_off_cpu_sample artifact under a named view, without re-running perf. " +
         "Views: 'topStacks' (default — blocking stacks ranked by off-CPU micros), 'byThread' (per-TID rollup), " +
@@ -863,7 +773,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<OffCpuQueryView>(
                 $"Handle '{handle}' is unknown or expired.",
                 new DiagnosticError("HandleExpired", "Off-CPU handles live ~10min and are invalidated when the target process exits.", handle),
-                new NextActionHint("collect_off_cpu_sample", "Re-run the off-CPU sampler to issue a fresh handle.",
+                new NextActionHint("collect_sample", "Re-run the off-CPU sampler to issue a fresh handle.",
                     new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
         }
 
@@ -897,7 +807,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<OffCpuQueryView>(
                 $"stackRank={stackRank} exceeds available {artifact.Stacks.Count} stacks.",
                 new DiagnosticError("OutOfRange", "Pick a rank within the topStacks list.", stackRank.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                new NextActionHint("query_off_cpu_snapshot", "List the top stacks first.",
+                new NextActionHint("query_snapshot", "List the top stacks first.",
                     new Dictionary<string, object?> { ["view"] = "topStacks" }));
         }
         var s = artifact.Stacks[idx];
@@ -943,14 +853,6 @@ public sealed class DiagnosticTools
     private static readonly TimeSpan CollectionHandleTtl = TimeSpan.FromMinutes(10);
 
     [RequireAnyScope("read-counters", "eventpipe")]
-    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=...) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
-    [McpServerTool(
-        Name = "query_collection",
-        Title = "Drill into a previously-collected artifact",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Re-projects a previously-collected counter/exception/GC/EventSource/Activity artifact under a " +
         "named view, without re-running the underlying EventPipe session. Use the `handle` " +
@@ -977,7 +879,7 @@ public sealed class DiagnosticTools
                     "HandleExpired",
                     "Collection handles live ~10min and are invalidated when the target process exits.",
                     handle),
-                new NextActionHint("snapshot_counters", "Re-run the original collector on the same pid to issue a fresh handle.", null));
+                new NextActionHint("collect_events", "Re-run the original collector on the same pid to issue a fresh handle.", null));
         }
 
         var outcome = CollectionQueryDispatcher.Dispatch(entry.Value.Kind, view, entry.Value.Artifact, topN);
@@ -990,7 +892,7 @@ public sealed class DiagnosticTools
                     "UnsupportedHandleKind",
                     $"query_collection dispatches over kinds: {string.Join(", ", new[] { CollectionHandleKinds.Counters, CollectionHandleKinds.ExceptionSnapshot, CollectionHandleKinds.GcEvents, CollectionHandleKinds.EventSource, CollectionHandleKinds.Activities })}.",
                     outcome.UnknownKind),
-                new NextActionHint("query_heap_snapshot", "Use the kind-specific drill-down tool for heap/thread/cpu handles.", null));
+                new NextActionHint("query_snapshot", "Use the kind-specific drill-down tool for heap/thread/cpu handles.", null));
         }
         if (outcome.UnknownView is not null)
         {
@@ -1001,7 +903,7 @@ public sealed class DiagnosticTools
                     "UnknownView",
                     $"Allowed views: {string.Join(", ", allowed)}.",
                     outcome.UnknownView),
-                new NextActionHint("query_collection", "Retry with one of the allowed views.",
+                new NextActionHint("query_snapshot", "Retry with one of the allowed views.",
                     new Dictionary<string, object?> { ["handle"] = handle, ["view"] = allowed.Count > 0 ? allowed[0] : "summary" }));
         }
         if (outcome.InvalidArgument is not null)
@@ -1015,7 +917,7 @@ public sealed class DiagnosticTools
         return DiagnosticResult.Ok(
             result,
             $"Rendered view '{result.View}' for kind '{result.Kind}' (collected {result.Duration.TotalSeconds:F1}s starting {result.StartedAt:HH:mm:ss}Z, pid {result.ProcessId}).",
-            new NextActionHint("query_collection",
+            new NextActionHint("query_snapshot",
                 $"Switch to another view: {string.Join(" | ", CollectionQueryDispatcher.ViewsFor(result.Kind))}.",
                 new Dictionary<string, object?> { ["handle"] = handle }));
     }
@@ -1081,15 +983,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_events", "0.7.0", Note = "Call collect_events(kind=\"exceptions\", ...) instead.")]
-    [McpServerTool(
-        Name = "collect_exceptions",
-        Title = "Collect managed exceptions",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true,
-        TaskSupport = ToolTaskSupport.Optional)]
     [Description(
         "Subscribes to the runtime Exception keyword on Microsoft-Windows-DotNETRuntime and " +
         "captures every managed exception thrown by the target process during the window. " +
@@ -1135,9 +1028,9 @@ public sealed class DiagnosticTools
                 : $"{snap.TotalExceptions} exception(s) over {durationSeconds}s; most common: {topType?.ExceptionType} ({topType?.Count}).");
 
         var primaryHint = snap.TotalExceptions > 0
-            ? new NextActionHint("collect_event_source", "Subscribe to a domain-specific EventSource to correlate with the exception spikes.",
+            ? new NextActionHint("collect_events", "Subscribe to a domain-specific EventSource to correlate with the exception spikes.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 })
-            : new NextActionHint("collect_gc_events", "No exception pressure — sweep GC events next.",
+            : new NextActionHint("collect_events", "No exception pressure — sweep GC events next.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
 
         var handle = handles.Register(pid, CollectionHandleKinds.ExceptionSnapshot, snap, CollectionHandleTtl);
@@ -1147,22 +1040,13 @@ public sealed class DiagnosticTools
             handle.Id,
             handle.ExpiresAt,
             primaryHint,
-            new NextActionHint("query_collection",
+            new NextActionHint("query_snapshot",
                 "Drill into this exception snapshot without re-collecting (views: summary, byType, recent).",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byType", ["topN"] = 20 })),
             resolved.Context);
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_events", "0.7.0", Note = "Call collect_events(kind=\"gc\", ...) instead.")]
-    [McpServerTool(
-        Name = "collect_gc_events",
-        Title = "Collect GC events",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true,
-        TaskSupport = ToolTaskSupport.Optional)]
     [Description(
         "Subscribes to the runtime GC keyword and pairs GCStart/GCStop events to compute pause " +
         "durations per collection. Returns total collections, total/max pause time, counts per " +
@@ -1206,7 +1090,7 @@ public sealed class DiagnosticTools
             ? new NextActionHint("collect_process_dump",
                 $"Max GC pause {gc.MaxPauseTime.TotalMilliseconds:F0}ms is high — capture a WithHeap dump for offline heap analysis.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["dumpType"] = "WithHeap" })
-            : new NextActionHint("collect_event_source", "GC looks healthy — pivot to a domain EventSource (e.g. System.Net.Http) for application-level signal.",
+            : new NextActionHint("collect_events", "GC looks healthy — pivot to a domain EventSource (e.g. System.Net.Http) for application-level signal.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["providerName"] = "System.Net.Http", ["durationSeconds"] = 10 });
 
         var handle = handles.Register(pid, CollectionHandleKinds.GcEvents, gc, CollectionHandleTtl);
@@ -1216,21 +1100,13 @@ public sealed class DiagnosticTools
             handle.Id,
             handle.ExpiresAt,
             primaryHint,
-            new NextActionHint("query_collection",
+            new NextActionHint("query_snapshot",
                 "Drill into these GC events without re-collecting (views: summary, events, pauseHistogram).",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "pauseHistogram" })),
             resolved.Context);
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_events", "0.7.0", Note = "Call collect_events(kind=\"activities\", ...) instead.")]
-    [McpServerTool(
-        Name = "collect_activities",
-        Title = "Capture ActivitySource traces",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Captures completed ActivitySource spans via the Microsoft-Diagnostics-DiagnosticSource EventPipe bridge. " +
         "Enables the runtime provider with FilterAndPayloadSpecs, extracts operation/trace/span ids, parent linkage, tags, and duration from Activity stop events, aggregates them by source and operation, " +
@@ -1267,10 +1143,10 @@ public sealed class DiagnosticTools
               (truncated ? $" Truncated by maxActivities={maxActivities}; summaries reflect the stored subset." : string.Empty);
 
         var primaryHint = topOperation is { MaxDurationMs: > 250 }
-            ? new NextActionHint("collect_cpu_sample",
+            ? new NextActionHint("collect_sample",
                 $"Correlate the slowest captured operation ({topOperation.SourceName}/{topOperation.OperationName}, max {topOperation.MaxDurationMs:F1} ms) with CPU hotspots in the same process.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 })
-            : new NextActionHint("snapshot_counters",
+            : new NextActionHint("collect_events",
                 "Cross-check ActivitySource timing with runtime counters for the same process.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds });
 
@@ -1281,21 +1157,13 @@ public sealed class DiagnosticTools
             handle.Id,
             handle.ExpiresAt,
             primaryHint,
-            new NextActionHint("query_collection",
+            new NextActionHint("query_snapshot",
                 "Drill into these activities without re-collecting (views: summary, bySource, byOperation, activities).",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byOperation" })),
             resolved.Context);
     }
 
     [RequireScope("eventpipe")]
-    [DeprecatedTool("collect_events", "0.7.0", Note = "Call collect_events(kind=\"event_source\", providerName=...) instead.")]
-    [McpServerTool(
-        Name = "collect_event_source",
-        Title = "Capture custom EventSource",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Generic EventSource passthrough: opens an EventPipe session for a single EventSource " +
         "by name (e.g. System.Net.Http, Microsoft.AspNetCore.Hosting, Microsoft-AspNetCore-Server-Kestrel, " +
@@ -1402,9 +1270,9 @@ public sealed class DiagnosticTools
             summary,
             handle.Id,
             handle.ExpiresAt,
-            new NextActionHint("snapshot_counters", "Cross-check captured events against runtime counters for the same window.",
+            new NextActionHint("collect_events", "Cross-check captured events against runtime counters for the same window.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = durationSeconds }),
-            new NextActionHint("query_collection",
+            new NextActionHint("query_snapshot",
                 "Drill into this capture without re-collecting (views: summary, byEventName, events).",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byEventName" })),
             resolved.Context);
@@ -1500,10 +1368,10 @@ public sealed class DiagnosticTools
         {
             var dump = await dumper.WriteDumpAsync(pid, dumpType, outputDirectory, cancellationToken).ConfigureAwait(false);
             var hint = dumpType == ProcessDumpType.Mini
-                ? new NextActionHint("inspect_dump",
+                ? new NextActionHint("inspect_heap",
                     "Mini dump captured — heap walk unavailable. Re-capture with dumpType='WithHeap' for full inspection.",
                     new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath })
-                : new NextActionHint("inspect_dump",
+                : new NextActionHint("inspect_heap",
                     "Inspect the dump's managed heap for top-retained types + handoff payload to dotnet-assembly-mcp.",
                     new Dictionary<string, object?> { ["dumpFilePath"] = dump.FilePath, ["topTypes"] = 20 });
             var payload = new DumpToolResult
@@ -1522,14 +1390,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("heap-read")]
-    [DeprecatedTool("inspect_heap", "0.7.0", Note = "Call inspect_heap(source=\"dump\", dumpFilePath=...) instead. Same backend, identical envelope (RFC 0002 / #206).")]
-    [McpServerTool(
-        Name = "inspect_dump",
-        Title = "Inspect a process dump's managed heap",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Walks the managed heap of a previously-captured WithHeap/Full dump (produced by " +
         "collect_process_dump or any compatible source) using ClrMD. Returns aggregated runtime/heap " +
@@ -1622,14 +1482,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("heap-read", "ptrace")]
-    [DeprecatedTool("inspect_heap", "0.7.0", Note = "Call inspect_heap(source=\"live\", processId=...) instead. Same backend, identical envelope (RFC 0002 / #206).")]
-    [McpServerTool(
-        Name = "inspect_live_heap",
-        Title = "Inspect a live .NET process's managed heap",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = false,
-        UseStructuredContent = true)]
     [Description(
         "Attaches to a live .NET process via ClrMD and walks its managed heap WITHOUT writing a dump file. " +
         "Returns the same top-N type / retention information as inspect_dump but skips the disk I/O of " +
@@ -1695,14 +1547,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("heap-read")]
-    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=top-types|retention-paths|...) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
-    [McpServerTool(
-        Name = "query_heap_snapshot",
-        Title = "Drill into a heap snapshot",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Returns a slice of a heap snapshot previously captured by inspect_dump or inspect_live_heap, addressed by its handle. " +
         "Lets the LLM ask for a richer top-N (snapshot retains ~200 types), retention paths filtered by type substring, " +
@@ -1746,7 +1590,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<HeapSnapshotQueryResult>(
                 $"Handle '{handle}' is unknown or expired.",
                 new DiagnosticError("HandleExpired", "Heap snapshot handles live ~10min and are invalidated when the target process exits.", handle),
-                new NextActionHint("inspect_live_heap", "Re-attach and re-walk to issue a fresh handle.",
+                new NextActionHint("inspect_heap", "Re-attach and re-walk to issue a fresh handle.",
                     new Dictionary<string, object?> { ["processId"] = "<pid>" }));
         }
 
@@ -1964,7 +1808,7 @@ public sealed class DiagnosticTools
                 new DiagnosticError("RetentionPathsMissing",
                     "Re-run inspect_dump or inspect_live_heap with includeRetentionPaths=true to populate the snapshot's retention data.",
                     handle),
-                new NextActionHint("inspect_live_heap",
+                new NextActionHint("inspect_heap",
                     "Re-walk with includeRetentionPaths=true to populate retention chains for the top retained types.",
                     new Dictionary<string, object?> { ["processId"] = snapshot.ProcessId, ["includeRetentionPaths"] = true }));
         }
@@ -2266,11 +2110,11 @@ public sealed class DiagnosticTools
             }
 
             var hint = contended > 0
-                ? new NextActionHint("query_thread_snapshot",
+                ? new NextActionHint("query_snapshot",
                     "Check the captured lock graph for wait-for cycles before drilling into individual stacks.",
                     new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "deadlocks" })
                 : blocked > 0
-                    ? new NextActionHint("query_thread_snapshot",
+                    ? new NextActionHint("query_snapshot",
                         "Drill into the top blocked threads.",
                         new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "top-blocked" })
                     : null;
@@ -2409,15 +2253,6 @@ public sealed class DiagnosticTools
             });
     }
 
-    [Deprecation.DeprecatedTool("get_bytes", "Removed in next minor")]
-    [RequireScope("module-bytes-read")]
-    [McpServerTool(
-        Name = "get_module_bytes",
-        Title = "Fetch a module PE or PDB as byte chunks",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Streams a PE or PDB for a loaded managed module in repeated CallTool chunks so sibling MCPs can materialise pod-local binaries through the orchestrator proxy. " +
         "Resolve the module by ModuleVersionId (GUID 'D'); asset defaults to 'pe'. For PDBs the tool prefers a sibling .pdb next to the module, then falls back to an embedded portable PDB inside the PE. " +
@@ -2474,15 +2309,6 @@ public sealed class DiagnosticTools
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    [Deprecation.DeprecatedTool("get_bytes", "Removed in next minor")]
-    [RequireScope("module-bytes-read")]
-    [McpServerTool(
-        Name = "get_dump_bytes",
-        Title = "Fetch a dump file as byte chunks",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Streams a dump file under the artifact root in repeated CallTool chunks so sibling MCPs can materialise pod-local dumps through the orchestrator proxy. dumpFilePath may be relative to MCP_ARTIFACT_ROOT or absolute when it still resolves under that root after symlink resolution. " +
         "Path hints are untrusted: the tool re-validates every call through the artifact-root sandbox. maxBytes defaults to 4 MiB and is capped at 16 MiB per response; total artifact size is capped at 256 MiB.")]
@@ -2523,7 +2349,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<ByteFetchEnvelope>(
                 $"get_dump_bytes rejected the request: {artifactEx.Message}",
                 new DiagnosticError("InvalidArtifactPath", artifactEx.Message, artifactEx.ParameterName),
-                new NextActionHint("get_dump_bytes",
+                new NextActionHint("get_bytes",
                     "Re-issue with a path under the artifact root; absolute paths must still resolve under that root after symlink resolution."));
         }
         catch (FileNotFoundException ex)
@@ -2559,14 +2385,6 @@ public sealed class DiagnosticTools
     }
 
     [RequireScope("ptrace")]
-    [DeprecatedTool("query_snapshot", "0.9.0", Note = "Call query_snapshot(handle=..., view=threads-summary|stack|lock-graph|...) instead. Same backend, identical envelope (RFC 0002 §4.1 / #207).")]
-    [McpServerTool(
-        Name = "query_thread_snapshot",
-        Title = "Drill into a thread + lock snapshot",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
     [Description(
         "Returns a slice of a thread snapshot previously captured by collect_thread_snapshot, addressed by its handle. Views: " +
         "`threads-summary` (every managed thread with state + top frame), " +
@@ -2643,7 +2461,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<ThreadSnapshotQueryResult>(
                 $"{threadKind} {threadId.Value} not present in snapshot '{handle}'.",
                 new DiagnosticError("ThreadNotFound", "The captured snapshot does not contain this thread id.", threadId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                new NextActionHint("query_thread_snapshot",
+                new NextActionHint("query_snapshot",
                     "List the captured threads first.",
                     new Dictionary<string, object?> { ["handle"] = handle, ["view"] = "threads-summary" }));
         }
@@ -2833,7 +2651,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<ExportedInvestigationSummary>(
                 $"Handle '{handle}' is unknown or expired.",
                 new DiagnosticError("HandleExpired", "Drill-down handles live ~10min and are invalidated when the target process exits.", handle),
-                new NextActionHint("collect_cpu_sample", "Re-run the sampler on the same pid to issue a fresh handle.",
+                new NextActionHint("collect_sample", "Re-run the sampler on the same pid to issue a fresh handle.",
                     new Dictionary<string, object?> { ["durationSeconds"] = 10 }));
         }
 
@@ -2926,7 +2744,7 @@ public sealed class DiagnosticTools
                           $"Provenance: {diff.Provenance.Summary}.";
 
         return DiagnosticResult.Ok(diff, summaryLine,
-            new NextActionHint("collect_cpu_sample",
+            new NextActionHint("collect_sample",
                 diff.Verdict.StartsWith("regression", StringComparison.Ordinal)
                     ? "Re-sample the regressing process and drill into the new top frame."
                     : "Optional: capture a fresh sample to confirm the improvement is stable.",
@@ -2938,7 +2756,7 @@ public sealed class DiagnosticTools
         => DiagnosticResult.Fail<T>(
             $"Argument '{parameterName}' {requirement}.",
             new DiagnosticError("InvalidArgument", $"Argument '{parameterName}' {requirement}.", parameterName),
-            new NextActionHint("get_diagnostic_capabilities", "Re-issue with valid arguments. See tool schema for ranges and defaults."));
+            new NextActionHint("inspect_process", "Re-issue with valid arguments. See tool schema for ranges and defaults."));
 
     private static DiagnosticResult<T>? RequireLiteralScope<T>(
         IPrincipalAccessor principalAccessor,
@@ -3151,7 +2969,7 @@ public sealed class DiagnosticTools
             return DiagnosticResult.Fail<T>(
                 $"{tool} could not reach the diagnostic socket{pidHint}.",
                 new DiagnosticError("EndpointUnavailable", message, typeName),
-                new NextActionHint("list_dotnet_processes", "Re-list processes. Common cause: sidecar UID mismatch with target, or process has exited."));
+                new NextActionHint("inspect_process", "Re-list processes. Common cause: sidecar UID mismatch with target, or process has exited."));
         }
 
         // ClrMD wraps Linux ptrace failures (errno EPERM/ESRCH) in ClrDiagnosticsException.
@@ -3205,15 +3023,15 @@ public sealed class DiagnosticTools
                 return DiagnosticResult.Fail<T>(
                     $"{tool} was denied access{pidHint}.",
                     new DiagnosticError("PermissionDenied", message, typeName),
-                    new NextActionHint("list_dotnet_processes", "Verify the MCP server runs as the same UID as the target process."),
-                    new NextActionHint("collect_off_cpu_sample", "When ptrace cannot be granted, use the perf-replay fallback tracked in issue #92.",
+                    new NextActionHint("inspect_process", "Verify the MCP server runs as the same UID as the target process."),
+                    new NextActionHint("collect_sample", "When ptrace cannot be granted, use the perf-replay fallback tracked in issue #92.",
                         processId is int pidForReplay && pidForReplay > 0 ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 } : null));
             }
 
             return DiagnosticResult.Fail<T>(
                 $"{tool} was denied access{pidHint}.",
                 new DiagnosticError("PermissionDenied", message, typeName),
-                new NextActionHint("list_dotnet_processes", "Verify the MCP server runs as the same UID as the target process."));
+                new NextActionHint("inspect_process", "Verify the MCP server runs as the same UID as the target process."));
         }
 
         if (ex is ExternalToolNotFoundException missingTool)
@@ -3223,7 +3041,7 @@ public sealed class DiagnosticTools
                 return DiagnosticResult.Fail<T>(
                     $"{tool} cannot run{pidHint}: required external tool '{missingTool.ToolName}' is missing.",
                     new DiagnosticError("ToolNotFound", message, typeName),
-                    new NextActionHint("get_diagnostic_capabilities",
+                    new NextActionHint("inspect_process",
                         "Re-check sidecar capabilities after installing elfutils (eu-stack).",
                         processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null));
             }

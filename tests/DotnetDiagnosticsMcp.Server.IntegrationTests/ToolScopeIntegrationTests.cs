@@ -75,12 +75,12 @@ public sealed class ToolScopeIntegrationTests
             ("counters-only", "counters-secret-aaa", new[] { "read-counters" }));
         await using var client = await ConnectWithTokenAsync(factory, "counters-secret-aaa");
 
-        // list_dotnet_processes is read-counters; no target attach needed, so the call
+        // inspect_process is read-counters; no target attach needed, so the call
         // returns a real success envelope. We only care that it was NOT rejected by the
         // scope filter (which would surface as IsError=true with kind=forbidden).
         var result = await client.CallToolAsync(
-            "list_dotnet_processes",
-            arguments: new Dictionary<string, object?>(),
+            "inspect_process",
+            arguments: new Dictionary<string, object?> { ["view"] = "list" },
             cancellationToken: CancellationToken.None);
 
         // Either the tool succeeded or it failed for a non-scope reason — neither path
@@ -96,16 +96,16 @@ public sealed class ToolScopeIntegrationTests
             ("counters-only", "counters-secret-bbb", new[] { "read-counters" }));
         await using var client = await ConnectWithTokenAsync(factory, "counters-secret-bbb");
 
-        // collect_cpu_sample requires 'eventpipe'; the counters-only token does not.
+        // collect_sample with kind=cpu requires 'eventpipe'; the counters-only token does not.
         var result = await client.CallToolAsync(
-            "collect_cpu_sample",
-            arguments: new Dictionary<string, object?> { ["durationSeconds"] = 1 },
+            "collect_sample",
+            arguments: new Dictionary<string, object?> { ["kind"] = "cpu", ["durationSeconds"] = 1 },
             cancellationToken: CancellationToken.None);
 
         var (summary, envelope) = ParseForbidden(result);
-        summary.Should().StartWith("forbidden: tool 'collect_cpu_sample'");
+        summary.Should().StartWith("forbidden: tool 'collect_sample'");
         envelope.GetProperty("kind").GetString().Should().Be("forbidden");
-        envelope.GetProperty("tool").GetString().Should().Be("collect_cpu_sample");
+        envelope.GetProperty("tool").GetString().Should().Be("collect_sample");
         envelope.GetProperty("required_scopes").EnumerateArray()
             .Select(e => e.GetString()).Should().ContainSingle()
             .Which.Should().Be("eventpipe");
@@ -145,11 +145,11 @@ public sealed class ToolScopeIntegrationTests
         {
             await using var client = await ConnectWithTokenAsync(factory, token);
 
-            // query_collection uses RequireAnyScope("read-counters", "eventpipe").
+            // query_snapshot uses RequireAnyScope("read-counters", "eventpipe", "heap-read").
             // We supply a bogus handle so the tool body returns a HandleExpired error,
             // but the scope filter must let the call through either way.
             var result = await client.CallToolAsync(
-                "query_collection",
+                "query_snapshot",
                 arguments: new Dictionary<string, object?> { ["handle"] = "bogus" },
                 cancellationToken: CancellationToken.None);
 
@@ -199,8 +199,8 @@ public sealed class ToolScopeIntegrationTests
 
         await using var client = await ConnectWithTokenAsync(factory, "verysecret-do-not-log-ggg");
         _ = await client.CallToolAsync(
-            "collect_cpu_sample",
-            arguments: new Dictionary<string, object?> { ["durationSeconds"] = 1 },
+            "collect_sample",
+            arguments: new Dictionary<string, object?> { ["kind"] = "cpu", ["durationSeconds"] = 1 },
             cancellationToken: CancellationToken.None);
 
         var denyLines = logSink.Records

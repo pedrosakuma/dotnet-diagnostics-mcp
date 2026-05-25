@@ -6,7 +6,7 @@
 > have been written (`targetPid`, `dumpType`, `outputDirectory`) and **no file is
 > written to disk**. Pass `confirm=true` (in addition to holding the existing
 > `dump-write` + `ptrace` scopes) to perform the dump. The other ptrace-stack tools
-> (`capture_method_bytes`, `inspect_live_heap`, `collect_thread_snapshot`) are
+> (`capture_method_bytes`, `inspect_heap(source="live")`, `collect_thread_snapshot`) are
 > deliberately unchanged. See [`rfcs/0001-per-tool-authorization-scopes.md`](./rfcs/0001-per-tool-authorization-scopes.md) §4
 > and [`tool-reference.md` → `collect_process_dump`](./tool-reference.md#collect_process_dump).
 

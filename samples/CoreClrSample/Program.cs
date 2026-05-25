@@ -165,7 +165,7 @@ app.MapGet("/async-pending", (int? count) =>
 })
 .WithName("AsyncPending");
 
-// ThreadPool fixture for query_thread_snapshot(view="threadpool"). Queue a mix of
+// ThreadPool fixture for query_snapshot(view="threadpool"). Queue a mix of
 // global and prefer-local work items that block behind a shared gate long enough for
 // a live snapshot to observe non-zero pending counts/queue depths.
 app.MapGet("/threadpool/queue", (int? globalItems, int? localItems, int? blockMs) =>

@@ -90,17 +90,22 @@ public sealed class ToolScopeAttributesTests
             typeof(DotnetDiagnosticsMcp.Server.Tools.DiagnosticTools),
             typeof(DotnetDiagnosticsMcp.Server.Tools.OrchestratorTools),
             typeof(DotnetDiagnosticsMcp.Server.Tools.ListOrchestratorTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.InspectProcessTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.CollectEventsTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.CollectSampleTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.QuerySnapshotTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.InspectHeapTool),
+            typeof(DotnetDiagnosticsMcp.Server.Tools.GetBytesTool),
         });
 
         // Spot-check a representative tool from each scope family to detect accidental
         // regressions in the mapping table.
-        registry.TryGet("snapshot_counters")!.Value.All.Should().Equal("read-counters");
-        registry.TryGet("collect_cpu_sample")!.Value.All.Should().Equal("eventpipe");
-        registry.TryGet("inspect_live_heap")!.Value.All.Should().Equal("heap-read", "ptrace");
+        registry.TryGet("collect_events")!.Value.Any.Should().Equal("read-counters", "eventpipe");
+        registry.TryGet("collect_sample")!.Value.All.Should().Equal("eventpipe");
+        registry.TryGet("inspect_heap")!.Value.All.Should().Equal("heap-read");
         registry.TryGet("collect_process_dump")!.Value.All.Should().Equal("dump-write", "ptrace");
-        registry.TryGet("query_collection")!.Value.Any.Should().Equal("read-counters", "eventpipe");
+        registry.TryGet("query_snapshot")!.Value.Any.Should().Equal("read-counters", "eventpipe", "heap-read", "ptrace", "investigation-export");
         registry.TryGet("export_investigation_summary")!.Value.All.Should().Equal("investigation-export");
-        registry.TryGet("list_pods")!.Value.All.Should().Equal("orchestrator-list");
         registry.TryGet("attach_to_pod")!.Value.All.Should().Equal("orchestrator-attach");
         registry.TryGet("list_orchestrator")!.Value.Any.Should().Equal("orchestrator-list", "orchestrator-attach");
     }

@@ -12,7 +12,6 @@ using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.Symbols;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
-using DotnetDiagnosticsMcp.Server.Tools.Deprecation;
 using Microsoft.Extensions.Configuration;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -185,14 +184,9 @@ internal static class DiagnosticServiceRegistration
                         BuildInvestigationProxyFilter(servicesAccessor, loggerFactoryAccessor));
                 }
 
-                // RFC 0002 / #204 scaffolding — deprecation surface. Pair of filters that
-                // (a) append the deprecation notice to tools/list descriptions, and (b) emit
-                // a once-per-process audit-log warning when a deprecated tool is invoked.
-                // No-op until sub-issues #205+ stamp [DeprecatedTool] onto a real method.
-                var deprecationFilters = BuildDeprecationFilters(
-                    servicesAccessor, loggerFactoryAccessor, enableOrchestratorTools);
-                options.Filters.Request.ListToolsFilters.Add(deprecationFilters.ListFilter);
-                options.Filters.Request.CallToolFilters.Add(deprecationFilters.CallFilter);
+                // RFC 0002 / #213 — alias removal wave complete. Every legacy
+                // deprecated surrogate tool has been deleted; no deprecation filter
+                // is registered because there are no deprecated tools left to notify on.
 
                 options.ProtocolVersion = "2025-11-25";
 
@@ -271,65 +265,6 @@ internal static class DiagnosticServiceRegistration
         };
     }
 
-    private readonly record struct DeprecationFilterPair(
-        ModelContextProtocol.Server.McpRequestFilter<ListToolsRequestParams, ListToolsResult> ListFilter,
-        ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> CallFilter);
-
-    private static DeprecationFilterPair BuildDeprecationFilters(
-        Func<IServiceProvider?>? servicesAccessor,
-        Func<ILoggerFactory?> loggerFactoryAccessor,
-        bool enableOrchestratorTools)
-    {
-        // Build the registry lazily on first dispatch so unit tests that call Build()
-        // without the full tool surface still work. Cached so the once-per-process flags
-        // live across calls and concurrent dispatch goes through the same instance.
-        ToolDeprecationRegistry? cached = null;
-        var gate = new object();
-
-        ToolDeprecationRegistry Resolve()
-        {
-            if (cached is not null) return cached;
-            lock (gate)
-            {
-                if (cached is null)
-                {
-                    // Prefer a registry resolved from DI when the host exposes one (test fixtures
-                    // can register a custom registry to assert against). Otherwise scan the same
-                    // tool surfaces the SDK is about to dispatch to.
-                    var registryFromDi = servicesAccessor?.Invoke()?.GetService<ToolDeprecationRegistry>();
-                    if (registryFromDi is not null)
-                    {
-                        cached = registryFromDi;
-                    }
-                    else
-                    {
-                        var surfaceTypes = PodLocalToolSurfaces.GetSurfaceTypes(enableOrchestratorTools);
-                        cached = ToolDeprecationRegistry.Build(
-                            surfaceTypes,
-                            loggerFactoryAccessor()?.CreateLogger<ToolDeprecationRegistry>());
-                    }
-                }
-            }
-            return cached;
-        }
-
-        ModelContextProtocol.Server.McpRequestFilter<ListToolsRequestParams, ListToolsResult> listFilter =
-            next => async (request, ct) =>
-            {
-                var inner = ToolDeprecationFilters.CreateListToolsFilter(Resolve());
-                return await inner(next)(request, ct).ConfigureAwait(false);
-            };
-
-        ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> callFilter =
-            next => async (request, ct) =>
-            {
-                var inner = ToolDeprecationFilters.CreateCallToolFilter(Resolve());
-                return await inner(next)(request, ct).ConfigureAwait(false);
-            };
-
-        return new DeprecationFilterPair(listFilter, callFilter);
-    }
-
     private static ModelContextProtocol.Server.McpRequestFilter<CallToolRequestParams, CallToolResult> BuildInvestigationProxyFilter(
         Func<IServiceProvider?> servicesAccessor,
         Func<ILoggerFactory?> loggerFactoryAccessor)
@@ -373,19 +308,19 @@ internal static class DiagnosticServiceRegistration
 
         Recommended call order for a fresh investigation:
 
-          1. `snapshot_counters` — cheap first signal: CPU, working set, GC pressure,
+          1. `collect_events(kind="counters")` — cheap first signal: CPU, working set, GC pressure,
              thread pool, requests/sec. When exactly one .NET process is reachable the
              server auto-selects it; `processId` is optional on every live-process tool.
-          2. From the symptom narrow down: high CPU → `collect_cpu_sample`; allocations
-             or GC pauses → `collect_gc_events`; errors → `collect_exceptions`;
-             request/span traces → `collect_activities`; framework-specific signals →
-             `collect_event_source` with the right provider.
+          2. From the symptom narrow down: high CPU → `collect_sample(kind="cpu")`; allocations
+             or GC pauses → `collect_events(kind="gc")`; errors → `collect_events(kind="exceptions")`;
+             request/span traces → `collect_events(kind="activities")`; framework-specific signals →
+             `collect_events(kind="event_source")` with the right provider.
           3. `collect_process_dump` is the heavyweight last resort (Mini < Triage <
              WithHeap < Full). Use only when live collectors are insufficient.
 
-        Use `list_dotnet_processes` only when auto-resolution fails (zero or multiple
+        Use `inspect_process(view="list")` only when auto-resolution fails (zero or multiple
         .NET processes visible — the error response will tell you). Use
-        `get_diagnostic_capabilities` to confirm CoreCLR vs NativeAOT before reaching
+        `inspect_process(view="capabilities")` to confirm CoreCLR vs NativeAOT before reaching
         for NativeAOT-incompatible collectors (CPU sampling, gcdump).
 
         Always prefer the shortest collection window that answers the question
@@ -396,7 +331,7 @@ internal static class DiagnosticServiceRegistration
         This server never requests Elicitation: every tool ships with sensible
         defaults for every parameter. `processId` is optional — omit it to auto-select
         the lone reachable .NET process, or pass an explicit pid from
-        `list_dotnet_processes` when several are visible. Pick a default and re-run
+        `inspect_process(view="list")` when several are visible. Pick a default and re-run
         with refined arguments if the first attempt is too noisy or too sparse — the
         response `hints` will tell you how.
 

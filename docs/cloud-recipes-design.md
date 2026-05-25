@@ -161,7 +161,7 @@ Secrets Manager. It should also carry
 reason to prefer ECS is that it can support the ptrace-backed tools.
 
 That still should **not** be documented as blanket support for every Linux tool.
-`collect_off_cpu_sample` depends on `perf` plus `CAP_PERFMON` (or equivalent
+`collect_sample(kind="off_cpu")` depends on `perf` plus `CAP_PERFMON` (or equivalent
 host configuration), and this design does not claim that Fargate provides that
 path. The first AWS recipe should therefore aim for near-parity on the socket,
 EventPipe, and ptrace-backed flows while treating perf-based sampling as an open
@@ -312,15 +312,15 @@ be documented as a **reduced-capability** host for this project. The docs should
 name the unsupported MCP tools directly:
 
 - `collect_thread_snapshot`
-- `inspect_live_heap`
-- `inspect_dump` against a live PID
+- `inspect_heap(source="live")`
+- `inspect_heap(source="dump")` against a live PID
 - `collect_process_dump`
 
 The README should not use vague language like “some advanced tools may be
 unavailable.” It should explain that these tools depend on ptrace-style access
 that Cloud Run does not provide.
 
-The same caution applies to perf-based sampling. `collect_off_cpu_sample` and
+The same caution applies to perf-based sampling. `collect_sample(kind="off_cpu")` and
 other perf-dependent flows should be treated as unsupported on Cloud Run unless a
 future proof says otherwise. gVisor is the wrong environment for promising those
 Linux capabilities.
@@ -417,7 +417,7 @@ The Cloud Run follow-up PR should answer these directly:
 | Networking default | `awsvpc` with private access or internal ALB | Internal ingress |
 | Public exposure guidance | Optional override, not default | Optional override, not default |
 | Lifecycle fit | Stronger for warm diagnostics access | Requires `min-instances = 1` and is still request-driven |
-| Unsupported / unproven MCP tools | `collect_off_cpu_sample` remains unproven because the design does not assume a perf + `CAP_PERFMON` path on Fargate | `collect_thread_snapshot`, `inspect_live_heap`, live `inspect_dump`, `collect_process_dump`, `collect_off_cpu_sample` |
+| Unsupported / unproven MCP tools | `collect_sample(kind="off_cpu")` remains unproven because the design does not assume a perf + `CAP_PERFMON` path on Fargate | `collect_thread_snapshot`, `inspect_heap(source="live")`, live `inspect_heap(source="dump")`, `collect_process_dump`, `collect_sample(kind="off_cpu")` |
 | Smoke test emphasis | Socket visibility plus health endpoint | Health endpoint plus explicit caveat about unsupported tools |
 | Ship order | **First** | **Second** |
 | Overall verdict | Best next recipe | Useful but clearly constrained |

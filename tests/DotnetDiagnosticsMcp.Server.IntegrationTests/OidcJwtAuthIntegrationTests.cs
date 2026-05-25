@@ -96,16 +96,16 @@ public sealed class OidcJwtAuthIntegrationTests
 
         await using var jwtClient = await ConnectWithTokenAsync(factory, validJwt).ConfigureAwait(false);
         var jwtResult = await jwtClient.CallToolAsync(
-            "list_dotnet_processes",
-            arguments: new Dictionary<string, object?>(),
+            "inspect_process",
+            arguments: new Dictionary<string, object?> { ["view"] = "list" },
             cancellationToken: CancellationToken.None).ConfigureAwait(false);
         (jwtResult.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? string.Empty)
             .Should().NotContain("\"kind\":\"forbidden\"");
 
         await using var opaqueClient = await ConnectWithTokenAsync(factory, "opaque-secret-123").ConfigureAwait(false);
         var opaqueResult = await opaqueClient.CallToolAsync(
-            "list_dotnet_processes",
-            arguments: new Dictionary<string, object?>(),
+            "inspect_process",
+            arguments: new Dictionary<string, object?> { ["view"] = "list" },
             cancellationToken: CancellationToken.None).ConfigureAwait(false);
         (opaqueResult.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? string.Empty)
             .Should().NotContain("\"kind\":\"forbidden\"");
@@ -126,13 +126,13 @@ public sealed class OidcJwtAuthIntegrationTests
 
         await using var client = await ConnectWithTokenAsync(factory, underScopedJwt).ConfigureAwait(false);
         var result = await client.CallToolAsync(
-            "collect_cpu_sample",
-            arguments: new Dictionary<string, object?> { ["durationSeconds"] = 1 },
+            "collect_sample",
+            arguments: new Dictionary<string, object?> { ["kind"] = "cpu", ["durationSeconds"] = 1 },
             cancellationToken: CancellationToken.None).ConfigureAwait(false);
 
         var envelope = ParseForbiddenEnvelope(result);
         envelope.GetProperty("kind").GetString().Should().Be("forbidden");
-        envelope.GetProperty("tool").GetString().Should().Be("collect_cpu_sample");
+        envelope.GetProperty("tool").GetString().Should().Be("collect_sample");
         envelope.GetProperty("required_scopes").EnumerateArray().Select(x => x.GetString())
             .Should().ContainSingle().Which.Should().Be("eventpipe");
         envelope.GetProperty("principal_scopes").EnumerateArray().Select(x => x.GetString())

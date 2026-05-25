@@ -16,7 +16,7 @@ The flow today is:
 2. An operator patches `pods/ephemeralcontainers` to inject the `dotnet-diagnostics-mcp` image into that Pod.
 3. The ephemeral container runs the existing MCP server in the target Pod's context.
 4. The operator exposes it with `kubectl port-forward`.
-5. The client then talks directly to that Pod-local server and uses the normal tool flow (`list_dotnet_processes`, `snapshot_counters`, `collect_cpu_sample`, and so on).
+5. The client then talks directly to that Pod-local server and uses the normal tool flow (`inspect_process(view="list")`, `collect_events(kind="counters")`, `collect_sample(kind="cpu")`, and so on).
 That topology is already the correct answer for the runtime's hard constraints:
 - the diagnostics process must see the target PID,
 - it must see the same `/tmp/dotnet-diagnostic-*` socket path,
@@ -94,10 +94,10 @@ For those serverless container hosts the answer is the **per-service sidecar rec
 ## 3. Tool surface
 ### 3.1 Principle
 The orchestrator should add exactly four new MCP tools, matching issue #20:
-- `list_pods`
+- `list_orchestrator(kind="pods")`
 - `attach_to_pod`
 - `detach`
-- `list_active_investigations`
+- `list_orchestrator(kind="investigations")`
 Everything else should remain the existing diagnostic tool surface, reached through an attached investigation context.
 That keeps the new surface concept-oriented:
 - discovery,
@@ -121,10 +121,10 @@ The four tools only need four small orchestrator-specific data shapes:
 - `AttachSession`: handle, target identity, ephemeral container name, state (`attaching|active|closed|expired|failed`), attach/last-used/expiry timestamps, proxied scope, and warnings.
 - `ActiveInvestigation`: the `AttachSession` summary plus `idleSeconds`, optional client tag, and whether the port-forward/proxy is still active.
 - `DetachResult`: handle, previous state, detach timestamp, `podStillContainsEphemeralContainer`, the resources that were closed, and warnings.
-### 3.4 `list_pods`
+### 3.4 `list_orchestrator(kind="pods")`
 #### Proposed signature
 ```text
-list_pods(
+list_orchestrator(kind="pods")(
   namespace?: string,
   labelSelector?: string,
   fieldSelector?: string,
@@ -136,7 +136,7 @@ list_pods(
 )
 ```
 #### Return shape
-`list_pods` should return a paged list of `PodCandidate` rows inside the normal `DiagnosticResult<T>` envelope. The `data` payload should be `{ items: PodCandidate[], nextCursor?: string }`, with enough metadata for the LLM to choose a single Pod without another lookup.
+`list_orchestrator(kind="pods")` should return a paged list of `PodCandidate` rows inside the normal `DiagnosticResult<T>` envelope. The `data` payload should be `{ items: PodCandidate[], nextCursor?: string }`, with enough metadata for the LLM to choose a single Pod without another lookup.
 #### Error kinds
 - `InvalidArgument`
 - `NamespaceNotAllowed`
@@ -186,10 +186,10 @@ detach(handle: string)
 - `SessionAlreadyClosed`
 - `PermissionDenied`
 `detach` should be safe to retry, but it should still communicate whether the handle was already closed.
-### 3.7 `list_active_investigations`
+### 3.7 `list_orchestrator(kind="investigations")`
 #### Proposed signature
 ```text
-list_active_investigations(
+list_orchestrator(kind="investigations")(
   namespace?: string,
   pod?: string,
   includeClosed?: bool = false,
@@ -198,7 +198,7 @@ list_active_investigations(
 )
 ```
 #### Return shape
-`list_active_investigations` returns a paged list of `ActiveInvestigation` entries. The `data` payload should be `{ items: ActiveInvestigation[], nextCursor?: string }`, with enough lease and activity metadata to decide whether a handle should be reused, detached, or allowed to expire.
+`list_orchestrator(kind="investigations")` returns a paged list of `ActiveInvestigation` entries. The `data` payload should be `{ items: ActiveInvestigation[], nextCursor?: string }`, with enough lease and activity metadata to decide whether a handle should be reused, detached, or allowed to expire.
 #### Error kinds
 - `InvalidArgument`
 - `NamespaceNotAllowed`
@@ -224,20 +224,20 @@ Issue #20 proposes four more tools, which takes the surface to the moral -equiva
 That needs justification.
 #### Why not collapse into one `manage_fleet(view=...)` tool?
 Because these concepts are distinct in ways that matter to both the user and the implementation:
-- `list_pods` is **read-only fleet discovery**.
+- `list_orchestrator(kind="pods")` is **read-only fleet discovery**.
 - `attach_to_pod` is a **privileged side effect** that mutates a target Pod and allocates orchestrator resources.
 - `detach` is **cleanup** with intentionally different semantics from attach.
-- `list_active_investigations` is **session introspection**, not pod discovery.
+- `list_orchestrator(kind="investigations")` is **session introspection**, not pod discovery.
 These are not just four views over the same artifact. They map to different RBAC-sensitive operations and different user intents.
 #### Why the four-tool split is acceptable
 Each addition earns its place:
-1. `list_pods`
+1. `list_orchestrator(kind="pods")`
 - needed before any attach can happen.
 2. `attach_to_pod`
 - the only action that actually creates a scoped investigation.
 3. `detach`
 - required because ephemeral attaches have orchestrator-local cleanup even when Kubernetes cleanup is impossible.
-4. `list_active_investigations`
+4. `list_orchestrator(kind="investigations")`
 - required to explain and manage the orchestrator's otherwise invisible session state.
 This is therefore a justified case of adding tools because the concepts are truly distinct, side-effect boundaries are different, and compressing them would harm clarity more than it would help the budget.
 ---
@@ -315,7 +315,7 @@ In short:
 The diagnostics MCP routinely emits **filesystem-bound handoff payloads** consumed by sibling MCPs:
 - `MethodIdentity { mvid, metadataToken }` → `dotnet-assembly-mcp.get_method` needs the matching `.dll`/`.pdb` reachable on the **assembly-mcp host's filesystem**.
 - `NativeFrame { buildId, imagePath }` → `dotnet-native-mcp.load_native_binary` needs the binary at that path.
-- `inspect_dump(dumpFilePath)` is a raw local path.
+- `inspect_heap(source="dump")(dumpFilePath)` is a raw local path.
 
 In single-target sidecar mode (the topology shipped today) all three MCPs run side-by-side on the same host and the handoff "just works". In orchestrator mode the picture changes:
 
@@ -331,23 +331,23 @@ LLM client host                 │ Kubernetes cluster
 When the LLM passes a `MethodIdentity` from a pod-remote CPU sample to a client-side `dotnet-assembly-mcp`, the MVID is correct but the on-disk bytes are absent → `path_not_found`.
 
 **What still works** in orchestrator mode (these stay inside one server boundary):
-- All `*_handle`-based drilldowns (`get_call_tree`, `query_heap_snapshot`, `query_thread_snapshot`, `query_collection`, `query_off_cpu_snapshot`) — the handle store lives in the pod-local server, so subsequent calls forwarded over the proxy hit the same store.
-- Tools that don't export filesystem-bound identities (`snapshot_counters`, `get_container_signals`, `get_memory_trend`, `get_process_info`, `start_investigation`, `export_investigation_summary`, `compare_to_baseline`).
+- All `*_handle`-based drilldowns (`query_snapshot(view="call-tree")`, `query_snapshot`, `query_snapshot`, `query_snapshot`, `query_snapshot`) — the handle store lives in the pod-local server, so subsequent calls forwarded over the proxy hit the same store.
+- Tools that don't export filesystem-bound identities (`collect_events(kind="counters")`, `inspect_process(view="container")`, `inspect_process(view="memory_trend")`, `inspect_process(view="info")`, `start_investigation`, `export_investigation_summary`, `compare_to_baseline`).
 
 **What breaks** without further work:
 - Any `dotnet-assembly-mcp` / `dotnet-native-mcp` call whose argument originated as a handoff from the remote pod.
-- `inspect_dump(dumpFilePath)` against a pod-local dump path.
+- `inspect_heap(source="dump")(dumpFilePath)` against a pod-local dump path.
 
 **Mitigation options:**
 1. **Co-located twin sidecars (operator-side workaround)** — deploy `dotnet-assembly-mcp` and `dotnet-native-mcp` as additional ephemeral containers alongside the diagnostics container. The orchestrator's `attach_to_pod` can mint per-attach bearer tokens for each, and the LLM client connects to the cluster trio via the orchestrator proxy. Pure configuration; no protocol change. Recommended default.
-2. **Module-byte fetch endpoint (available)** — `get_module_bytes(moduleVersionId, asset, offset, maxBytes, processId?)` and `get_dump_bytes(dumpFilePath, offset, maxBytes)` now stream PE/PDB/dump bytes through normal MCP CallTool round-trips. The client materializes the chunks to a scratch dir, verifies the full-artifact SHA-256, then passes that local path to the client-side sibling MCPs. This adds surface and bandwidth, but it unblocks cross-MCP handoffs when twin sidecars are not feasible.
+2. **Module-byte fetch endpoint (available)** — `get_bytes(kind="module")(moduleVersionId, asset, offset, maxBytes, processId?)` and `get_bytes(kind="dump")(dumpFilePath, offset, maxBytes)` now stream PE/PDB/dump bytes through normal MCP CallTool round-trips. The client materializes the chunks to a scratch dir, verifies the full-artifact SHA-256, then passes that local path to the client-side sibling MCPs. This adds surface and bandwidth, but it unblocks cross-MCP handoffs when twin sidecars are not feasible.
 3. **MCP asset-URI convention** — promote handoffs from filesystem paths to a `mcp+pod://ns/pod/path` URI that participating MCPs know how to dereference via a callback into the diagnostics server. Cleanest end-state; requires alignment with the sibling MCPs and is **not a P7 item** — tracked as a Phase 9+ idea.
 
 In practice the deployment guidance is now: prefer option (1) when you can co-locate the sibling MCPs; fall back to option (2) when the client-side sibling MCPs must stay off-cluster.
 
 > **Security note — path hints are untrusted.** Every filesystem-bound payload
 > in the table above (`ModulePath`, `imagePath`, `dumpFilePath`, the
-> mitigation-2 `get_module_bytes` / `get_dump_bytes` sink path, the
+> mitigation-2 `get_bytes(kind="module")` / `get_bytes(kind="dump")` sink path, the
 > mitigation-3 `mcp+pod://` dereference target) is an *untrusted hint* that
 > flows through the LLM. Consumer MCPs MUST canonicalise, allowlist a fixed
 > set of roots, reject symlink escapes, and verify MVID / build-id before
@@ -466,7 +466,7 @@ If the outer MCP bearer token leaks, an attacker can enumerate candidate Pods, a
 #### Threat 2 — overly broad scope
 If the orchestrator is deployed with a broad ClusterRole by default, one leaked credential may become a cross-tenant incident.
 #### Threat 3 — selector abuse
-If `list_pods` accepts arbitrary selectors, a user can enumerate workloads well outside the intended diagnostics set.
+If `list_orchestrator(kind="pods")` accepts arbitrary selectors, a user can enumerate workloads well outside the intended diagnostics set.
 #### Threat 4 — stale or hidden attaches
 Because ephemeral containers cannot be removed, investigations can leave a longer-lived diagnostic surface behind if operators do not recreate the Pod.
 #### Threat 5 — audit gaps
@@ -486,7 +486,7 @@ The orchestrator should enforce an allowlist such as:
 diagnosticsmcp/enabled=true
 ```
 That means:
-- `list_pods` only returns Pods matching the configured allowlist unless an operator explicitly widens policy,
+- `list_orchestrator(kind="pods")` only returns Pods matching the configured allowlist unless an operator explicitly widens policy,
 - `attach_to_pod` rejects Pods outside that allowlist even when addressed by exact name.
 This is the most important mitigation after namespace scoping.
 #### Audit logging
@@ -495,7 +495,7 @@ Every fleet-sensitive action should be logged with at least:
 - namespace,
 - pod,
 - container,
-- action name (`list_pods`, `attach_to_pod`, `detach`, proxied tool call),
+- action name (`list_orchestrator(kind="pods")`, `attach_to_pod`, `detach`, proxied tool call),
 - start time,
 - end time,
 - outcome,
@@ -595,17 +595,17 @@ without rewriting every tool body.
 - 11 unit tests for the in-memory store (set/get/remove, TTL eviction, null/empty session id, per-session isolation, overwrite semantics) — `MemorySessionTargetBindingStoreTests`.
 - 6 unit tests for the session-aware resolver overload (no-store fall-through, binding overrides local auto-resolve including ambiguous case, explicit pid beats binding, null sessionId equals legacy overload, default interface method covers legacy-only implementors) — `SessionAwareProcessContextResolverTests`.
 - Full pre-existing suite (263 Core + 90 Integration) passes unmodified — zero behaviour regression.
-### P3 — `list_pods` + `attach_to_pod` + proxy plumbing
+### P3 — `list_orchestrator(kind="pods")` + `attach_to_pod` + proxy plumbing
 #### Goal
 Add the fleet-discovery and attach path:
-- `list_pods`
+- `list_orchestrator(kind="pods")`
 - `attach_to_pod`
 - kube API patching
 - ephemeral-container readiness wait
 - in-process port-forward proxying
 
 #### Status
-- **P3a — `list_pods` + Kubernetes client scaffolding: shipped.** New `OrchestratorOptions` config section (enabled flag, namespace allowlist, label-key allowlist, prepared-label key, RequirePreparedLabel toggle, MaxListLimit), `IKubernetesClientFactory` (in-cluster ServiceAccount projection with kubeconfig fallback), narrow `IKubernetesPodsApi` abstraction (so tests can stub without mocking the full k8s surface), `IPodInventory` + `KubernetesPodInventory` (namespace allowlist enforcement, label-selector key validation, preparedness verdict — label opt-in by default, heuristic when `RequirePreparedLabel=false`), and the `list_pods` MCP tool. Registered only when `Orchestrator:Enabled=true`; off by default so existing single-target deployments are unaffected. 17 unit tests cover policy + transport adaptation.
+- **P3a — `list_orchestrator(kind="pods")` + Kubernetes client scaffolding: shipped.** New `OrchestratorOptions` config section (enabled flag, namespace allowlist, label-key allowlist, prepared-label key, RequirePreparedLabel toggle, MaxListLimit), `IKubernetesClientFactory` (in-cluster ServiceAccount projection with kubeconfig fallback), narrow `IKubernetesPodsApi` abstraction (so tests can stub without mocking the full k8s surface), `IPodInventory` + `KubernetesPodInventory` (namespace allowlist enforcement, label-selector key validation, preparedness verdict — label opt-in by default, heuristic when `RequirePreparedLabel=false`), and the `list_orchestrator(kind="pods")` MCP tool. Registered only when `Orchestrator:Enabled=true`; off by default so existing single-target deployments are unaffected. 17 unit tests cover policy + transport adaptation.
 - **P3b — `attach_to_pod` + ephemeral-container injection + in-process port-forward proxy + session-binding plumbing: pending.**
 #### Dependencies
 - P2 target-context abstraction.
@@ -625,11 +625,11 @@ Add the fleet-discovery and attach path:
 - unit tests for attach wait state transitions,
 - mocked Kubernetes client tests for attach success/failure paths,
 - a narrow proxy test that proves one proxied request reaches a fake Pod-local MCP endpoint.
-### P4 — `detach` + `list_active_investigations` + reaper
+### P4 — `detach` + `list_orchestrator(kind="investigations")` + reaper
 #### Goal
 Add the session-management half of the orchestrator:
 - `detach`
-- `list_active_investigations`
+- `list_orchestrator(kind="investigations")`
 - idle TTL tracking
 - reaper
 - startup stale-session visibility
@@ -674,7 +674,7 @@ Ship the deployment assets that make the orchestrator operable:
 Meet the issue's acceptance criterion with a realistic cluster test:
 - deploy two replicas of the sample target,
 - attach to one specific Pod by label or exact name,
-- run `list_dotnet_processes` through the orchestrator,
+- run `inspect_process(view="list")` through the orchestrator,
 - prove only the chosen Pod's PID is visible.
 #### Dependencies
 - P3 attach/proxy path.
@@ -689,12 +689,12 @@ Meet the issue's acceptance criterion with a realistic cluster test:
 - bring up kind,
 - deploy orchestrator,
 - deploy prepared sample target with two replicas,
-- call `list_pods`,
+- call `list_orchestrator(kind="pods")`,
 - call `attach_to_pod` for one chosen Pod,
-- call `list_dotnet_processes` through the orchestrator,
+- call `inspect_process(view="list")` through the orchestrator,
 - assert the returned processes belong only to that Pod,
 - call `detach`,
-- assert the session disappears from `list_active_investigations`.
+- assert the session disappears from `list_orchestrator(kind="investigations")`.
 ---
 ## 9. Open questions
 1. **Concurrent attach sessions to the same Pod — supported or rejected by default?** Reuse is cleaner, but there may be valid multi-client cases.
@@ -705,8 +705,8 @@ Meet the issue's acceptance criterion with a realistic cluster test:
 6. **What client identity should be captured in audit logs when the outer auth model remains bearer-only?** Raw token fingerprint, MCP client info, or both?
 7. **Should we offer a lower-privilege EventPipe-only orchestrator profile in the first implementation, or defer that until after the full privileged path works?**
 8. **How much attach latency is acceptable before the experience stops feeling interactive?** This needs measurement in kind and real clusters.
-9. **How should stale post-restart ephemeral containers be surfaced to the user?** Logs only, metrics, or a warning row in `list_pods`?
-10. **Should `list_pods` expose ReplicaSet/workload grouping in addition to raw Pod rows?** Raw rows are simpler; grouped rows may be friendlier for LLM selection.
+9. **How should stale post-restart ephemeral containers be surfaced to the user?** Logs only, metrics, or a warning row in `list_orchestrator(kind="pods")`?
+10. **Should `list_orchestrator(kind="pods")` expose ReplicaSet/workload grouping in addition to raw Pod rows?** Raw rows are simpler; grouped rows may be friendlier for LLM selection.
 11. **Should `attach_to_pod` require exact Pod name, or should workload-level selection be allowed later (`deployment=api`, `pick newest ready replica`)?** Exact Pod name is safer for the first release.
 12. **Should the orchestrator live in the existing server binary or in a thin companion binary in the same repo?** Same binary is simpler to ship; a companion reduces Kubernetes coupling for local-only users.
 ---
@@ -747,7 +747,7 @@ That gives the LLM one fleet endpoint without undoing the constraints and wins a
 The P6 acceptance test (`KindIntegrationTests`, decorated with
 `[Trait("Category", "KindIntegration")]`) stands up two CoreClrSample replicas
 on a kind cluster, attaches to one via the orchestrator's `attach_to_pod`, and
-then calls `list_dotnet_processes` through the per-handle reverse proxy. It
+then calls `inspect_process(view="list")` through the per-handle reverse proxy. It
 asserts exactly one PID is visible and that its
 `ManagedEntrypointAssemblyName` is `CoreClrSample` — proving the proxy
 forwarded the request into the chosen Pod's PID namespace and not the

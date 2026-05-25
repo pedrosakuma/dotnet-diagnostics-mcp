@@ -17,6 +17,7 @@ using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using ModelContextProtocol.Client;
 
 namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
@@ -40,41 +41,27 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
 
         var tools = await client.ListToolsAsync(cancellationToken: CancellationToken.None);
 
-        tools.Select(t => t.Name).Should().BeEquivalentTo(
-            "list_dotnet_processes",
-            "get_process_info",
-            "get_diagnostic_capabilities",
+        var toolNames = tools.Select(t => t.Name).ToList();
+        
+        // RFC 0002 §7.3 #213: the unified-tool surface is now the only surface. The default
+        // test factory does NOT enable orchestrator tools (no K8s configuration); those tools
+        // are covered by dedicated orchestrator integration tests. We assert the 12 non-orchestrator
+        // tools that any sidecar exposes.
+        toolNames.Should().BeEquivalentTo(new[]
+        {
             "inspect_process",
-            "snapshot_counters",
-            "collect_cpu_sample",
-            "collect_allocation_sample",
-            "collect_exceptions",
-            "collect_gc_events",
-            "collect_activities",
-            "collect_event_source",
             "collect_events",
-            "collect_process_dump",
-            "inspect_dump",
-            "inspect_live_heap",
+            "collect_sample",
+            "query_snapshot",
             "inspect_heap",
-            "query_heap_snapshot",
+            "get_bytes",
+            "collect_process_dump",
             "collect_thread_snapshot",
-            "query_thread_snapshot",
-            "get_call_tree",
+            "capture_method_bytes",
             "start_investigation",
             "export_investigation_summary",
             "compare_to_baseline",
-            "query_collection",
-            "get_container_signals",
-            "get_memory_trend",
-            "collect_off_cpu_sample",
-            "query_off_cpu_snapshot",
-            "capture_method_bytes",
-            "get_module_bytes",
-            "get_dump_bytes",
-            "get_bytes",
-            "collect_sample",
-            "query_snapshot");
+        });
 
         // Tools that historically required `processId` are now bootstrap-implicit (issue #42):
         // when omitted the server auto-selects the lone .NET process visible to it. The only
@@ -83,40 +70,18 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         // `providerName` as required because there is no sensible default.
         var allowedRequired = new Dictionary<string, string[]>
         {
-            ["list_dotnet_processes"] = Array.Empty<string>(),
-            ["get_process_info"] = Array.Empty<string>(),
-            ["get_diagnostic_capabilities"] = Array.Empty<string>(),
             ["inspect_process"] = Array.Empty<string>(),
-            ["snapshot_counters"] = Array.Empty<string>(),
-            ["collect_cpu_sample"] = Array.Empty<string>(),
-            ["collect_allocation_sample"] = Array.Empty<string>(),
-            ["collect_exceptions"] = Array.Empty<string>(),
-            ["collect_gc_events"] = Array.Empty<string>(),
-            ["collect_activities"] = Array.Empty<string>(),
-            ["collect_event_source"] = new[] { "providerName" },
             ["collect_events"] = Array.Empty<string>(),
-            ["collect_process_dump"] = Array.Empty<string>(),
-            ["inspect_dump"] = new[] { "dumpFilePath" },
-            ["inspect_live_heap"] = Array.Empty<string>(),
+            ["collect_sample"] = Array.Empty<string>(),
+            ["query_snapshot"] = new[] { "handle" },
             ["inspect_heap"] = new[] { "source" },
-            ["query_heap_snapshot"] = new[] { "handle" },
+            ["get_bytes"] = new[] { "kind" },
+            ["collect_process_dump"] = Array.Empty<string>(),
             ["collect_thread_snapshot"] = Array.Empty<string>(),
-            ["query_thread_snapshot"] = new[] { "handle" },
-            ["get_call_tree"] = new[] { "handle" },
+            ["capture_method_bytes"] = new[] { "moduleVersionId", "metadataToken" },
             ["start_investigation"] = Array.Empty<string>(),
             ["export_investigation_summary"] = new[] { "handle" },
             ["compare_to_baseline"] = new[] { "baselineSummaryJson", "currentSummaryJson" },
-            ["query_collection"] = new[] { "handle" },
-            ["get_container_signals"] = Array.Empty<string>(),
-            ["get_memory_trend"] = Array.Empty<string>(),
-            ["collect_off_cpu_sample"] = Array.Empty<string>(),
-            ["query_off_cpu_snapshot"] = new[] { "handle" },
-            ["capture_method_bytes"] = new[] { "moduleVersionId", "metadataToken" },
-            ["get_module_bytes"] = new[] { "moduleVersionId" },
-            ["get_dump_bytes"] = new[] { "dumpFilePath" },
-            ["get_bytes"] = new[] { "kind" },
-            ["collect_sample"] = Array.Empty<string>(),
-            ["query_snapshot"] = new[] { "handle" },
         };
 
         // The spirit of elicit-graceful: no user-facing parameter (durationSeconds, topN,
@@ -169,7 +134,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
                     $"tool {tool.Name}: parameter '{forbidden}' must keep its default so the LLM can call the tool without elicitation");
             }
 
-            if (tool.Name is "collect_off_cpu_sample" or "inspect_dump" or "inspect_live_heap" or "collect_thread_snapshot")
+            if (tool.Name is "collect_sample" or "inspect_heap" or "collect_thread_snapshot")
             {
                 var properties = tool.JsonSchema.GetProperty("properties");
                 properties.TryGetProperty("symbolPath", out _).Should().BeTrue($"tool {tool.Name} must expose the symbolPath override");
@@ -190,7 +155,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         client.ServerCapabilities.Tasks.Requests.Tools!.Call.Should().NotBeNull();
 
         var tools = await client.ListToolsAsync(cancellationToken: CancellationToken.None);
-        foreach (var toolName in new[] { "collect_cpu_sample", "collect_exceptions", "collect_gc_events" })
+        foreach (var toolName in new[] { "collect_sample", "collect_events" })
         {
             var tool = tools.Single(t => t.Name == toolName);
             tool.ProtocolTool.Execution.Should().NotBeNull($"{toolName} must advertise execution metadata for MCP Tasks");
@@ -204,9 +169,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var task = await client.CallToolAsTaskAsync(
-            "collect_cpu_sample",
+            "collect_sample",
             new Dictionary<string, object?>
             {
+                ["kind"] = "cpu",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 1,
                 ["topN"] = 5,
@@ -242,11 +208,12 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         callToolResult.Should().NotBeNull();
         callToolResult!.IsError.Should().NotBe(true);
 
-        var envelope = DeserializeEnvelope(callToolResult);
+        var envelope = DeserializeStructured<CollectSampleEnvelope>(callToolResult);
         envelope.Should().NotBeNull();
-        envelope!.Error.Should().BeNull();
-        envelope.Data.GetProperty("processId").GetInt32().Should().Be(Environment.ProcessId);
-        envelope.Data.GetProperty("totalSamples").GetInt32().Should().BeGreaterThan(0);
+        envelope!.Kind.Should().Be("cpu");
+        envelope.Cpu.Should().NotBeNull();
+        envelope.Cpu!.ProcessId.Should().Be(Environment.ProcessId);
+        envelope.Cpu.TotalSamples.Should().BeGreaterThan(0);
     }
 
     [Fact]
@@ -317,7 +284,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
 
         var block = msg.Content.Should().BeOfType<ModelContextProtocol.Protocol.TextContentBlock>().Subject;
         block.Text.Should().Contain("4242", "prompt body must interpolate the supplied processId");
-        block.Text.Should().Contain("snapshot_counters", "prompt must steer the LLM through the standard tool chain");
+        block.Text.Should().Contain("collect_events", "prompt must steer the LLM through the standard tool chain");
         block.Annotations.Should().NotBeNull("audience metadata must be present per issue #44");
         block.Annotations!.Audience.Should().NotBeNull();
         block.Annotations.Audience!.Should().Contain(ModelContextProtocol.Protocol.Role.Assistant,
@@ -339,7 +306,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             .OfType<ModelContextProtocol.Protocol.TextContentBlock>()
             .Select(b => b.Text));
 
-        text.Should().Contain("snapshot_counters(durationSeconds=",
+        text.Should().Contain("collect_events(kind=\"counters\", durationSeconds=",
             "when processId is omitted the body must drop the processId argument so bootstrap implícito kicks in");
         text.Should().NotContain("processId=",
             "no processId placeholder must leak into the rendered playbook when none was supplied");
@@ -407,7 +374,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
 
         client.ServerInstructions.Should().NotBeNullOrWhiteSpace(
             "instructions are surfaced verbatim by clients on session start");
-        client.ServerInstructions.Should().Contain("list_dotnet_processes",
+        client.ServerInstructions.Should().Contain("inspect_process",
             "instructions must steer the model to the documented call order");
     }
 
@@ -417,14 +384,15 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "list_dotnet_processes",
-            arguments: null,
+            "inspect_process",
+            new Dictionary<string, object?> { ["view"] = "list" },
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var processes = DeserializeStructured<List<DotnetProcess>>(result);
-        processes.Should().NotBeNull();
-        processes!.Should().Contain(p => p.ProcessId == Environment.ProcessId);
+        var envelope = DeserializeStructured<InspectProcessReport>(result);
+        envelope.Should().NotBeNull();
+        envelope!.List.Should().NotBeNull();
+        envelope.List!.Should().Contain(p => p.ProcessId == Environment.ProcessId);
     }
 
     [Fact]
@@ -433,14 +401,15 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "get_process_info",
-            new Dictionary<string, object?> { ["processId"] = Environment.ProcessId },
+            "inspect_process",
+            new Dictionary<string, object?> { ["view"] = "info", ["processId"] = Environment.ProcessId },
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var process = DeserializeStructured<DotnetProcess>(result);
-        process.Should().NotBeNull();
-        process!.ProcessId.Should().Be(Environment.ProcessId);
+        var envelope = DeserializeStructured<InspectProcessReport>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Info.Should().NotBeNull();
+        envelope.Info!.ProcessId.Should().Be(Environment.ProcessId);
     }
 
     [Fact]
@@ -449,16 +418,17 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "get_diagnostic_capabilities",
-            new Dictionary<string, object?> { ["processId"] = Environment.ProcessId },
+            "inspect_process",
+            new Dictionary<string, object?> { ["view"] = "capabilities", ["processId"] = Environment.ProcessId },
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var caps = DeserializeStructured<DiagnosticCapabilities>(result);
-        caps.Should().NotBeNull();
-        caps!.Runtime.Should().Be(RuntimeFlavor.CoreClr);
-        caps.CanSampleCpu.Should().BeTrue();
-        caps.CanReadEventCounters.Should().BeTrue();
+        var envelope = DeserializeStructured<InspectProcessReport>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Capabilities.Should().NotBeNull();
+        envelope.Capabilities!.Runtime.Should().Be(RuntimeFlavor.CoreClr);
+        envelope.Capabilities.CanSampleCpu.Should().BeTrue();
+        envelope.Capabilities.CanReadEventCounters.Should().BeTrue();
     }
 
     [Fact]
@@ -467,9 +437,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "snapshot_counters",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "counters",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["providers"] = new[] { "System.Runtime" },
@@ -478,10 +449,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var snapshot = DeserializeStructured<CounterSnapshot>(result);
-        snapshot.Should().NotBeNull();
-        snapshot!.Counters.Should().NotBeEmpty();
-        snapshot.Counters.Should().Contain(c => c.Provider == "System.Runtime");
+        var envelope = DeserializeStructured<CollectEventsEnvelope>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Counters.Should().NotBeNull();
+        envelope.Counters!.Counters.Should().NotBeEmpty();
+        envelope.Counters.Counters.Should().Contain(c => c.Provider == "System.Runtime");
     }
 
     [Fact]
@@ -490,9 +462,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "collect_exceptions",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "exceptions",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 2,
                 ["maxRecent"] = 10,
@@ -500,10 +473,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var snapshot = DeserializeStructured<ExceptionSnapshot>(result);
-        snapshot.Should().NotBeNull();
-        snapshot!.ProcessId.Should().Be(Environment.ProcessId);
-        snapshot.TotalExceptions.Should().BeGreaterThanOrEqualTo(0);
+        var envelope = DeserializeStructured<CollectEventsEnvelope>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Exceptions.Should().NotBeNull();
+        envelope.Exceptions!.ProcessId.Should().Be(Environment.ProcessId);
+        envelope.Exceptions.TotalExceptions.Should().BeGreaterThanOrEqualTo(0);
     }
 
     [Fact]
@@ -518,9 +492,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         }
 
         var result = await client.CallToolAsync(
-            "collect_gc_events",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "gc",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 3,
                 ["maxEvents"] = 50,
@@ -528,9 +503,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var summary = DeserializeStructured<GcSummary>(result);
-        summary.Should().NotBeNull();
-        summary!.ProcessId.Should().Be(Environment.ProcessId);
+        var envelope = DeserializeStructured<CollectEventsEnvelope>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Gc.Should().NotBeNull();
+        envelope.Gc!.ProcessId.Should().Be(Environment.ProcessId);
         // Force a few more during the window so events actually land.
         _ = Task.Run(() =>
         {
@@ -559,9 +535,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         });
 
         var result = await client.CallToolAsync(
-            "collect_activities",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "activities",
                 ["processId"] = Environment.ProcessId,
                 ["sources"] = new[] { IntegrationActivitySource.Name },
                 ["durationSeconds"] = 3,
@@ -572,13 +549,14 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await driver;
 
         result.IsError.Should().NotBe(true);
-        var capture = DeserializeStructured<ActivityCapture>(result);
-        capture.Should().NotBeNull();
-        capture!.SourceFilters.Should().ContainSingle().Which.Should().Be(IntegrationActivitySource.Name);
-        capture.BySource.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name);
-        capture.ByOperation.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name && summary.OperationName == "integration-parent");
-        capture.ByOperation.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name && summary.OperationName == "integration-child");
-        capture.Activities.Should().Contain(activity => activity.SourceName == IntegrationActivitySource.Name && activity.OperationName == "integration-parent");
+        var envelope = DeserializeStructured<CollectEventsEnvelope>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Activities.Should().NotBeNull();
+        envelope.Activities!.SourceFilters.Should().ContainSingle().Which.Should().Be(IntegrationActivitySource.Name);
+        envelope.Activities.BySource.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name);
+        envelope.Activities.ByOperation.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name && summary.OperationName == "integration-parent");
+        envelope.Activities.ByOperation.Should().Contain(summary => summary.SourceName == IntegrationActivitySource.Name && summary.OperationName == "integration-child");
+        envelope.Activities.Activities.Should().Contain(activity => activity.SourceName == IntegrationActivitySource.Name && activity.OperationName == "integration-parent");
     }
 
     [Fact]
@@ -587,9 +565,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "collect_event_source",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "event_source",
                 ["processId"] = Environment.ProcessId,
                 ["providerName"] = "System.Runtime",
                 ["durationSeconds"] = 2,
@@ -598,9 +577,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var capture = DeserializeStructured<EventSourceCapture>(result);
-        capture.Should().NotBeNull();
-        capture!.Provider.Should().Be("System.Runtime");
+        var envelope = DeserializeStructured<CollectEventsEnvelope>(result);
+        envelope.Should().NotBeNull();
+        envelope!.EventSource.Should().NotBeNull();
+        envelope.EventSource!.Provider.Should().Be("System.Runtime");
     }
 
     [Fact]
@@ -741,18 +721,20 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "get_container_signals",
+            "inspect_process",
             new Dictionary<string, object?>
             {
+                ["view"] = "container",
                 ["processId"] = Environment.ProcessId,
             },
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var signals = DeserializeStructured<ContainerSignals>(result);
-        signals.Should().NotBeNull();
-        signals!.ProcessId.Should().Be(Environment.ProcessId);
-        signals.Notes.Should().NotBeNull();
+        var envelope = DeserializeStructured<InspectProcessReport>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Container.Should().NotBeNull();
+        envelope.Container!.ProcessId.Should().Be(Environment.ProcessId);
+        envelope.Container.Notes.Should().NotBeNull();
         // Behavior is platform-dependent: Linux test runners may or may not be in a container
         // and may be on cgroup v1 or v2 — the only invariant is that the envelope deserializes
         // and the tool surfaces partial results via the Notes contract.
@@ -764,7 +746,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "query_collection",
+            "query_snapshot",
             new Dictionary<string, object?>
             {
                 ["handle"] = "DEADBEEFDEADBEEFDEAD",
@@ -785,9 +767,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var collectResult = await client.CallToolAsync(
-            "collect_exceptions",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "exceptions",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 2,
                 ["maxRecent"] = 10,
@@ -797,10 +780,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         collectResult.IsError.Should().NotBe(true);
         var collectEnvelope = DeserializeEnvelope(collectResult);
         collectEnvelope!.Handle.Should().NotBeNullOrWhiteSpace(
-            "every windowed collector must emit a handle so query_collection can drill (issue #43)");
+            "every windowed collector must emit a handle so query_snapshot can drill (issue #43)");
 
         var queryResult = await client.CallToolAsync(
-            "query_collection",
+            "query_snapshot",
             new Dictionary<string, object?>
             {
                 ["handle"] = collectEnvelope.Handle!,
@@ -823,10 +806,11 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "get_call_tree",
+            "query_snapshot",
             new Dictionary<string, object?>
             {
                 ["handle"] = "DEADBEEFDEADBEEFDEAD",
+                ["view"] = "call-tree",
                 ["maxDepth"] = 4,
                 ["maxNodes"] = 50,
             },
@@ -837,7 +821,7 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         envelope!.Error.Should().NotBeNull("an unknown handle must surface a structured DiagnosticError");
         envelope.Error!.Kind.Should().Be("HandleExpired");
         envelope.Hints.Should().NotBeEmpty();
-        envelope.Hints[0].NextTool.Should().Be("collect_cpu_sample");
+        envelope.Hints[0].NextTool.Should().Be("query_snapshot");
     }
 
 
@@ -859,7 +843,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         var plan = DeserializeStructured<DotnetDiagnosticsMcp.Core.Investigation.InvestigationPlan>(result);
         plan.Should().NotBeNull();
         plan!.Mode.Should().Be(DotnetDiagnosticsMcp.Core.Investigation.InvestigationMode.Cold);
-        plan.NextStep.ToolName.Should().Be("snapshot_counters");
+        plan.NextStep.ToolName.Should().Be("collect_events");
+        plan.NextStep.ToolParams.Should().ContainKey("kind");
+        ToolParamString(plan.NextStep.ToolParams["kind"]).Should().Be("counters");
         plan.Constraints.MaxToolCalls.Should().Be(8);
         plan.AllSteps.Should().HaveCountGreaterThan(1);
     }
@@ -954,7 +940,9 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         var plan = DeserializeStructured<DotnetDiagnosticsMcp.Core.Investigation.InvestigationPlan>(result);
         plan.Should().NotBeNull();
         plan!.Mode.Should().Be(DotnetDiagnosticsMcp.Core.Investigation.InvestigationMode.Hypothesis);
-        plan.NextStep.ToolName.Should().Be("collect_event_source");
+        plan.NextStep.ToolName.Should().Be("collect_events");
+        plan.NextStep.ToolParams.Should().ContainKey("kind");
+        ToolParamString(plan.NextStep.ToolParams["kind"]).Should().Be("event_source");
         plan.EarlyStopConditions.Select(e => e.ConditionId).Should().Contain("hypothesis-confirmed");
     }
 
@@ -1018,9 +1006,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "snapshot_counters",
+            "collect_events",
             new Dictionary<string, object?>
             {
+                ["kind"] = "counters",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 0,
             },
@@ -1039,9 +1028,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "get_memory_trend",
+            "inspect_process",
             new Dictionary<string, object?>
             {
+                ["view"] = "memory_trend",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 1, // < 2, must be rejected
             },
@@ -1059,9 +1049,10 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         await using var client = await ConnectAsync();
 
         var result = await client.CallToolAsync(
-            "get_memory_trend",
+            "inspect_process",
             new Dictionary<string, object?>
             {
+                ["view"] = "memory_trend",
                 ["processId"] = Environment.ProcessId,
                 ["durationSeconds"] = 4,
                 ["sampleEverySeconds"] = 1,
@@ -1069,13 +1060,14 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
             cancellationToken: CancellationToken.None);
 
         result.IsError.Should().NotBe(true);
-        var trend = DeserializeStructured<DotnetDiagnosticsMcp.Core.Memory.MemoryTrend>(result);
-        trend.Should().NotBeNull();
-        trend!.ProcessId.Should().Be(Environment.ProcessId);
-        trend.Samples.Should().HaveCountGreaterThanOrEqualTo(2, "a 4s window with 1s interval must yield at least 2 samples");
-        trend.Verdict.Should().BeOneOf("growing", "stable", "shrinking");
-        trend.Deltas.Should().NotBeNull();
-        trend.Samples.Should().AllSatisfy(s =>
+        var envelope = DeserializeStructured<InspectProcessReport>(result);
+        envelope.Should().NotBeNull();
+        envelope!.MemoryTrend.Should().NotBeNull();
+        envelope.MemoryTrend!.ProcessId.Should().Be(Environment.ProcessId);
+        envelope.MemoryTrend.Samples.Should().HaveCountGreaterThanOrEqualTo(2, "a 4s window with 1s interval must yield at least 2 samples");
+        envelope.MemoryTrend.Verdict.Should().BeOneOf("growing", "stable", "shrinking");
+        envelope.MemoryTrend.Deltas.Should().NotBeNull();
+        envelope.MemoryTrend.Samples.Should().AllSatisfy(s =>
         {
             s.RssBytes.Should().BeGreaterThan(0, "RSS must be positive for a running process");
         });
@@ -1107,6 +1099,16 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         PropertyNameCaseInsensitive = true,
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
     };
+
+    private static string? ToolParamString(object? value)
+        => value switch
+        {
+            null => null,
+            string s => s,
+            JsonElement je when je.ValueKind == JsonValueKind.String => je.GetString(),
+            JsonElement je => je.ToString(),
+            _ => value.ToString(),
+        };
 
     private static T? DeserializeStructured<T>(ModelContextProtocol.Protocol.CallToolResult result)
     {
@@ -1154,6 +1156,13 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
             Environment.SetEnvironmentVariable("MCP_BEARER_TOKEN", Token);
+            builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Orchestrator:Enabled"] = "true",
+                });
+            });
             base.ConfigureWebHost(builder);
         }
     }

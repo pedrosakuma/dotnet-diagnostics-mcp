@@ -98,7 +98,7 @@ The .NET diagnostic IPC socket at `/tmp/dotnet-diagnostic-<pid>` inherits the **
 
 ### 🪪 `CAP_SYS_PTRACE` for ClrMD-backed tools — UID alone is not enough on Linux
 
-`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` (against a live PID) and `collect_process_dump` attach via `ptrace(2)`. On Linux with `kernel.yama.ptrace_scope=1` (Debian/Ubuntu/WSL default) same-UID peer attach is blocked.
+`collect_thread_snapshot`, `inspect_heap(source="live")`, `inspect_heap(source="dump")` (against a live PID) and `collect_process_dump` attach via `ptrace(2)`. On Linux with `kernel.yama.ptrace_scope=1` (Debian/Ubuntu/WSL default) same-UID peer attach is blocked.
 
 - **Docker (local)**: `--cap-add SYS_PTRACE` on the **sidecar** container.
 - **K8s**: `capabilities.add: ["SYS_PTRACE"]` on the sidecar container's `securityContext`. See [`deploy/k8s/sample-sidecar.yaml`](./deploy/k8s/sample-sidecar.yaml).
@@ -129,29 +129,30 @@ EventPipe sessions take ~500ms–1s to fully start. Then `EventCounters` payload
 
 ```bash
 # WRONG — exceptions collector starts after curl loop finishes
-curl … & sleep 0; dotnet … collect_exceptions
+curl … & sleep 0; dotnet … collect_events(kind="exceptions")
 # RIGHT — schedule load to happen during the collection window
 ( sleep 2; curl … ) &
-dotnet … collect_exceptions  # synchronous
+dotnet … collect_events(kind="exceptions")  # synchronous
 ```
 
 ### 🧪 Live tests are real
 
 `tests/DotnetDiagnosticsMcp.Core.Tests/LiveCoreClrProcessTests.cs` spawns the `CoreClrSample` webapi by invoking its published DLL directly (`dotnet …/CoreClrSample.dll`) and attaches to the resulting PID. The fixture deliberately avoids `dotnet run`, which creates a wrapper host process whose PID is not the application. Required: .NET 10 SDK on `PATH`, ability to bind to `127.0.0.1:0`, and ~10s of runtime. CI runs both Linux and Windows runners.
 
-### 🎯 One MCP tool per concept (≤10 typical; document why each addition is essential)
+### 🎯 One MCP tool per concept (15 tools after RFC 0002 §7.3 alias removal)
 
-Anthropic recommends ≤10 tools per LLM context. We currently have 18 (the Phase 7 additions —
-`get_call_tree`, `start_investigation`, `export_investigation_summary`, `compare_to_baseline`,
-`inspect_live_heap`, `query_heap_snapshot`, `collect_thread_snapshot`, `query_thread_snapshot`
-— each unlock a specific drilldown or workflow the LLM cannot otherwise reach). **Don't add
-tools speculatively**. New capabilities should either:
+Anthropic recommends ≤10 tools per LLM context. We have 15 tools after RFC 0002 §7.3 #213 consolidated
+24 legacy aliases into 7 unified discriminator tools: `inspect_process`, `collect_events`, `collect_sample`,
+`query_snapshot`, `inspect_heap`, `list_orchestrator`, `get_bytes` plus 8 non-aliased tools
+(`collect_process_dump`, `collect_thread_snapshot`, `capture_method_bytes`, `start_investigation`,
+`export_investigation_summary`, `compare_to_baseline`, `attach_to_pod`, `detach_from_pod`).
+**Don't add tools speculatively**. New capabilities should either:
 
 1. Extend an existing tool with a parameter, or
 2. Be exposed as a Resource (`audience=["assistant"]`) or Prompt, not a Tool, or
 3. Follow the **"split collector, unified drilldown"** pattern: separate collectors per backend
-   (e.g. `inspect_dump` vs `inspect_live_heap`) register a single `HeapSnapshotArtifact` in the
-   shared `IDiagnosticHandleStore`, and a single `query_heap_snapshot(handle, view, …)` tool
+   (e.g. `inspect_heap(source="dump")` vs `inspect_heap(source="live")`) register a single `HeapSnapshotArtifact` in the
+   shared `IDiagnosticHandleStore`, and a single `query_snapshot(handle, view, …)` tool
    answers parameterized follow-up questions. This keeps the tool surface flat while letting the
    LLM ask narrowly-scoped questions without re-paying the collection cost.
 

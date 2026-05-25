@@ -17,7 +17,7 @@ docker build -t coreclr-sample:dev   -f samples/CoreClrSample/Dockerfile .
 ```
 
 > 🔧 **Need a smaller image without `perf`?** Add `--build-arg INSTALL_PERF=false`
-> to the sidecar build. The default image ships `perf` so `collect_off_cpu_sample`
+> to the sidecar build. The default image ships `perf` so `collect_sample(kind="off_cpu")`
 > and the Linux NativeAOT perf-replay thread-snapshot fallback work out of the
 > box (perf still needs `CAP_PERFMON` at runtime — add `--cap-add PERFMON` to the
 > sidecar `docker run`, or lower `kernel.perf_event_paranoid` on the host).
@@ -71,7 +71,7 @@ Without the env var the watcher only logs a warning. See issue #75.
 
 ### Heads up: ClrMD tools need `CAP_SYS_PTRACE` on Linux
 
-`collect_thread_snapshot`, `inspect_live_heap`, `inspect_dump` (for live PIDs)
+`collect_thread_snapshot`, `inspect_heap(source="live")`, `inspect_heap(source="dump")` (for live PIDs)
 and `collect_process_dump` all attach via ClrMD, which under the hood issues
 `ptrace(PTRACE_ATTACH, …)`. Matching UIDs alone is **not** enough on Linux:
 the kernel's [Yama LSM](https://www.kernel.org/doc/Documentation/admin-guide/LSM/Yama.rst)
@@ -96,8 +96,8 @@ For Kubernetes, see [`deploy/k8s/sample-sidecar.yaml`](../deploy/k8s/sample-side
 add `capabilities.add: ["SYS_PTRACE"]` to the sidecar container's
 `securityContext`, alongside the existing UID alignment.
 
-EventPipe-based tools (`snapshot_counters`, `collect_cpu_sample`,
-`collect_exceptions`, `collect_gc_events`, `collect_activities`, `collect_event_source`) do **not**
+EventPipe-based tools (`collect_events(kind="counters")`, `collect_sample(kind="cpu")`,
+`collect_events(kind="exceptions")`, `collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`) do **not**
 need `CAP_SYS_PTRACE` — they go through the diagnostic IPC socket only.
 
 ## Smoke-test the MCP endpoint
@@ -130,7 +130,7 @@ curl -fsS -X POST http://127.0.0.1:18787/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_dotnet_processes","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inspect_process(view="list")","arguments":{}}}'
 ```
 
 You should see at least PID `1` (the sample) and the sidecar's own PID.
@@ -143,7 +143,7 @@ curl -fsS -X POST http://127.0.0.1:18787/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"snapshot_counters","arguments":{"processId":1,"durationSeconds":5,"providers":["System.Runtime"]}}}'
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collect_events(kind="counters")","arguments":{"processId":1,"durationSeconds":5,"providers":["System.Runtime"]}}}'
 ```
 
 ## Tear down
