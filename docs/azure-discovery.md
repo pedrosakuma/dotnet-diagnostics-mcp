@@ -9,8 +9,8 @@ Azure subscription, across three platforms:
 
 | `kind`           | Platform                    | Backend PR |
 |------------------|-----------------------------|------------|
-| `webapps`        | Azure App Service           | [#233](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/233) |
-| `containerapps`  | Azure Container Apps        | #233       |
+| `webapps`        | Azure App Service           | [#233](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/233) (shipped) |
+| `containerapps`  | Azure Container Apps        | [#233](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/233) (shipped) |
 | `aksclusters`    | Azure Kubernetes Service    | [#234](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/234) |
 
 Hard rules baked into the contract:
@@ -167,11 +167,85 @@ options surface will be extended with a strict opt-in.
 ## RBAC
 
 - All three `kind` values require **Reader** on the subscription (or a tighter
-  resource-group scope) for listing.
+  resource-group scope) for listing. For `kind=webapps` and `kind=containerapps`
+  this is **the only role needed** — the backends only call ARM list endpoints
+  and never read app settings, secrets, or connection strings.
 - `kind=aksclusters` with `includeKubeconfig=true` additionally requires the
   **Azure Kubernetes Service Cluster User Role** on each cluster the backend
   mints a kubeconfig for. The exact behaviour (silent skip, partial result, or
   hard fail) is decided in #234 alongside the kubeconfig handle store.
+
+## Example invocations
+
+The tool is reachable via any MCP client speaking the `discover_azure` tool name.
+JSON-RPC arguments mirror the C# signature:
+
+```jsonc
+// Enumerate every App Service site in the subscription
+{
+  "name": "discover_azure",
+  "arguments": {
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "kind": "webapps"
+  }
+}
+
+// Same, scoped to a single resource group, including stopped sites
+{
+  "name": "discover_azure",
+  "arguments": {
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "kind": "webapps",
+    "resourceGroup": "rg-api-prod",
+    "includeStopped": true
+  }
+}
+
+// Enumerate Container Apps in a single resource group, page 2
+{
+  "name": "discover_azure",
+  "arguments": {
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "kind": "containerapps",
+    "resourceGroup": "rg-checkout",
+    "cursor": "<opaque continuation token from the prior response.nextCursor>"
+  }
+}
+```
+
+## readinessWarnings catalog
+
+The backends emit best-effort signals on each candidate so the LLM can rank
+attach targets without an extra round-trip. Empty `readinessWarnings` means no
+problems were detected (it does NOT prove the site is attach-ready).
+
+### `kind=webapps`
+
+| Warning | Trigger | What it means for the LLM |
+|---------|---------|---------------------------|
+| `Windows OS — sidecar not supported` | `kind` field does not contain `linux` (e.g. `app`, `app,functionapp`). | Skip this site — the sidecar topology requires the Linux multi-container App Service surface. |
+| (none — function apps excluded) | `kind` field contains `functionapp`. | Function apps are filtered out entirely; they never appear in the result. |
+
+### `kind=containerapps`
+
+| Warning | Trigger | What it means for the LLM |
+|---------|---------|---------------------------|
+| `No second container detected — sidecar topology not deployed` | Latest revision template has ≤ 1 container. | The app hasn't been migrated to the sidecar topology. Attach will fail; suggest the topology migration first. |
+| `Scale=0` | `template.scale.minReplicas == 0`. | App may be scaled to zero and unreachable. Trigger a request before attempting to attach, or warn the user. |
+
+## Implementation notes (issue #233)
+
+- `IAzureWebAppsDiscovery` and `IAzureContainerAppsDiscovery` are now backed by
+  the Azure SDK (`Azure.ResourceManager.AppService` / `.AppContainers`). The
+  backends consume thin adapter interfaces
+  (`IAzureWebSiteCollectionAdapter`, `IAzureContainerAppCollectionAdapter`) so
+  unit tests can substitute in-memory fakes without referencing the Azure SDK.
+- One `ListAsync` call consumes exactly one Azure SDK page. The adapter's
+  continuation token is passed through verbatim as `nextCursor`; backend-side
+  filtering (function-app exclusion, stopped-state filter) may shrink the page
+  below the requested `limit` but the cursor still advances.
+- AKS still routes through the `NotImplementedAzureAksDiscovery` stub until
+  #234 lands.
 
 ## Stateless server contract
 

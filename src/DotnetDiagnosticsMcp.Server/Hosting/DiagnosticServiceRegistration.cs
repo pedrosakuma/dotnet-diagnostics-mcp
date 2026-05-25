@@ -160,12 +160,14 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton(options);
         services.AddSingleton<IAzureArmClientFactory, DefaultAzureArmClientFactory>();
 
-        // #232 — register the discovery backend seams. The real implementations land in
-        // #233 (App Service + Container Apps) and #234 (AKS); these stubs throw
-        // NotImplementedException so any accidental call-through during the contract
-        // PR surfaces loudly instead of silently returning an empty result.
-        services.AddSingleton<IAzureWebAppsDiscovery, NotImplementedAzureWebAppsDiscovery>();
-        services.AddSingleton<IAzureContainerAppsDiscovery, NotImplementedAzureContainerAppsDiscovery>();
+        // #233 — App Service + Container Apps backends are real implementations
+        // mediated by adapter seams so unit tests can substitute fakes without
+        // touching the Azure SDK. AKS still uses the NotImplemented stub until
+        // #234 lands.
+        services.AddSingleton<IAzureWebSiteCollectionAdapter, DefaultAzureWebSiteCollectionAdapter>();
+        services.AddSingleton<IAzureContainerAppCollectionAdapter, DefaultAzureContainerAppCollectionAdapter>();
+        services.AddSingleton<IAzureWebAppsDiscovery, DefaultAzureWebAppsDiscovery>();
+        services.AddSingleton<IAzureContainerAppsDiscovery, DefaultAzureContainerAppsDiscovery>();
         services.AddSingleton<IAzureAksDiscovery, NotImplementedAzureAksDiscovery>();
         return true;
     }
