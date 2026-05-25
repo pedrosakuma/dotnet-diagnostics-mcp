@@ -11,6 +11,7 @@ using DotnetDiagnosticsMcp.Server.Hosting;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Orchestrator.Investigations;
 using DotnetDiagnosticsMcp.Server.Security;
+using DotnetDiagnosticsMcp.Server.IntegrationTests.Orchestrator;
 using FluentAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -30,6 +31,7 @@ namespace DotnetDiagnosticsMcp.Server.IntegrationTests.Orchestrator.Investigatio
 /// → 404, non-Active handle → 410, Active handle → swap external Authorization for the
 /// Pod-local bearer and forward the body.
 /// </summary>
+[Collection(LegacyAdminBypassLatchCollection.Name)]
 public class InvestigationProxyEndpointTests : IAsyncLifetime
 {
     private IHost _host = default!;

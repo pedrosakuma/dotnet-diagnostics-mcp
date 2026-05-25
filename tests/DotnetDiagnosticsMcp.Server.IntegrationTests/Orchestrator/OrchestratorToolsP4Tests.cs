@@ -22,6 +22,7 @@ namespace DotnetDiagnosticsMcp.Server.IntegrationTests.Orchestrator;
 /// SessionId via reflection; tests that don't exercise the session-fallback branch
 /// pass <c>null!</c> through.
 /// </summary>
+[Collection(LegacyAdminBypassLatchCollection.Name)]
 public sealed class OrchestratorToolsP4Tests
 {
     private static InvestigationHandle Active(string id = "h-1", DateTimeOffset? attachedAt = null) => new(
