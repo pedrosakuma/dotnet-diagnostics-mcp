@@ -106,7 +106,7 @@ dotnet-diagnostics-mcp --urls http://127.0.0.1:8787
 # Container (no SDK needed; predictable filesystem). The default image bundles `perf` so
 # off-CPU sampling and NativeAOT CPU sampling work out of the box (still need
 # CAP_PERFMON, or perf_event_paranoid <= 1 on the host, for `perf` to actually collect).
-docker run -d --restart unless-stopped -p 127.0.0.1:8787:8787 \
+docker run -d --restart unless-stopped -p 127.0.0.1:8787:8080 \
   -e MCP_BEARER_TOKEN=$(openssl rand -hex 32) \
   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
 

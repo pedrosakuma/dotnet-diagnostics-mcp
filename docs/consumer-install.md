@@ -35,7 +35,7 @@ Upgrade: `dotnet tool update -g dotnet-diagnostics-mcp`. Uninstall: `dotnet tool
 docker run -d \
   --name dotnet-diagnostics-mcp \
   --restart unless-stopped \
-  -p 127.0.0.1:8787:8787 \
+  -p 127.0.0.1:8787:8080 \
   -e MCP_BEARER_TOKEN=$(openssl rand -hex 32) \
   ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:latest
 ```
