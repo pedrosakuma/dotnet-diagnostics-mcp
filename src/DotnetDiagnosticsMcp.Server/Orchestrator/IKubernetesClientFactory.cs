@@ -68,15 +68,25 @@ public sealed class KubeconfigHandleNotFoundException : KubernetesConfigurationE
 /// against different clusters don't reload the same bytes. Construction failures are
 /// re-thrown on every call so the orchestrator surfaces a fresh error each time the
 /// LLM retries instead of caching a permanent failure state.
+/// <para>
+/// FIX 3 (#234 review): the per-handle cache is tied to the underlying
+/// <see cref="IKubeconfigHandleStore"/> lifecycle. On every cache HIT we re-validate
+/// the handle against the store; if it has expired we evict the cached client
+/// (disposing its embedded HTTP credentials) and surface the same
+/// <see cref="KubeconfigHandleNotFoundException"/> as the cold-miss expired path.
+/// We also subscribe to <see cref="IKubeconfigHandleStore.HandleEvicted"/> so a
+/// background TTL sweep or capacity eviction proactively kills the cached client
+/// rather than waiting for the next request to discover the dangling state.
+/// </para>
 /// </remarks>
-internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory
+internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory, IDisposable
 {
     private readonly ILogger<DefaultKubernetesClientFactory> _logger;
     private readonly IKubeconfigContext _kubeconfigContext;
     private readonly IKubeconfigHandleStore _kubeconfigStore;
     private readonly object _gate = new();
-    private readonly ConcurrentDictionary<string, IKubernetes> _handleClients = new(StringComparer.Ordinal);
-    private IKubernetes? _client;
+    private readonly ConcurrentDictionary<string, HandleCacheEntry> _handleClients = new(StringComparer.Ordinal);
+    private Kubernetes? _client;
 
     public DefaultKubernetesClientFactory(
         ILogger<DefaultKubernetesClientFactory> logger,
@@ -86,6 +96,11 @@ internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory
         _logger = logger;
         _kubeconfigContext = kubeconfigContext;
         _kubeconfigStore = kubeconfigStore;
+
+        // FIX 3 — proactive cache invalidation on store-driven eviction. The
+        // subscription is balanced in Dispose so the factory does not leak event
+        // wiring across container rebuilds in tests.
+        _kubeconfigStore.HandleEvicted += OnHandleEvicted;
     }
 
     public IKubernetes GetClient()
@@ -107,12 +122,22 @@ internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory
 
     private IKubernetes GetOrBuildHandleClient(string handle)
     {
-        // We do not key the cache on the bytes themselves, because that would force
-        // us to keep a hash of the kubeconfig in memory. Handles already round-trip
-        // through a one-time mint, so caching by handle id is equivalent.
+        // FIX 3 — re-validate every cache hit against the store. The cached client
+        // embeds the kubeconfig credential material in its HttpClient pipeline; once
+        // the store no longer recognizes the handle, the client must die with it.
         if (_handleClients.TryGetValue(handle, out var cached))
         {
-            return cached;
+            var liveExpiry = _kubeconfigStore.TryPeekExpiry(handle);
+            if (liveExpiry is not null && liveExpiry.Value == cached.ExpiresAt)
+            {
+                return cached.Client;
+            }
+
+            // Either the store has evicted/expired the handle, or it was re-minted
+            // with a different expiry. Either way, the cached client is dead.
+            EvictHandleClient(handle);
+            // Fall through to the cold-miss path so we hand back a unified error or
+            // build a fresh client if the store still resolves the handle.
         }
 
         var bytes = _kubeconfigStore.TryResolve(handle);
@@ -126,18 +151,38 @@ internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory
                 "Kubeconfig handle is unknown or has expired. Re-run discover_azure(kind=aksclusters, includeKubeconfig=true) to mint a fresh handle.");
         }
 
+        var expiresAt = _kubeconfigStore.TryPeekExpiry(handle);
+
         try
         {
             using var stream = new MemoryStream(bytes, writable: false);
             var config = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
             var built = new Kubernetes(config);
 
-            if (!_handleClients.TryAdd(handle, built))
+            // If TryPeekExpiry came back null after a successful TryResolve we lost
+            // a race with eviction — fall through and surface "not found" rather
+            // than caching a client we cannot prove is live.
+            if (expiresAt is null)
             {
-                // Lost the race; dispose ours and return the existing one. Disposing
-                // also closes the underlying HttpClient so we don't leak sockets.
                 built.Dispose();
-                return _handleClients[handle];
+                throw new KubeconfigHandleNotFoundException(
+                    "Kubeconfig handle expired during client construction. Re-run discover_azure to mint a fresh handle.");
+            }
+
+            var entry = new HandleCacheEntry(built, expiresAt.Value);
+            if (!_handleClients.TryAdd(handle, entry))
+            {
+                // Lost the race; dispose ours and reuse the existing one if it is
+                // still aligned with the store. The unhappy paths (existing entry
+                // is itself stale) are handled the next time GetOrBuildHandleClient
+                // is called for this handle.
+                built.Dispose();
+                if (_handleClients.TryGetValue(handle, out var existing) && existing.ExpiresAt == expiresAt.Value)
+                {
+                    return existing.Client;
+                }
+                throw new KubeconfigHandleNotFoundException(
+                    "Kubeconfig handle expired during client construction. Re-run discover_azure to mint a fresh handle.");
             }
             return built;
         }
@@ -148,6 +193,35 @@ internal sealed class DefaultKubernetesClientFactory : IKubernetesClientFactory
             Array.Clear(bytes, 0, bytes.Length);
         }
     }
+
+    private void OnHandleEvicted(object? sender, KubeconfigHandleEvictedEventArgs e)
+    {
+        EvictHandleClient(e.Handle);
+    }
+
+    private void EvictHandleClient(string handle)
+    {
+        if (_handleClients.TryRemove(handle, out var evicted))
+        {
+            try { evicted.Client.Dispose(); }
+            catch { /* defensive: a faulty Dispose must not leak past the cache */ }
+        }
+    }
+
+    public void Dispose()
+    {
+        _kubeconfigStore.HandleEvicted -= OnHandleEvicted;
+        foreach (var kv in _handleClients)
+        {
+            try { kv.Value.Client.Dispose(); }
+            catch { /* swallow */ }
+        }
+        _handleClients.Clear();
+        try { _client?.Dispose(); }
+        catch { /* swallow */ }
+    }
+
+    private readonly record struct HandleCacheEntry(IKubernetes Client, DateTimeOffset ExpiresAt);
 
     private Kubernetes Build()
     {
