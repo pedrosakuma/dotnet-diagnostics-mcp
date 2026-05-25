@@ -93,7 +93,7 @@ public static class CollectionQueryDispatcher
                 .GroupBy(v => v.Provider)
                 .Select(g => new CountersProviderGroup(g.Key, g.ToList()))
                 .ToList())
-            : new CountersSummaryView(c.Counters.Count, c.Counters);
+            : new CountersSummaryView(c.Counters.Count, c.Counters, c.Meters.Count, c.Meters, c.Notes);
 
         return new CollectionQueryResult(
             CollectionHandleKinds.Counters, view, c.ProcessId, c.StartedAt, c.Duration, payload);

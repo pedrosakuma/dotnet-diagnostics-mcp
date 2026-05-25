@@ -19,7 +19,12 @@ public class CollectionQueryDispatcherTests
         {
             new("System.Runtime", "cpu-usage", "CPU", 12.5, CounterKind.Mean, "%"),
             new("System.Runtime", "gc-heap-size", "Heap", 100, CounterKind.Mean, "MB"),
-        });
+        },
+        new List<MeterInstrumentValue>
+        {
+            new("MyMeter", "orders.total", null, "Counter", new Dictionary<string, string?>(), 7, 2, null),
+        },
+        ["note"]);
 
         var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Counters, null, snap, 50);
 
@@ -27,6 +32,9 @@ public class CollectionQueryDispatcherTests
         outcome.Result!.View.Should().Be("summary");
         var payload = outcome.Result.Payload.Should().BeOfType<CountersSummaryView>().Subject;
         payload.Counters.Should().HaveCount(2);
+        payload.MeterCount.Should().Be(1);
+        payload.Meters.Should().ContainSingle();
+        payload.Notes.Should().ContainSingle("note");
     }
 
     [Fact]
@@ -36,7 +44,9 @@ public class CollectionQueryDispatcherTests
         {
             new("System.Runtime", "cpu-usage", "CPU", 12.5, CounterKind.Mean),
             new("Microsoft-AspNetCore-Server-Kestrel", "current-connections", "Conns", 3, CounterKind.Mean),
-        });
+        },
+        Array.Empty<MeterInstrumentValue>(),
+        Array.Empty<string>());
 
         var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Counters, "byProvider", snap, 50);
 
@@ -220,7 +230,7 @@ public class CollectionQueryDispatcherTests
     [Fact]
     public void UnknownView_ReturnsAllowedViews()
     {
-        var snap = new CounterSnapshot(42, At, TimeSpan.FromSeconds(5), Array.Empty<CounterValue>());
+        var snap = new CounterSnapshot(42, At, TimeSpan.FromSeconds(5), Array.Empty<CounterValue>(), Array.Empty<MeterInstrumentValue>(), Array.Empty<string>());
         var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Counters, "bogus", snap, 50);
 
         outcome.UnknownView.Should().Be("bogus");
@@ -230,7 +240,7 @@ public class CollectionQueryDispatcherTests
     [Fact]
     public void InvalidTopN_ReturnsInvalidArgument()
     {
-        var snap = new CounterSnapshot(42, At, TimeSpan.FromSeconds(5), Array.Empty<CounterValue>());
+        var snap = new CounterSnapshot(42, At, TimeSpan.FromSeconds(5), Array.Empty<CounterValue>(), Array.Empty<MeterInstrumentValue>(), Array.Empty<string>());
         var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Counters, "summary", snap, 0);
 
         outcome.InvalidArgument.Should().NotBeNullOrEmpty();
@@ -239,7 +249,7 @@ public class CollectionQueryDispatcherTests
     [Fact]
     public void ViewNames_AreCaseInsensitive()
     {
-        var snap = new CounterSnapshot(42, At, TimeSpan.FromSeconds(5), Array.Empty<CounterValue>());
+        var snap = new CounterSnapshot(42, At, TimeSpan.FromSeconds(5), Array.Empty<CounterValue>(), Array.Empty<MeterInstrumentValue>(), Array.Empty<string>());
         var outcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.Counters, "BYPROVIDER", snap, 50);
 
         outcome.Result.Should().NotBeNull();

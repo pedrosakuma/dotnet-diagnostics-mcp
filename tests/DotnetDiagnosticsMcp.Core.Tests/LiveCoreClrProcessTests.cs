@@ -157,6 +157,113 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MeterApi_ReturnsBusinessCounter_FromBadCodeSample()
+    {
+        await using var sample = await StartAuxiliarySampleAsync("BadCodeSample");
+        using var http = new HttpClient { BaseAddress = new Uri(sample.BaseUrl) };
+        var collector = new EventPipeCounterCollector();
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/meter-spam?count=8&kind=counter");
+            response.EnsureSuccessStatusCode();
+        });
+
+        var snapshot = await collector.CollectAsync(
+            sample.ProcessId,
+            TimeSpan.FromSeconds(6),
+            providers: Array.Empty<string>(),
+            meters: new[] { "BadCodeSample" },
+            intervalSeconds: 1,
+            maxInstrumentTimeSeries: 32,
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        snapshot.Meters.Any(m =>
+            m.Meter == "BadCodeSample" &&
+            m.Instrument == "orders.total" &&
+            m.LastValue.HasValue &&
+            m.LastValue.Value > 0).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task MeterApi_ReconstitutesAspNetCoreRequestHistogram()
+    {
+        EnsureSampleRunning();
+        var baseUrl = await EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var collector = new EventPipeCounterCollector();
+        using var cts = new CancellationTokenSource();
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200), cts.Token);
+            while (!cts.IsCancellationRequested)
+            {
+                using var response = await http.GetAsync("/weatherforecast", cts.Token);
+                response.EnsureSuccessStatusCode();
+                await Task.Delay(75, cts.Token);
+            }
+        }, cts.Token);
+
+        try
+        {
+            var snapshot = await collector.CollectAsync(
+                Pid,
+                TimeSpan.FromSeconds(6),
+                providers: Array.Empty<string>(),
+                meters: new[] { "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Server.Kestrel" },
+                intervalSeconds: 1,
+                maxInstrumentTimeSeries: 256,
+                cancellationToken: CancellationToken.None);
+
+            var requestDuration = snapshot.Meters.Single(m =>
+                m.Instrument == "http.server.request.duration" &&
+                m.Histogram != null &&
+                m.Histogram.P95 > 0);
+
+            requestDuration.Histogram!.P50.Should().BeGreaterThan(0);
+            requestDuration.Histogram!.P99.Should().BeGreaterThanOrEqualTo(requestDuration.Histogram.P95);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await driver; } catch (OperationCanceledException) { }
+        }
+    }
+
+    [Fact]
+    public async Task MeterApi_HonoursCardinalityCap()
+    {
+        await using var sample = await StartAuxiliarySampleAsync("BadCodeSample");
+        using var http = new HttpClient { BaseAddress = new Uri(sample.BaseUrl) };
+        var collector = new EventPipeCounterCollector();
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/meter-spam?count=25&kind=counter");
+            response.EnsureSuccessStatusCode();
+        });
+
+        var snapshot = await collector.CollectAsync(
+            sample.ProcessId,
+            TimeSpan.FromSeconds(6),
+            providers: Array.Empty<string>(),
+            meters: new[] { "BadCodeSample" },
+            intervalSeconds: 1,
+            maxInstrumentTimeSeries: 5,
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        snapshot.Meters.Count.Should().BeLessOrEqualTo(5);
+        snapshot.Notes.Should().Contain(note => note.Contains("TimeSeriesLimitReached", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CollectActivities_CapturesSampleActivitySourceEvents()
     {
         EnsureSampleRunning();
@@ -872,7 +979,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    private static async Task WaitForHttpReadyAsync(string baseUrl, TimeSpan timeout)
+    internal static async Task WaitForHttpReadyAsync(string baseUrl, TimeSpan timeout, string readinessPath = "/weatherforecast")
     {
         using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
         var deadline = DateTime.UtcNow + timeout;
@@ -880,7 +987,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         {
             try
             {
-                using var response = await http.GetAsync("/weatherforecast", CancellationToken.None);
+                using var response = await http.GetAsync(readinessPath, CancellationToken.None);
                 if (response.IsSuccessStatusCode)
                 {
                     return;
@@ -905,7 +1012,7 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    private static async Task WaitForDiagnosticEndpointAsync(int pid, TimeSpan timeout)
+    internal static async Task WaitForDiagnosticEndpointAsync(int pid, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
@@ -921,19 +1028,26 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
     }
 
-    private static string? LocateSampleDll()
+    private static async Task<AuxiliarySampleHost> StartAuxiliarySampleAsync(string sampleName)
+    {
+        var sampleDll = LocateSampleDll(sampleName)
+            ?? throw SkipException.ForReason($"{sampleName}.dll not found. Build the sample before running this test.");
+        return await AuxiliarySampleHost.StartAsync(sampleName, sampleDll);
+    }
+
+    private static string? LocateSampleDll(string sampleName = "CoreClrSample")
     {
         // Walk up from the test bin dir until we find the repo root containing samples/.
         var probe = AppContext.BaseDirectory;
         for (var i = 0; i < 8; i++)
         {
-            var sampleDir = Path.Combine(probe, "samples", "CoreClrSample");
+            var sampleDir = Path.Combine(probe, "samples", sampleName);
             if (Directory.Exists(sampleDir))
             {
                 // Match the configuration the tests were built with — falls back to whichever exists.
                 foreach (var configuration in new[] { "Release", "Debug" })
                 {
-                    var dll = Path.Combine(sampleDir, "bin", configuration, "net10.0", "CoreClrSample.dll");
+                    var dll = Path.Combine(sampleDir, "bin", configuration, "net10.0", $"{sampleName}.dll");
                     if (File.Exists(dll))
                     {
                         return dll;
@@ -947,6 +1061,118 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
 
         return null;
+    }
+}
+
+internal sealed class AuxiliarySampleHost : IAsyncDisposable
+{
+    private readonly Process _process;
+    private readonly TaskCompletionSource<string> _listeningUrlTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly string _sampleName;
+
+    private AuxiliarySampleHost(string sampleName, Process process)
+    {
+        _sampleName = sampleName;
+        _process = process;
+    }
+
+    public int ProcessId => _process.Id;
+
+    public string BaseUrl { get; private set; } = string.Empty;
+
+    public static async Task<AuxiliarySampleHost> StartAsync(string sampleName, string sampleDll)
+    {
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(sampleDll)!,
+        };
+        psi.ArgumentList.Add(sampleDll);
+        psi.ArgumentList.Add("--urls");
+        psi.ArgumentList.Add("http://127.0.0.1:0");
+        psi.Environment["DOTNET_NOLOGO"] = "1";
+        psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
+
+        var process = Process.Start(psi)
+            ?? throw SkipException.ForReason($"Failed to start {sampleName}.");
+        var host = new AuxiliarySampleHost(sampleName, process);
+        host.PumpOutput();
+        await LiveCoreClrProcessTests.WaitForDiagnosticEndpointAsync(process.Id, TimeSpan.FromSeconds(30));
+        host.BaseUrl = await host.EnsureListeningUrlAsync(TimeSpan.FromSeconds(30));
+        return host;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (!_process.HasExited)
+        {
+            try
+            {
+                _process.Kill(entireProcessTree: true);
+                await _process.WaitForExitAsync();
+            }
+            catch
+            {
+                // best-effort
+            }
+        }
+
+        _process.Dispose();
+    }
+
+    private void PumpOutput()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var reader = _process.StandardOutput;
+                string? line;
+                while ((line = await reader.ReadLineAsync()) is not null)
+                {
+                    var idx = line.IndexOf("Now listening on:", StringComparison.Ordinal);
+                    if (idx >= 0 && !_listeningUrlTcs.Task.IsCompleted)
+                    {
+                        _listeningUrlTcs.TrySetResult(line[(idx + "Now listening on:".Length)..].Trim());
+                    }
+                }
+            }
+            catch
+            {
+                // best-effort
+            }
+        });
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var reader = _process.StandardError;
+                while (await reader.ReadLineAsync() is not null) { }
+            }
+            catch
+            {
+                // best-effort
+            }
+        });
+    }
+
+    private async Task<string> EnsureListeningUrlAsync(TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            var url = await _listeningUrlTcs.Task.WaitAsync(cts.Token);
+            await LiveCoreClrProcessTests.WaitForHttpReadyAsync(url, timeout, _sampleName == "BadCodeSample" ? "/" : "/weatherforecast");
+            return url;
+        }
+        catch (OperationCanceledException)
+        {
+            throw SkipException.ForReason($"{_sampleName} did not advertise an HTTP listening URL within the timeout.");
+        }
     }
 }
 

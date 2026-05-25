@@ -94,10 +94,14 @@ public sealed class CollectEventsTool
         [Description("Verbosity (summary|detail|raw). Applies to all kinds; semantics match the legacy collectors — 'summary' trims the bulky inline list (Counters, Recent, Events) but keeps it behind the issued handle.")]
         SamplingDepth depth = SamplingDepth.Summary,
         // kind=counters
-        [Description("kind=counters only. Optional list of EventCounter provider names to subscribe to. If null/empty, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel.")]
+        [Description("kind=counters only. Optional list of EventCounter provider names to subscribe to. If null, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel. Pass an empty list to skip legacy EventCounters.")]
         string[]? providers = null,
+        [Description("kind=counters only. Optional list of Meter names to subscribe to through System.Diagnostics.Metrics. Null/empty disables Meter collection.")]
+        string[]? meters = null,
         [Description("kind=counters only. Refresh interval (in seconds) requested from each provider. Defaults to 1.")]
         int intervalSeconds = 1,
+        [Description("kind=counters only. Maximum Meter time series (and histograms) retained before the collector caps results. Defaults to 1000.")]
+        int maxInstrumentTimeSeries = 1000,
         // kind=exceptions
         [Description("kind=exceptions only. Maximum number of individual exception details to return. Must be >= 1. Defaults to 100.")]
         int maxRecent = 100,
@@ -166,7 +170,7 @@ public sealed class CollectEventsTool
                     "counters" => Project(
                         await DiagnosticTools.SnapshotCounters(
                             counterCollector, resolver, handles,
-                            processId, effectiveDuration, providers, intervalSeconds, depth,
+                            processId, effectiveDuration, providers, meters, intervalSeconds, maxInstrumentTimeSeries, depth,
                             ct).ConfigureAwait(false),
                         "counters",
                         (env, data) => env with { Counters = data }),

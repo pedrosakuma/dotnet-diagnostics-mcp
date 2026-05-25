@@ -21,10 +21,13 @@ public sealed record CollectionQueryResult(
 
 // --- Counters views ---------------------------------------------------------------------------
 
-/// <summary>Default counters view: every counter with its latest value.</summary>
+/// <summary>Default counters view: every EventCounter plus every Meter time series captured in the window.</summary>
 public sealed record CountersSummaryView(
     int Count,
-    IReadOnlyList<Counters.CounterValue> Counters);
+    IReadOnlyList<Counters.CounterValue> Counters,
+    int MeterCount,
+    IReadOnlyList<Counters.MeterInstrumentValue> Meters,
+    IReadOnlyList<string> Notes);
 
 /// <summary>Counters grouped by EventSource provider name.</summary>
 public sealed record CountersByProviderView(

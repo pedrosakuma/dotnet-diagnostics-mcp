@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Text.Json;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Activities;
@@ -327,15 +328,14 @@ public sealed class DiagnosticTools
         IDiagnosticHandleStore handles,
         [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
         [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 5.")] int durationSeconds = 5,
-        [Description("Optional list of EventCounter provider names to subscribe to. " +
-                     "If null/empty, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel.")]
+        [Description("Optional list of EventCounter provider names to subscribe to. If null, defaults to System.Runtime, Microsoft.AspNetCore.Hosting and Microsoft-AspNetCore-Server-Kestrel. Pass an empty list to skip legacy EventCounters.")]
         string[]? providers = null,
+        [Description("Optional list of Meter names to subscribe to through System.Diagnostics.Metrics. Null/empty disables Meter collection.")]
+        string[]? meters = null,
         [Description("Refresh interval (in seconds) requested from each provider. Defaults to 1.")] int intervalSeconds = 1,
-        [Description("Verbosity (summary|detail|raw). Default 'summary' returns ~12 headline counters " +
-                     "(CPU, working set, GC heap, gen-2 collections, threadpool, exceptions, lock contention, " +
-                     "ASP.NET Core requests/sec). 'detail' returns the full counter list (pre-#41 default). " +
-                     "'raw' is equivalent to detail for this tool. The complete snapshot is always retained " +
-                     "behind the issued handle — drill in with query_collection(handle, view=byProvider).")]
+        [Description("kind=counters only. Maximum Meter time series (and histograms) retained before the collector caps results. Defaults to 1000.")]
+        int maxInstrumentTimeSeries = 1000,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' returns ~12 headline counters plus http.server.request.duration p95 when available. 'detail' returns the full counter + meter list. 'raw' is equivalent to detail for this tool. The complete snapshot is always retained behind the issued handle — drill in with query_snapshot(handle, view=summary).")]
         SamplingDepth depth = SamplingDepth.Summary,
         CancellationToken cancellationToken = default)
     {
@@ -347,6 +347,10 @@ public sealed class DiagnosticTools
         {
             return InvalidArg<CounterSnapshot>(nameof(intervalSeconds), "must be >= 1");
         }
+        if (maxInstrumentTimeSeries < 1)
+        {
+            return InvalidArg<CounterSnapshot>(nameof(maxInstrumentTimeSeries), "must be >= 1");
+        }
 
         var resolved = await ResolveContextAsync<CounterSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
         if (resolved.Failure is not null) return resolved.Failure;
@@ -355,8 +359,10 @@ public sealed class DiagnosticTools
         var snapshot = await collector.CollectAsync(
             pid,
             TimeSpan.FromSeconds(durationSeconds),
-            providers is { Length: > 0 } ? providers : null,
+            providers,
+            meters,
             intervalSeconds,
+            maxInstrumentTimeSeries,
             cancellationToken).ConfigureAwait(false);
 
         var cpu = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "cpu-usage");
@@ -372,17 +378,28 @@ public sealed class DiagnosticTools
         var handle = handles.Register(pid, CollectionHandleKinds.Counters, snapshot, CollectionHandleTtl);
 
         var inlinePayload = snapshot;
-        var dropped = 0;
+        var droppedCounters = 0;
+        var droppedMeters = 0;
         if (depth == SamplingDepth.Summary)
         {
-            var filtered = HeadlineCounters.Filter(snapshot.Counters);
-            dropped = snapshot.Counters.Count - filtered.Count;
-            inlinePayload = snapshot with { Counters = filtered };
+            var filteredCounters = HeadlineCounters.FilterCounters(snapshot.Counters);
+            var filteredMeters = HeadlineCounters.FilterMeters(snapshot.Meters);
+            droppedCounters = snapshot.Counters.Count - filteredCounters.Count;
+            droppedMeters = snapshot.Meters.Count - filteredMeters.Count;
+            inlinePayload = snapshot with { Counters = filteredCounters, Meters = filteredMeters };
         }
 
+        var requestDuration = HeadlineCounters.FindRequestDuration(snapshot.Meters);
+        var requestDurationText = requestDuration?.Histogram is { } histogram
+            ? $", http.server.request.duration p95={histogram.P95.ToString("F3", CultureInfo.InvariantCulture)}{requestDuration.Unit}"
+            : string.Empty;
+        var noteText = snapshot.Notes.Count > 0
+            ? $" Notes: {string.Join(" | ", snapshot.Notes)}"
+            : string.Empty;
+
         var summaryText = depth == SamplingDepth.Summary
-            ? $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — showing {inlinePayload.Counters.Count} headline (dropped {dropped}; handle has all). cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}."
-            : $"Captured {snapshot.Counters.Count} counter(s) over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}.";
+            ? $"Captured {snapshot.Counters.Count} counter(s) and {snapshot.Meters.Count} meter series over {durationSeconds}s — showing {inlinePayload.Counters.Count} headline counter(s) and {inlinePayload.Meters.Count} headline meter(s) (dropped {droppedCounters} counter(s), {droppedMeters} meter(s); handle has all). cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}{requestDurationText}.{noteText}"
+            : $"Captured {snapshot.Counters.Count} counter(s) and {snapshot.Meters.Count} meter series over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}{requestDurationText}.{noteText}";
 
         var ok = DiagnosticResult.OkWithHandle(
             inlinePayload,

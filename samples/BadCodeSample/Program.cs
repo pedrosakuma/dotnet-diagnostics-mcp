@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
@@ -20,20 +22,26 @@ var app = builder.Build();
 
 var leakedBuffers = new List<byte[]>();
 var lockObject = new object();
+var meterFactory = app.Services.GetRequiredService<IMeterFactory>();
+var meter = meterFactory.Create("BadCodeSample");
+var ordersTotal = meter.CreateCounter<long>("orders.total", unit: "{orders}", description: "Synthetic business counter for tests.");
+var workDuration = meter.CreateHistogram<double>("work.duration", unit: "ms", description: "Synthetic histogram for meter tests.");
+string[] endpoints =
+[
+    "/cpu-burn?ms=2000",
+    "/leak?mb=4",
+    "/exceptions?count=200",
+    "/sync-over-async?n=20",
+    "/lock-contention?threads=32&ms=1500",
+    "/loh-alloc?count=20",
+    "/slow-http?url=https://httpbin.org/delay/3",
+    "/meter-spam?count=5&kind=counter",
+];
 
 app.MapGet("/", () => Results.Ok(new
 {
     name = "BadCodeSample",
-    endpoints = new[]
-    {
-        "/cpu-burn?ms=2000",
-        "/leak?mb=4",
-        "/exceptions?count=200",
-        "/sync-over-async?n=20",
-        "/lock-contention?threads=32&ms=1500",
-        "/loh-alloc?count=20",
-        "/slow-http?url=https://httpbin.org/delay/3",
-    },
+    endpoints,
 }));
 
 // 1. CPU burn — detect with collect_events(kind="counters") + collect_sample(kind="cpu")
@@ -171,6 +179,32 @@ app.MapGet("/slow-http", async (IHttpClientFactory http, string? url) =>
         return Results.Ok(new { url = target, elapsedMs = sw.ElapsedMilliseconds, error = ex.GetType().Name });
     }
     return Results.Ok(new { url = target, elapsedMs = sw.ElapsedMilliseconds, status });
+});
+
+// 8. Meter API spam — detect with collect_events(kind="counters", meters=["BadCodeSample"])
+app.MapGet("/meter-spam", (int? count, string? kind) =>
+{
+    var samples = Math.Clamp(count ?? 10, 1, 5_000);
+    var mode = string.Equals(kind, "histogram", StringComparison.OrdinalIgnoreCase) ? "histogram" : "counter";
+    for (var i = 0; i < samples; i++)
+    {
+        var tags = new TagList
+        {
+            { "series", $"series-{i}" },
+            { "kind", mode },
+        };
+
+        if (mode == "histogram")
+        {
+            workDuration.Record(10 + i, tags);
+        }
+        else
+        {
+            ordersTotal.Add(1, tags);
+        }
+    }
+
+    return Results.Ok(new { samples, kind = mode });
 });
 
 app.Run();

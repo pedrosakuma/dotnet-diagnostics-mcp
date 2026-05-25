@@ -10,6 +10,8 @@ public interface ICounterCollector
         int processId,
         TimeSpan duration,
         IReadOnlyList<string>? providers = null,
+        IReadOnlyList<string>? meters = null,
         int intervalSeconds = 1,
+        int maxInstrumentTimeSeries = 1000,
         CancellationToken cancellationToken = default);
 }
