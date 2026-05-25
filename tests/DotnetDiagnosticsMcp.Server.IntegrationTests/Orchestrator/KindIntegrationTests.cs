@@ -117,7 +117,7 @@ public sealed class KindIntegrationTests
         listEnvelope.Should().NotBeNull();
         listEnvelope!.Error.Should().BeNull("list_orchestrator(kind=pods) returned a structured DiagnosticError: " + listEnvelope.Summary);
 
-        var items = listEnvelope.Data.GetProperty("items");
+        var items = listEnvelope.Data.GetProperty("pods").GetProperty("items");
         items.GetArrayLength().Should().Be(
             1,
             $"label selector '{labelSelector}' must match exactly one prepared pod (got {items.GetArrayLength()})");
