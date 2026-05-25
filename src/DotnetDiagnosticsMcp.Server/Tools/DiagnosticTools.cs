@@ -58,9 +58,9 @@ public sealed class DiagnosticTools
             processes,
             $"Found {processes.Count} .NET process(es): {preview}{(processes.Count > 3 ? ", …" : "")}.",
             new NextActionHint(
-                "get_diagnostic_capabilities",
+                "inspect_process",
                 "Probe the target process to confirm which collectors are supported (CoreCLR vs NativeAOT).",
-                new Dictionary<string, object?> { ["processId"] = processes[0].ProcessId }));
+                new Dictionary<string, object?> { ["view"] = "capabilities", ["processId"] = processes[0].ProcessId }));
     }
 
     [RequireScope("read-counters")]
@@ -2996,9 +2996,11 @@ public sealed class DiagnosticTools
 
             var hints = new List<NextActionHint>
             {
-                new("get_diagnostic_capabilities",
+                new("inspect_process",
                     "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
-                    processId is int pidForCap && pidForCap > 0 ? new Dictionary<string, object?> { ["processId"] = pidForCap } : null),
+                    processId is int pidForCap && pidForCap > 0
+                        ? new Dictionary<string, object?> { ["view"] = "capabilities", ["processId"] = pidForCap }
+                        : new Dictionary<string, object?> { ["view"] = "capabilities" }),
                 new("inspect_dump",
                     "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
                     processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null),

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- `deploy/Dockerfile`: removed dev-only `"Urls": "http://127.0.0.1:8787"` from
+  shipped `appsettings.json` so `ASPNETCORE_URLS=http://0.0.0.0:8080` (set in
+  the image) is no longer overridden. The `docs/local-docker-sidecar.md`
+  quickstart now works out-of-the-box without `-e Urls=http://0.0.0.0:8080`.
+  Local dev launch is unaffected — `launchSettings.json` profiles still set
+  `applicationUrl` explicitly.
+- `inspect_process(view=list)` and the ClrMD `PermissionDenied` envelope no
+  longer emit `nextTool="get_diagnostic_capabilities"` (removed in RFC 0002
+  §7.3); they now correctly point at `inspect_process(view="capabilities")`.
+
 ## [0.4.0] — 2026-05-25
 
 Highlights: RFC 0002 tool surface consolidation (24 legacy tools → 15

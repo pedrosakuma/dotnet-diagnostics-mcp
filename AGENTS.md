@@ -106,6 +106,10 @@ The .NET diagnostic IPC socket at `/tmp/dotnet-diagnostic-<pid>` inherits the **
 
 Failure surfaces as a structured `PermissionDenied` envelope (see #32). EventPipe-based tools (counters, cpu_sample, exceptions, gc, event_source) do **not** need `CAP_SYS_PTRACE`.
 
+### 🐧 WSL2 perf quirks (host-side off-CPU sampling)
+
+On WSL2 the bundled `/usr/bin/perf` wrapper matches `$(uname -r)` (e.g. `6.6.114.1-microsoft`) against `/usr/lib/linux-tools/<ver>/perf` and fails when no exact match exists. The fix is to invoke the installed binary directly — e.g. `/usr/lib/linux-tools/6.8.0-117-generic/perf` — by exporting `PERF=` or by symlinking. Also note that `kernel.perf_event_paranoid=2` (the WSL default) blocks `sched:sched_switch` tracepoints required by `collect_off_cpu_sample` on the **host**; lower it (`sudo sysctl -w kernel.perf_event_paranoid=-1`) or run the workload **inside** a container with `--cap-add PERFMON`, which is the topology the docker / K8s sidecar recipes already use.
+
 ### 🐚 Shell escapes when driving `gh` / `git`
 
 Three pitfalls that have eaten hours of debugging in past sessions:
