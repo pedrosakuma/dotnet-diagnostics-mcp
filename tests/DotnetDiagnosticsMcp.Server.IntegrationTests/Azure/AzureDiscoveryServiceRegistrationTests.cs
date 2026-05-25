@@ -14,6 +14,7 @@ public sealed class AzureDiscoveryServiceRegistrationTests
     public void AddAzureDiscoveryServices_RegistersArmClientFactory_AsSingleton_WhenEnabled()
     {
         var services = new ServiceCollection();
+        services.AddLogging();
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {

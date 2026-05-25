@@ -279,3 +279,98 @@ diagnostic credentials have different blast radii. A token holding
   off the tool is not exposed and the Azure SDK is never reached.
 
 The real backends arrive in #233 (App Service + Container Apps) and #234 (AKS).
+
+## AKS kubeconfig handoff (#234)
+
+The `kind=aksclusters` backend implemented in
+[#234](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/234) is the
+first surface that produces a credential-bearing artifact. To keep blast radius
+contained, the kubeconfig YAML never reaches the LLM or the response envelope —
+the backend stores the bytes in a process-local handle table and returns a
+short-lived opaque **handle** which the orchestrator can redeem from a separate
+tool call.
+
+### End-to-end handoff
+
+```jsonc
+// Step 1: discover + mint a handle
+// → discover_azure(kind="aksclusters", subscriptionId="...", includeKubeconfig=true)
+{
+  "data": {
+    "aksclusters": {
+      "items": [
+        {
+          "name": "prod-aks",
+          "location": "westeurope",
+          "handoff": {
+            "kubeconfigHandle": "kc:5f9b0c…",
+            "expiresAt": "2025-12-01T12:10:00Z"
+          },
+          "readinessWarnings": []
+        }
+      ]
+    }
+  }
+}
+
+// Step 2: target the cluster
+// → list_orchestrator(kind="pods", namespace="diag", kubeconfigHandle="kc:5f9b0c…")
+{
+  "data": {
+    "kind": "pods",
+    "pods": { "items": [ /* … */ ] }
+  }
+}
+```
+
+### Security guarantees
+
+The handle is a bearer credential. The backend enforces the following:
+
+- **Byte path, no strings.** Kubeconfig content travels as `byte[]` from the
+  Azure SDK to the handle store. It is never converted to `string`, JSON-encoded,
+  or logged on the discovery path.
+- **Process-local, in-memory only.** Handles are stored in an in-process
+  dictionary. There is no disk persistence, no Redis, no sharing across replicas.
+  A server restart invalidates every outstanding handle.
+- **TTL with zero-on-expire.** Default TTL is 10 minutes
+  (`AzureDiscovery:KubeconfigHandleTtl`). On expiry the underlying buffer is
+  overwritten with zeros via `Array.Clear` **before** the dictionary entry is
+  released, so a subsequent heap dump or GC walker sees only zeros.
+- **128-bit unguessable handle ids.** Handle ids are 16 random bytes from
+  `RandomNumberGenerator.Fill`, rendered as 32-char lowercase hex with a `kc:`
+  prefix.
+- **Never logged.** Loggers only emit handle *presence* (true/false). The
+  handle value never appears in a structured log scope, exception message, or
+  any response field other than `AzureAksHandoff.KubeconfigHandle`. The
+  redaction-audit unit test plants a sentinel and asserts it does not appear in
+  the serialized envelope or captured log output.
+- **No partial handoff on 403.** When ARM rejects `listClusterUserCredential`
+  with HTTP 403 (missing *AKS Cluster User Role*), the cluster row is still
+  returned with a `readinessWarning`, but `handoff` stays `null` — there is no
+  intermediate state where a half-built handle could leak.
+- **AsyncLocal propagation, not method parameters.** The orchestrator's
+  `IKubernetesClientFactory` reads the active handle from an `IKubeconfigContext`
+  pushed by the tool layer. The `list_orchestrator` MCP tool validates the
+  handle, pushes the context, calls the inner pod-inventory, then pops on a
+  `finally` so the binding never escapes the in-flight async call.
+
+### Required RBAC
+
+Issuing the handoff requires both:
+
+- **Reader** on the subscription (or the resource group), like every other
+  `discover_azure` kind.
+- **Azure Kubernetes Service Cluster User Role** on each cluster the caller
+  wants a kubeconfig for. Missing this role produces a per-cluster
+  `readinessWarning` (`no AKS Cluster User permission detected`) and leaves
+  `handoff` null on that row — the rest of the listing still succeeds.
+
+### Failure surface
+
+`list_orchestrator(kind=pods, kubeconfigHandle=...)` short-circuits with a
+structured `KubeconfigHandleNotFound` error envelope when the handle is unknown
+or has expired. The handle value is **not** echoed in the error message — the
+LLM is expected to re-run `discover_azure(kind=aksclusters, includeKubeconfig=true)`
+to mint a fresh one. A recovery hint pointing at `discover_azure` is attached
+to the envelope.

@@ -34,6 +34,11 @@ public static class OrchestratorErrorKinds
     // P3b-2 (port-forward / proxy) reserves its own kind so callers can branch on it
     // without conflating with AttachFailed.
     public const string PortForwardFailed = "PortForwardFailed";
+
+    // #234 — kubeconfig handle resolution failures surfaced by list_orchestrator /
+    // attach_to_pod when the caller supplies kubeconfigHandle=...
+    public const string KubeconfigHandleNotFound = "KubeconfigHandleNotFound";
+    public const string KubeconfigHandleExpired = "KubeconfigHandleExpired";
 }
 
 /// <summary>

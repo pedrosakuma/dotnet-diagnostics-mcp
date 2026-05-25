@@ -58,6 +58,8 @@ public sealed class ListOrchestratorTool
         IInvestigationStore store,
         OrchestratorOptions options,
         IPrincipalAccessor principalAccessor,
+        IKubeconfigContext kubeconfigContext,
+        IKubeconfigHandleStore kubeconfigStore,
         McpServer? server = null,
         ILoggerFactory? loggerFactory = null,
         [Description("Discriminator: 'pods' (candidate Pods for attach) or 'investigations' (handles minted by this session). Case-sensitive.")]
@@ -79,6 +81,8 @@ public sealed class ListOrchestratorTool
         int limit = 100,
         [Description("kind=pods: Opaque continuation cursor from a prior call's nextCursor. Null for the first page.")]
         string? cursor = null,
+        [Description("kind=pods: AKS handoff (#234) — opaque kubeconfig handle minted by discover_azure(kind=aksclusters, includeKubeconfig=true). When set, this listing targets the AKS cluster identified by the handle instead of the orchestrator's default in-cluster / kubeconfig context.")]
+        string? kubeconfigHandle = null,
         // ---- kind=investigations ----------------------------------------------------
         [Description("kind=investigations: When true, includes handles in terminal states (Closed/Expired/Failed). Default false — only Active/Attaching.")]
         bool includeTerminal = false,
@@ -143,19 +147,52 @@ public sealed class ListOrchestratorTool
 
         if (canonicalKind == KindPods)
         {
-            var inner = await OrchestratorTools.ListPods(
-                inventory,
-                @namespace,
-                labelSelector,
-                fieldSelector,
-                containerName,
-                preparedOnly,
-                includeNotReady,
-                limit,
-                cursor,
-                cancellationToken).ConfigureAwait(false);
+            // #234 — when the caller supplies a kubeconfigHandle, push it on the ambient
+            // context so the downstream IKubernetesClientFactory resolves to an ephemeral
+            // client built from the in-memory bytes. Validate up front so an expired /
+            // unknown handle is surfaced as a structured error envelope and never reaches
+            // a network call. The handle value is NEVER echoed back in the error.
+            IDisposable? kubeconfigScope = null;
+            if (!string.IsNullOrEmpty(kubeconfigHandle))
+            {
+                var probe = kubeconfigStore.TryResolve(kubeconfigHandle);
+                if (probe is null)
+                {
+                    const string msg = "list_orchestrator(kind=pods): kubeconfigHandle is unknown or has expired.";
+                    return DiagnosticResult.Fail<ListOrchestratorResult>(
+                        msg,
+                        new DiagnosticError(OrchestratorErrorKinds.KubeconfigHandleNotFound, msg),
+                        new NextActionHint(
+                            "discover_azure",
+                            "Re-run discover_azure(kind=aksclusters, includeKubeconfig=true) to mint a fresh handle, then retry list_orchestrator with the new value.",
+                            new Dictionary<string, object?> { ["kind"] = "aksclusters", ["includeKubeconfig"] = true }));
+                }
+                // Zero the defensive copy immediately — the real client build happens
+                // inside the factory which re-resolves the handle through the store.
+                System.Array.Clear(probe, 0, probe.Length);
+                kubeconfigScope = kubeconfigContext.Push(kubeconfigHandle);
+            }
 
-            return Project(inner, KindPods, page => new ListOrchestratorResult(KindPods, Pods: page, Investigations: null));
+            try
+            {
+                var inner = await OrchestratorTools.ListPods(
+                    inventory,
+                    @namespace,
+                    labelSelector,
+                    fieldSelector,
+                    containerName,
+                    preparedOnly,
+                    includeNotReady,
+                    limit,
+                    cursor,
+                    cancellationToken).ConfigureAwait(false);
+
+                return Project(inner, KindPods, page => new ListOrchestratorResult(KindPods, Pods: page, Investigations: null));
+            }
+            finally
+            {
+                kubeconfigScope?.Dispose();
+            }
         }
         else
         {

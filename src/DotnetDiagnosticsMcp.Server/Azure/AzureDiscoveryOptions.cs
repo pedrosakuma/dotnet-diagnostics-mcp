@@ -1,3 +1,5 @@
+using System;
+
 namespace DotnetDiagnosticsMcp.Server.Azure;
 
 /// <summary>
@@ -28,4 +30,19 @@ public sealed class AzureDiscoveryOptions
     /// registered with the DI container and the Azure SDK is never instantiated.
     /// </summary>
     public bool Enabled { get; set; }
+
+    /// <summary>
+    /// AKS kubeconfig handle TTL (#234). The opaque handle minted by
+    /// <c>discover_azure(kind=aksclusters, includeKubeconfig=true)</c> stays valid
+    /// in the process-local handle store for at most this long; the kubeconfig
+    /// bytes are zeroed and the entry removed on expiry. Default 10 minutes.
+    /// </summary>
+    /// <remarks>
+    /// The TTL exists to bound the blast radius of a leaked handle id: even an
+    /// attacker who scrapes a handle out of a transcript can only use it briefly
+    /// before re-discovery is required. Lower it in security-sensitive deployments;
+    /// raise it cautiously, since the bytes are held in memory for the entire window.
+    /// </remarks>
+    public TimeSpan KubeconfigHandleTtl { get; set; } = TimeSpan.FromMinutes(10);
 }
+

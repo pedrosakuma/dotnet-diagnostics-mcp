@@ -42,6 +42,7 @@
     <PackageReference Include="Azure.ResourceManager" />
     <PackageReference Include="Azure.ResourceManager.AppService" />
     <PackageReference Include="Azure.ResourceManager.AppContainers" />
+    <PackageReference Include="Azure.ResourceManager.ContainerService" />
     <PackageReference Include="KubernetesClient" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
     <PackageReference Include="ModelContextProtocol" />

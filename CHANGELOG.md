@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **#234** — Azure AKS discovery backend + process-local kubeconfig handle subsystem for the `discover_azure` MCP tool (parent #230). Lists clusters via `Azure.ResourceManager.ContainerService`, optionally redeems `listClusterUserCredential` and stashes the kubeconfig bytes in an in-memory TTL store keyed by an unguessable `kc:<32hex>` handle. `list_orchestrator(kind=pods, kubeconfigHandle=...)` redeems the handle through an `AsyncLocal` context so kubeconfig material never leaves the process as a string. Handles are zeroed on expiry / eviction / disposal. See `docs/azure-discovery.md` → AKS section.
 - **#233** — Azure App Service + Container Apps discovery backends for the `discover_azure` MCP tool (parent #230). Replaces the `NotImplementedException` stubs from #232 with real implementations backed by `Azure.ResourceManager.AppService` / `Azure.ResourceManager.AppContainers`. Backends consume thin adapter seams (`IAzureWebSiteCollectionAdapter`, `IAzureContainerAppCollectionAdapter`) so they can be unit-tested with in-memory fakes. Honors `resourceGroup`, `includeStopped`, `cursor` (opaque Azure SDK continuation token pass-through), and emits readiness warnings (`Windows OS — sidecar not supported`, `No second container detected — sidecar topology not deployed`, `Scale=0`). Function apps are excluded from `kind=webapps` results. AKS still routes through the stub until #234. Requires `Reader` on the subscription for both kinds. See `docs/azure-discovery.md` for the full warnings catalog.
 
 ### Breaking

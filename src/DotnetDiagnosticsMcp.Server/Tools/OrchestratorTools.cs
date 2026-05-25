@@ -127,6 +127,10 @@ public sealed class OrchestratorTools
         OrchestratorErrorKinds.KubeApiUnavailable => new NextActionHint(
             "list_orchestrator",
             "Verify the orchestrator has an in-cluster ServiceAccount projection or a reachable kubeconfig, then retry."),
+        OrchestratorErrorKinds.KubeconfigHandleNotFound => new NextActionHint(
+            "discover_azure",
+            "Re-run discover_azure(kind=aksclusters, includeKubeconfig=true) to mint a fresh handle, then retry list_orchestrator with the new value.",
+            new Dictionary<string, object?> { ["kind"] = "aksclusters", ["includeKubeconfig"] = true }),
         _ => new NextActionHint(
             "list_orchestrator",
             "Re-run with corrected arguments."),

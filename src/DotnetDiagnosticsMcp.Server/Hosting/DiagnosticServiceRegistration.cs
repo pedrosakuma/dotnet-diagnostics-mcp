@@ -15,6 +15,7 @@ using DotnetDiagnosticsMcp.Server.Azure.Discovery;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -127,6 +128,13 @@ internal static class DiagnosticServiceRegistration
 
         services.AddSingleton(options);
         services.AddSingleton<IKubernetesClientFactory, DefaultKubernetesClientFactory>();
+        // #234 — kubeconfig handle plumbing. Registered here (orchestrator scope) so the
+        // Kubernetes client factory always has the context + store seam wired, regardless
+        // of whether Azure discovery is also enabled. TryAdd lets AddAzureDiscoveryServices
+        // share the same singletons without duplicate registration.
+        services.TryAddSingleton<TimeProvider>(TimeProvider.System);
+        services.TryAddSingleton<IKubeconfigContext, AsyncLocalKubeconfigContext>();
+        services.TryAddSingleton<IKubeconfigHandleStore, InMemoryKubeconfigHandleStore>();
         services.AddSingleton<IKubernetesPodsApi, KubernetesPodsApi>();
         services.AddSingleton<IPodInventory, KubernetesPodInventory>();
         services.AddSingleton<Orchestrator.Investigations.IInvestigationStore, Orchestrator.Investigations.MemoryInvestigationStore>();
@@ -162,13 +170,22 @@ internal static class DiagnosticServiceRegistration
 
         // #233 — App Service + Container Apps backends are real implementations
         // mediated by adapter seams so unit tests can substitute fakes without
-        // touching the Azure SDK. AKS still uses the NotImplemented stub until
-        // #234 lands.
+        // touching the Azure SDK.
         services.AddSingleton<IAzureWebSiteCollectionAdapter, DefaultAzureWebSiteCollectionAdapter>();
         services.AddSingleton<IAzureContainerAppCollectionAdapter, DefaultAzureContainerAppCollectionAdapter>();
         services.AddSingleton<IAzureWebAppsDiscovery, DefaultAzureWebAppsDiscovery>();
         services.AddSingleton<IAzureContainerAppsDiscovery, DefaultAzureContainerAppsDiscovery>();
-        services.AddSingleton<IAzureAksDiscovery, NotImplementedAzureAksDiscovery>();
+
+        // #234 — AKS cluster discovery + kubeconfig handle subsystem. The handle store
+        // and ambient context are TryAdded so AddOrchestratorServices may have already
+        // registered them; either way they end up as singletons shared across both
+        // surfaces. TimeProvider.System is the production clock; tests substitute a
+        // synthetic one.
+        services.TryAddSingleton<TimeProvider>(TimeProvider.System);
+        services.TryAddSingleton<IKubeconfigContext, AsyncLocalKubeconfigContext>();
+        services.TryAddSingleton<IKubeconfigHandleStore, InMemoryKubeconfigHandleStore>();
+        services.AddSingleton<IAzureManagedClusterCollectionAdapter, AzureManagedClusterCollectionAdapter>();
+        services.AddSingleton<IAzureAksDiscovery, AzureAksDiscovery>();
         return true;
     }
 

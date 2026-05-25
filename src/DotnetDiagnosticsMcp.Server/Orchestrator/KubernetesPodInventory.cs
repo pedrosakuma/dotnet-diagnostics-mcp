@@ -69,6 +69,15 @@ internal sealed class KubernetesPodInventory : IPodInventory
                 $"Kubernetes API call failed: {(int?)ex.Response?.StatusCode} {ex.Message}",
                 ex);
         }
+        catch (KubeconfigHandleNotFoundException ex)
+        {
+            // #234 — distinct error kind so the LLM can react with discover_azure rather
+            // than retry the listing. The ex.Message is safe to forward (never contains
+            // the handle value); see DefaultKubernetesClientFactory.GetOrBuildHandleClient.
+            throw new OrchestratorException(
+                OrchestratorErrorKinds.KubeconfigHandleNotFound,
+                ex.Message, ex);
+        }
         catch (KubernetesConfigurationException ex)
         {
             throw new OrchestratorException(
