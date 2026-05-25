@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Runtime.CompilerServices;
@@ -14,6 +15,8 @@ using DotnetDiagnosticsMcp.Server.Azure.Discovery;
 using DotnetDiagnosticsMcp.Server.Orchestrator;
 using DotnetDiagnosticsMcp.Server.Tools;
 using FluentAssertions;
+using k8s;
+using k8s.Models;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
@@ -53,8 +56,10 @@ public sealed class KubeconfigRedactionAuditTests
         "apiVersion: v1\n" +
         "kind: Config\n" +
         "# " + ConfigSentinel + "\n" +
-        "clusters:\n- cluster:\n    server: " + ServerSentinel + "\n" +
-        "users:\n- user:\n    token: " + TokenSentinel + "\n");
+        "clusters:\n- name: aks-prod\n  cluster:\n    server: " + ServerSentinel + "\n" +
+        "users:\n- name: aks-prod-user\n  user:\n    token: " + TokenSentinel + "\n" +
+        "contexts:\n- name: aks-prod\n  context:\n    cluster: aks-prod\n    user: aks-prod-user\n" +
+        "current-context: aks-prod\n");
 
     [Fact]
     public async Task FullToolPipeline_DiscoverThenRedeem_NeverLeaksKubeconfigOrHandle()
@@ -95,9 +100,29 @@ public sealed class KubeconfigRedactionAuditTests
         var handle = handoff.KubeconfigHandle;
 
         // ---- Act 2: list_orchestrator(kind=pods, kubeconfigHandle=handle).
-        var inventory = new ObservingInventory(loggerFactory.CreateLogger<ObservingInventory>(), context);
+        // FIX 6 (#234 review, gpt-5.5 2nd pass): the v1 audit substituted a fake
+        // IPodInventory that bypassed IKubernetesPodsApi → DefaultKubernetesClientFactory
+        // entirely. That left the very code path the bearer credential flows through
+        // (the kubeconfig redemption inside the factory) outside the audit. We now
+        // wire up the PRODUCTION KubernetesPodInventory backed by a fake
+        // IKubernetesPodsApi that drives the real DefaultKubernetesClientFactory
+        // end-to-end (GetClient → resolve handle → build Kubernetes client →
+        // touch BaseUri) before returning an empty pod list.
         var orchestratorOptions = new OrchestratorOptions { Enabled = true, DefaultNamespace = "diag" };
         orchestratorOptions.NamespaceAllowlist.Add("diag");
+
+        var clientFactory = new DefaultKubernetesClientFactory(
+            loggerFactory.CreateLogger<DefaultKubernetesClientFactory>(),
+            context,
+            store);
+        var redeemingApi = new RedeemingPodsApi(
+            clientFactory,
+            context,
+            loggerFactory.CreateLogger<RedeemingPodsApi>());
+        var inventory = new KubernetesPodInventory(
+            redeemingApi,
+            orchestratorOptions,
+            loggerFactory.CreateLogger<KubernetesPodInventory>());
 
         var redeemResult = await ListOrchestratorTool.ListOrchestrator(
             inventory: inventory,
@@ -112,8 +137,14 @@ public sealed class KubeconfigRedactionAuditTests
             cancellationToken: CancellationToken.None);
 
         redeemResult.IsError.Should().BeFalse(redeemResult.Summary);
-        inventory.HandleObservedDuringCall.Should().Be(handle,
+        redeemingApi.HandleObservedDuringCall.Should().Be(handle,
             "handle MUST be active on the AsyncLocal context for the inner inventory call");
+        redeemingApi.RedemptionBaseUri.Should().NotBeNull(
+            "the fake IKubernetesPodsApi MUST drive DefaultKubernetesClientFactory.GetClient() so the audit covers the production redemption code path");
+        redeemingApi.RedemptionBaseUri!.Scheme.Should().Be("https",
+            "the production factory must have parsed the in-memory kubeconfig into a Kubernetes client (proves redemption ran without leaking bytes anywhere)");
+
+        clientFactory.Dispose();
 
         // ---- Sweep #1: serialized response envelopes never contain the sentinels.
         var discoverJson = JsonSerializer.Serialize(discoverResult);
@@ -205,26 +236,74 @@ public sealed class KubeconfigRedactionAuditTests
             => Task.FromResult(new AzurePagedResult<AzureContainerAppCandidate>(Array.Empty<AzureContainerAppCandidate>(), null));
     }
 
-    private sealed class ObservingInventory : IPodInventory
+    /// <summary>
+    /// FIX 6 (#234 review, gpt-5.5 2nd pass): test double for
+    /// <see cref="IKubernetesPodsApi"/> that drives the PRODUCTION
+    /// <see cref="DefaultKubernetesClientFactory"/> end-to-end on every list call so
+    /// the audit covers the kubeconfig redemption surface. No network call is made;
+    /// reading <see cref="IKubernetes.BaseUri"/> is sufficient to prove the factory
+    /// resolved the handle, parsed the bytes, and constructed a live client.
+    /// </summary>
+    private sealed class RedeemingPodsApi : IKubernetesPodsApi
     {
-        private readonly ILogger _logger;
+        private readonly IKubernetesClientFactory _factory;
         private readonly IKubeconfigContext _context;
-        public string? HandleObservedDuringCall { get; private set; }
+        private readonly ILogger _logger;
 
-        public ObservingInventory(ILogger logger, IKubeconfigContext context)
+        public string? HandleObservedDuringCall { get; private set; }
+        public Uri? RedemptionBaseUri { get; private set; }
+
+        public RedeemingPodsApi(IKubernetesClientFactory factory, IKubeconfigContext context, ILogger logger)
         {
-            _logger = logger;
+            _factory = factory;
             _context = context;
+            _logger = logger;
         }
 
-        public Task<PodCandidatePage> ListPodsAsync(ListPodsRequest request, CancellationToken cancellationToken)
+        public Task<V1PodList> ListPodsAsync(
+            string? namespaceName,
+            string? labelSelector,
+            string? fieldSelector,
+            int? limit,
+            string? continueToken,
+            CancellationToken cancellationToken)
         {
             HandleObservedDuringCall = _context.CurrentHandle;
-            // Emit a representative log line so the audit covers the inventory category.
-            _logger.LogInformation("Listing pods in {Namespace} (kubeconfigHandlePresent: {Present}).",
-                request.Namespace, _context.CurrentHandle is not null);
-            return Task.FromResult(new PodCandidatePage(Array.Empty<PodCandidate>(), null));
+            // Run the production redemption end-to-end. The factory will resolve the
+            // ambient handle through IKubeconfigHandleStore, parse the YAML, and
+            // build a Kubernetes client whose pipeline carries the bearer token.
+            var client = _factory.GetClient();
+            RedemptionBaseUri = client.BaseUri;
+            // Representative log line at Information so the audit sweep covers the
+            // inventory category. NEVER log the handle value or the BaseUri (the
+            // latter contains the kubeconfig server field).
+            _logger.LogInformation(
+                "Listing pods in {Namespace} (kubeconfigHandlePresent: {Present}).",
+                namespaceName,
+                _context.CurrentHandle is not null);
+            return Task.FromResult(new V1PodList
+            {
+                Items = new List<V1Pod>(),
+                Metadata = new V1ListMeta(),
+            });
         }
+
+        public Task<V1Pod> ReadPodAsync(string namespaceName, string name, CancellationToken cancellationToken)
+            => throw new NotSupportedException("ReadPodAsync is not exercised by the redaction audit.");
+
+        public Task<V1Pod> AddEphemeralContainerAsync(
+            string namespaceName,
+            string name,
+            V1EphemeralContainer ephemeralContainer,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("AddEphemeralContainerAsync is not exercised by the redaction audit.");
+
+        public Task<IStreamDemuxer> OpenPortForwardAsync(
+            string namespaceName,
+            string name,
+            int podPort,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("OpenPortForwardAsync is not exercised by the redaction audit.");
     }
 
     private sealed class ControllableClock : TimeProvider
