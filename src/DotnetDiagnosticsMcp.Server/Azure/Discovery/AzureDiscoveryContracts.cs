@@ -29,7 +29,7 @@ public sealed record AzureDiscoveryRequest(
 /// Mirrors the orchestrator <c>PodCandidatePage</c> shape so the LLM-side paging
 /// idiom is identical across tools.
 /// </summary>
-public sealed record AzurePagedResult<T>(IReadOnlyList<T> Items, string? NextCursor);
+public sealed record AzurePagedResult<T>(IReadOnlyList<T> Items, string? NextCursor = null);
 
 /// <summary>
 /// One Azure App Service candidate. Populated by the App Service backend in #233.
@@ -37,24 +37,24 @@ public sealed record AzurePagedResult<T>(IReadOnlyList<T> Items, string? NextCur
 /// <param name="ResourceId">Full ARM resource id (e.g. <c>/subscriptions/.../sites/foo</c>).</param>
 /// <param name="Name">Site name.</param>
 /// <param name="Location">Azure region (e.g. <c>westeurope</c>).</param>
+/// <param name="State">Site state — usually <c>Running</c> or <c>Stopped</c>.</param>
+/// <param name="Kind">Raw site kind (<c>app</c>, <c>app,linux</c>, <c>functionapp</c>, …).</param>
+/// <param name="ReadinessWarnings">Backend-emitted warnings the LLM should surface (e.g. "no SCM endpoint reachable").</param>
 /// <param name="DefaultHostName">Default hostname (e.g. <c>foo.azurewebsites.net</c>); null when unknown.</param>
 /// <param name="RuntimeStack">Stack identifier such as <c>linuxFxVersion</c> / <c>netFrameworkVersion</c>; null when undetectable.</param>
 /// <param name="RuntimeVersion">Resolved runtime version when known.</param>
 /// <param name="InstanceCount">Effective instance count when surfaced by ARM; null otherwise.</param>
-/// <param name="State">Site state — usually <c>Running</c> or <c>Stopped</c>.</param>
-/// <param name="Kind">Raw site kind (<c>app</c>, <c>app,linux</c>, <c>functionapp</c>, …).</param>
-/// <param name="ReadinessWarnings">Backend-emitted warnings the LLM should surface (e.g. "no SCM endpoint reachable").</param>
 public sealed record AzureWebAppCandidate(
     string ResourceId,
     string Name,
     string Location,
-    string? DefaultHostName,
-    string? RuntimeStack,
-    string? RuntimeVersion,
-    int? InstanceCount,
     string State,
     string Kind,
-    IReadOnlyList<string> ReadinessWarnings);
+    IReadOnlyList<string> ReadinessWarnings,
+    string? DefaultHostName = null,
+    string? RuntimeStack = null,
+    string? RuntimeVersion = null,
+    int? InstanceCount = null);
 
 /// <summary>
 /// One Azure Container Apps candidate. Populated by the Container Apps backend in #233.
@@ -62,24 +62,24 @@ public sealed record AzureWebAppCandidate(
 /// <param name="ResourceId">Full ARM resource id of the container app.</param>
 /// <param name="Name">Container app name.</param>
 /// <param name="Location">Azure region.</param>
-/// <param name="LatestRevisionFqdn">FQDN of the latest revision when available.</param>
 /// <param name="ContainerImages">Image references declared on the latest revision template.</param>
-/// <param name="MinReplicas">Configured minimum replica count; null when not set on the revision.</param>
-/// <param name="MaxReplicas">Configured maximum replica count; null when not set on the revision.</param>
 /// <param name="ProvisioningState">ARM provisioning state (e.g. <c>Succeeded</c>, <c>Failed</c>).</param>
 /// <param name="RunningState">Runtime state (e.g. <c>Running</c>, <c>Stopped</c>).</param>
 /// <param name="ReadinessWarnings">Backend-emitted warnings (e.g. "no ingress").</param>
+/// <param name="LatestRevisionFqdn">FQDN of the latest revision when available.</param>
+/// <param name="MinReplicas">Configured minimum replica count; null when not set on the revision.</param>
+/// <param name="MaxReplicas">Configured maximum replica count; null when not set on the revision.</param>
 public sealed record AzureContainerAppCandidate(
     string ResourceId,
     string Name,
     string Location,
-    string? LatestRevisionFqdn,
     IReadOnlyList<string> ContainerImages,
-    int? MinReplicas,
-    int? MaxReplicas,
     string ProvisioningState,
     string RunningState,
-    IReadOnlyList<string> ReadinessWarnings);
+    IReadOnlyList<string> ReadinessWarnings,
+    string? LatestRevisionFqdn = null,
+    int? MinReplicas = null,
+    int? MaxReplicas = null);
 
 /// <summary>
 /// One AKS cluster candidate. Populated by the AKS backend in #234.
@@ -87,22 +87,22 @@ public sealed record AzureContainerAppCandidate(
 /// <param name="ResourceId">Full ARM resource id of the managed cluster.</param>
 /// <param name="Name">Cluster name.</param>
 /// <param name="Location">Azure region.</param>
+/// <param name="AgentPoolCount">Number of agent pools on the cluster.</param>
+/// <param name="ReadinessWarnings">Backend-emitted warnings (e.g. "private cluster — kubeconfig handle requires VPN").</param>
 /// <param name="Fqdn">Cluster API server FQDN when reachable.</param>
 /// <param name="KubernetesVersion">Currently running Kubernetes version.</param>
-/// <param name="AgentPoolCount">Number of agent pools on the cluster.</param>
 /// <param name="NodeResourceGroup">Auto-managed node resource group.</param>
 /// <param name="Handoff">Populated only when <see cref="AzureDiscoveryRequest.IncludeKubeconfig"/> is true; never carries raw kubeconfig.</param>
-/// <param name="ReadinessWarnings">Backend-emitted warnings (e.g. "private cluster — kubeconfig handle requires VPN").</param>
 public sealed record AzureAksClusterCandidate(
     string ResourceId,
     string Name,
     string Location,
-    string? Fqdn,
-    string? KubernetesVersion,
     int AgentPoolCount,
-    string? NodeResourceGroup,
-    AzureAksHandoff? Handoff,
-    IReadOnlyList<string> ReadinessWarnings);
+    IReadOnlyList<string> ReadinessWarnings,
+    string? Fqdn = null,
+    string? KubernetesVersion = null,
+    string? NodeResourceGroup = null,
+    AzureAksHandoff? Handoff = null);
 
 /// <summary>
 /// Opaque, process-local handle for a kubeconfig minted by the AKS backend (#234).
