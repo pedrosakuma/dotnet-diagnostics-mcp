@@ -76,7 +76,7 @@ jobs:
         # Attests the package bytes that are uploaded as an artifact below; the same
         # bytes are downloaded by the publish-nuget job and pushed to NuGet.org, so
         # consumers verifying the published .nupkg get a matching SLSA attestation.
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: 'artifacts/nupkg/*.nupkg'
 
@@ -160,7 +160,7 @@ jobs:
           fi
 
       - name: Attest binary archive provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
             artifacts/dotnet-diagnostics-mcp-*.tar.gz
