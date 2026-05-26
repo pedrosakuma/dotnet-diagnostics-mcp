@@ -26,6 +26,7 @@ using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.ThreadPool;
 using DotnetDiagnosticsMcp.Core.Threads;
+using DotnetDiagnosticsMcp.Core.Triage;
 using DotnetDiagnosticsMcp.Server.Security;
 using DotnetDiagnosticsMcp.Server.Diagnostics;
 using Microsoft.Diagnostics.NETCore.Client;
@@ -350,6 +351,127 @@ public sealed class DiagnosticTools
         var hints = BuildRuntimeConfigHints(runtimeConfig);
         return WithContext(DiagnosticResult.Ok(runtimeConfig, summary, hints), resolved.Context);
     }
+
+    [RequireScope("read-counters")]
+    [Description(
+        "Phase 12 IoT-style triage: collects counters (5s), runs server-side classification, and returns a verdict with actionable hints. " +
+        "The LLM just follows the first hint — no interpretation needed. " +
+        "Verdicts: cpu-bound, gc-pressure, threadpool-starvation, lock-contention, io-bound, healthy. " +
+        "Severity: critical (immediate action), degraded (investigate), healthy (all clear).")]
+    public static async Task<DiagnosticResult<TriageResult>> PerformTriage(
+        ICounterCollector collector,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Duration of the counter collection window in seconds. Must be >= 1. Defaults to 5.")] int durationSeconds = 5,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1)
+        {
+            return InvalidArg<TriageResult>(nameof(durationSeconds), "must be >= 1");
+        }
+
+        var resolved = await ResolveContextAsync<TriageResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null)
+        {
+            return resolved.Failure;
+        }
+
+        var pid = resolved.ProcessId;
+
+        // Collect counters with default providers (System.Runtime, ASP.NET Core, Kestrel).
+        var snapshot = await collector.CollectAsync(
+            pid,
+            TimeSpan.FromSeconds(durationSeconds),
+            providers: null, // defaults
+            meters: ["Microsoft.AspNetCore.Hosting"], // for request duration p95
+            intervalSeconds: 1,
+            maxInstrumentTimeSeries: 100,
+            cancellationToken).ConfigureAwait(false);
+
+        // Extract request duration p95 if available.
+        var requestDuration = HeadlineCounters.FindRequestDuration(snapshot.Meters);
+        var requestDurationP95 = requestDuration?.Histogram?.P95;
+
+        // Classify using the shared logic.
+        var triage = TriageClassifier.Classify(snapshot, requestDurationP95);
+
+        // Build hints based on verdict.
+        var hints = BuildTriageHints(triage, pid);
+
+        // Build summary.
+        var secondaryText = triage.SecondaryVerdicts?.Count > 0
+            ? $" (also: {string.Join(", ", triage.SecondaryVerdicts)})"
+            : string.Empty;
+        var summary = $"Triage: {triage.Verdict} ({triage.Severity}){secondaryText} — cpu={triage.Evidence.CpuUsage:F1}%, time-in-gc={triage.Evidence.TimeInGc:F1}%, queue={triage.Evidence.ThreadPoolQueueLength:F0}";
+
+        var ok = DiagnosticResult.Ok(triage, summary, [.. hints]);
+        return WithContext(ok, resolved.Context);
+    }
+
+    private static List<NextActionHint> BuildTriageHints(TriageResult triage, int pid)
+    {
+        var hints = new List<NextActionHint>();
+
+        // Add hints based on verdict (same logic as auto-hints in SnapshotCounters).
+        switch (triage.Verdict)
+        {
+            case TriageClassifier.CpuBound:
+                hints.Add(new NextActionHint("collect_sample", $"cpu-usage={triage.Evidence.CpuUsage:F1}% — investigate the hot path.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10, ["topN"] = 25 }));
+                break;
+
+            case TriageClassifier.GcPressure:
+                hints.Add(new NextActionHint("collect_events", $"time-in-gc={triage.Evidence.TimeInGc:F1}% — GC pressure detected.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "gc", ["durationSeconds"] = 10 }));
+                hints.Add(new NextActionHint("inspect_heap", "GC pressure — inspect heap for allocation patterns.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["source"] = "live" }));
+                break;
+
+            case TriageClassifier.ThreadPoolStarvation:
+                hints.Add(new NextActionHint("collect_events", $"threadpool-queue-length={triage.Evidence.ThreadPoolQueueLength:F0} — possible ThreadPool starvation.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "threadpool", ["durationSeconds"] = 10 }));
+                break;
+
+            case TriageClassifier.LockContention:
+                hints.Add(new NextActionHint("collect_events", $"monitor-lock-contention-count={triage.Evidence.MonitorLockContentionCount:F0} — lock contention detected.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "contention", ["durationSeconds"] = 10 }));
+                break;
+
+            case TriageClassifier.IoBound:
+                hints.Add(new NextActionHint("collect_thread_snapshot", $"cpu-usage={triage.Evidence.CpuUsage:F1}% but queue={triage.Evidence.ThreadPoolQueueLength:F0} — I/O bound likely, inspect blocking stacks.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+                hints.Add(new NextActionHint("collect_events", "Low CPU + queue buildup — trace activities to see what's waiting.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "activities", ["durationSeconds"] = 10 }));
+                break;
+
+            default: // Healthy
+                hints.Add(new NextActionHint("collect_events", "System looks healthy — confirm with GC events if response times are high.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "gc", ["durationSeconds"] = 10 }));
+                break;
+        }
+
+        // Add hints for secondary verdicts (less detailed).
+        if (triage.SecondaryVerdicts is not null)
+        {
+            foreach (var secondary in triage.SecondaryVerdicts)
+            {
+                hints.Add(new NextActionHint("collect_events", $"Also detected: {secondary} — follow up after primary issue.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = GetKindForVerdict(secondary), ["durationSeconds"] = 10 }));
+            }
+        }
+
+        return hints;
+    }
+
+    private static string GetKindForVerdict(string verdict) => verdict switch
+    {
+        TriageClassifier.CpuBound => "counters",
+        TriageClassifier.GcPressure => "gc",
+        TriageClassifier.ThreadPoolStarvation => "threadpool",
+        TriageClassifier.LockContention => "contention",
+        TriageClassifier.IoBound => "activities",
+        _ => "counters"
+    };
 
     [RequireScope("read-counters")]
     [Description(
