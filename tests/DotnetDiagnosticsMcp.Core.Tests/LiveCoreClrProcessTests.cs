@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Text.Json;
 using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Artifacts;
 using DotnetDiagnosticsMcp.Core.Capabilities;
@@ -60,7 +61,13 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         psi.ArgumentList.Add("--urls");
         psi.ArgumentList.Add("http://127.0.0.1:0");
         psi.Environment["DOTNET_NOLOGO"] = "1";
+        psi.Environment["DOTNET_gcServer"] = "0";
+        psi.Environment["DOTNET_TieredCompilation"] = "1";
+        psi.Environment["DOTNET_TC_QuickJit"] = "1";
+        psi.Environment["DOTNET_TieredPGO"] = "1";
         psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
+        psi.Environment["SECRET_TOKEN"] = "abc";
+        psi.Environment["MY_KEY"] = "xyz";
 
         _sampleProcess = Process.Start(psi);
         if (_sampleProcess is null)
@@ -229,6 +236,30 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         resources.Trend.Should().NotBeNull();
         resources.Trend!.Samples.Should().HaveCountGreaterThanOrEqualTo(2);
         resources.CapturedAt.Should().Be(resources.Trend.Samples[^1].Timestamp);
+    }
+
+    [Fact]
+    public async Task RuntimeConfig_ReportsClrSettings_And_AllowlistedEnvironment()
+    {
+        EnsureSampleRunning();
+
+        var runtimeConfig = await ProbeRuntimeConfigAsync(Pid);
+
+        runtimeConfig.ProcessId.Should().Be(Pid);
+        runtimeConfig.Gc.Should().NotBeNull();
+        runtimeConfig.Gc!.IsServerGc.Should().BeFalse();
+        runtimeConfig.ThreadPool.Should().NotBeNull(runtimeConfig.Notes.Count == 0 ? string.Empty : string.Join(" | ", runtimeConfig.Notes));
+        runtimeConfig.ThreadPool!.MinWorkerThreads.Should().BeGreaterThan(0);
+        runtimeConfig.ThreadPool.MaxWorkerThreads.GetValueOrDefault().Should().BeGreaterThan(runtimeConfig.ThreadPool.MinWorkerThreads.GetValueOrDefault());
+        runtimeConfig.TieredCompilation.Should().NotBeNull();
+        runtimeConfig.TieredCompilation!.Enabled.Should().BeTrue();
+        runtimeConfig.TieredCompilation.QuickJitEnabled.Should().BeTrue();
+        runtimeConfig.TieredCompilation.DynamicPgoEnabled.Should().BeTrue();
+        runtimeConfig.EnvVars.Should().Contain(entry => entry.Name.StartsWith("DOTNET_", StringComparison.OrdinalIgnoreCase));
+        runtimeConfig.EnvVars.Should().OnlyContain(entry => RuntimeConfigInspector.IsAllowlistedEnvironmentVariable(entry.Name));
+        runtimeConfig.EnvVars.Should().NotContain(entry => entry.Name == "SECRET_TOKEN" || entry.Name == "MY_KEY");
+        runtimeConfig.AppContextSwitches.Should().BeEmpty();
+        runtimeConfig.Notes.Should().Contain(note => note.Contains("security boundary", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact(Timeout = 60_000)]
@@ -1777,17 +1808,47 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         return await AuxiliarySampleHost.StartAsync(sampleName, sampleDll);
     }
 
+    private static async Task<RuntimeConfigView> ProbeRuntimeConfigAsync(int processId)
+    {
+        var probeDll = LocateProjectDll("tests", "RuntimeConfigProbe", "RuntimeConfigProbe")
+            ?? throw SkipException.ForReason("RuntimeConfigProbe.dll not found. Build the helper before running this test.");
+
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(probeDll)!,
+        };
+        psi.ArgumentList.Add(probeDll);
+        psi.ArgumentList.Add(processId.ToString());
+
+        using var process = Process.Start(psi)
+            ?? throw SkipException.ForReason("Failed to start RuntimeConfigProbe.");
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        process.ExitCode.Should().Be(0, stderr);
+        return JsonSerializer.Deserialize<RuntimeConfigView>(stdout)
+            ?? throw new InvalidOperationException($"RuntimeConfigProbe returned invalid JSON. stderr={stderr}");
+    }
+
     private static string? LocateSampleDll(string sampleName = "CoreClrSample")
+        => LocateProjectDll("samples", sampleName, sampleName);
+
+    private static string? LocateProjectDll(string topLevelDirectory, string projectDirectoryName, string assemblyName)
     {
         var probe = AppContext.BaseDirectory;
         for (var i = 0; i < 8; i++)
         {
-            var sampleDir = Path.Combine(probe, "samples", sampleName);
-            if (Directory.Exists(sampleDir))
+            var projectDir = Path.Combine(probe, topLevelDirectory, projectDirectoryName);
+            if (Directory.Exists(projectDir))
             {
                 foreach (var configuration in new[] { "Release", "Debug" })
                 {
-                    var dll = Path.Combine(sampleDir, "bin", configuration, "net10.0", $"{sampleName}.dll");
+                    var dll = Path.Combine(projectDir, "bin", configuration, "net10.0", $"{assemblyName}.dll");
                     if (File.Exists(dll))
                     {
                         return dll;

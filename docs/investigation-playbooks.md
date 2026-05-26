@@ -153,6 +153,20 @@ that aren't in the sidecar image.
 
 ---
 
+## 2b. "Is this Server GC / did someone override ThreadPool or tiered compilation?"
+
+1. Call `inspect_process(view="runtime-config")` against the target PID.
+2. Read `gc` first:
+   - `isServerGc=true` + `heapCount > 1` → Server GC is active.
+   - `isConcurrent=false` / `isBackground=false` → expect longer stop-the-world pauses than the default CoreCLR workstation profile.
+3. Read `threadPool` next:
+   - unexpectedly low `minWorkerThreads` or `hillClimbingEnabled=false` → keep starvation in mind before blaming downstream I/O.
+4. Check `tieredCompilation` / `envVars`:
+   - `DOTNET_TieredCompilation=0` / `DOTNET_TieredPGO=0` overrides explain surprising cold-start or steady-state perf behavior.
+   - `notes[]` explicitly says when a field is unavailable (for example ptrace-gated ClrMD attach on Linux).
+
+---
+
 ## 3. "We're seeing 5xxs in production"
 
 ### Step 1

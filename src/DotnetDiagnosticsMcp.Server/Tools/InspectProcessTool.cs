@@ -63,6 +63,9 @@ public sealed class InspectProcessTool
     /// <summary>Sample OS-level memory growth over a configurable window. Works on any OS process.</summary>
     public const string MemoryTrendView = "memory_trend";
 
+    /// <summary>Inspect GC / ThreadPool / tiered-comp settings, filtered env vars and AppContext switches.</summary>
+    public const string RuntimeConfigView = "runtime-config";
+
     /// <summary>Inspect FD / handle / socket state, optionally over a short trend window.</summary>
     public const string ResourcesView = "resources";
 
@@ -76,6 +79,7 @@ public sealed class InspectProcessTool
         CapabilitiesView,
         ContainerView,
         MemoryTrendView,
+        RuntimeConfigView,
         ResourcesView,
         RequestsNowView,
     };
@@ -83,7 +87,7 @@ public sealed class InspectProcessTool
     [RequireAnyScope("read-counters", "ptrace")]
     [McpServerTool(
         Name = "inspect_process",
-        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / resources / requests-now)",
+        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / runtime-config / resources / requests-now)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
@@ -91,11 +95,12 @@ public sealed class InspectProcessTool
     [Description(
         "RFC 0002 §4.6 — single bootstrap entrypoint that subsumes list_dotnet_processes, " +
         "get_process_info, get_diagnostic_capabilities, get_container_signals and get_memory_trend, " +
-        "plus the Phase 10.3 resources view and Phase 10.4 requests-now view. Pick the projection with view=list|info|capabilities|container|memory_trend|resources|requests-now. " +
+        "plus the Phase 11 runtime-config view, the Phase 10.3 resources view, and the Phase 10.4 requests-now view. Pick the projection with view=list|info|capabilities|container|memory_trend|runtime-config|resources|requests-now. " +
         "view=list returns every .NET process visible to the diagnostic IPC and ignores processId. " +
         "All other views auto-resolve the lone visible .NET process when processId is omitted; " +
         "view=memory_trend and view=resources additionally accept any OS pid (NativeAOT / non-.NET) when processId is explicit, " +
         "and use durationSeconds + sampleEverySeconds to shape their observation windows. " +
+        "view=runtime-config reads filtered runtime env vars plus best-effort ClrMD GC / ThreadPool settings without adding a new auth scope. " +
         "view=requests-now opens a short EventPipe session on Microsoft.AspNetCore.Hosting and then captures a live thread snapshot, so it requires the ptrace scope.")]
     public static async Task<DiagnosticResult<InspectProcessReport>> InspectProcess(
         IProcessDiscovery discovery,
@@ -103,10 +108,11 @@ public sealed class InspectProcessTool
         ICapabilityDetector detector,
         IContainerSignalsCollector containerCollector,
         IMemoryTrendCollector memoryCollector,
+        IRuntimeConfigInspector runtimeConfigInspector,
         IProcessResourcesCollector resourcesCollector,
         IRequestsNowCollector requestsNowCollector,
         IPrincipalAccessor principalAccessor,
-        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|resources|requests-now. Defaults to 'list'.")]
+        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|runtime-config|resources|requests-now. Defaults to 'list'.")]
         string? view = ListView,
         [Description("Operating system process id of the target. Required by no view: list ignores it, every other view auto-resolves the lone visible .NET process when omitted.")]
         int? processId = null,
@@ -171,6 +177,12 @@ public sealed class InspectProcessTool
                     .ConfigureAwait(false),
                 canonical,
                 (report, data) => report with { MemoryTrend = data }),
+            RuntimeConfigView => Wrap(
+                await DiagnosticTools.GetRuntimeConfig(
+                        runtimeConfigInspector, resolver, processId, cancellationToken)
+                    .ConfigureAwait(false),
+                canonical,
+                (report, data) => report with { RuntimeConfig = data }),
             ResourcesView => Wrap(
                 await DiagnosticTools.GetProcessResources(
                         resourcesCollector, resolver, processId, durationSeconds ?? 0, sampleEverySeconds, cancellationToken)
@@ -232,6 +244,7 @@ public sealed class InspectProcessTool
 /// <param name="Capabilities">Populated when <c>view=capabilities</c> — capability matrix.</param>
 /// <param name="Container">Populated when <c>view=container</c> — cgroup v2 signals.</param>
 /// <param name="MemoryTrend">Populated when <c>view=memory_trend</c> — OS memory samples + verdict.</param>
+/// <param name="RuntimeConfig">Populated when <c>view=runtime-config</c> — GC / ThreadPool / tiered-comp settings plus filtered env vars.</param>
 /// <param name="Resources">Populated when <c>view=resources</c> — FD / handle / socket state.</param>
 /// <param name="RequestsNow">Populated when <c>view=requests-now</c> — in-flight ASP.NET Core requests with thread stacks.</param>
 public sealed record InspectProcessReport(
@@ -241,5 +254,6 @@ public sealed record InspectProcessReport(
     DiagnosticCapabilities? Capabilities = null,
     ContainerSignals? Container = null,
     MemoryTrend? MemoryTrend = null,
+    RuntimeConfigView? RuntimeConfig = null,
     ProcessResources? Resources = null,
     IReadOnlyList<InFlightHttpRequest>? RequestsNow = null);

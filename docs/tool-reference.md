@@ -327,6 +327,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`inspect_process(view="capabilities")`](#inspect_process(view="capabilities")) *(deprecated — use `inspect_process(view="capabilities")`)* | ~2 s | no | ✅ | opens a short EventPipe probe |
 | [`inspect_process(view="container")`](#inspect_process(view="container")) *(deprecated — use `inspect_process(view="container")`)* | cheap | no | ✅ (Linux) | reads `/sys/fs/cgroup` + `/proc` files |
 | [`inspect_process(view="memory_trend")`](#inspect_process(view="memory_trend")) *(deprecated — use `inspect_process(view="memory_trend")`)* | window-bound | no | ✅ | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
+| [`inspect_process(view="runtime-config")`](#inspect_process(view="runtime-config")) | cheap | no | ✅ (Windows env partial) | ClrMD GC / ThreadPool probe + filtered `/proc/<pid>/environ` (Linux) |
 | [`inspect_process(view="resources")`](#inspect_process(view="resources")) | cheap / window-bound | no | ✅ (Linux/Windows partial) | reads `/proc/<pid>/fd`, `/proc/<pid>/net/tcp{,6}`, `/proc/<pid>/limits` (Linux) or `GetProcessHandleCount` (Windows) |
 | [`inspect_process(view="requests-now")`](#inspect_process(view="requests-now")) | ~2 s | no | ✅ (ptrace required) | short EventPipe request window + live thread snapshot |
 | `collect_sample(kind="off_cpu")` (Linux/Windows) | window-bound | no | ✅ (Linux) | **Deprecated — use `collect_sample(kind="off_cpu")`.** system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
@@ -400,7 +401,8 @@ hint to the perf-replay fallback tracked in issue #92.
 Consolidates the five legacy metadata tools — `inspect_process(view="list")`,
 `inspect_process(view="info")`, `inspect_process(view="capabilities")`, `inspect_process(view="container")`,
 `inspect_process(view="memory_trend")` — behind one `view` discriminator, and adds the
-Phase 10.3 `inspect_process(view="resources")` projection for FD / handle / socket inspection plus
+Phase 11 `inspect_process(view="runtime-config")` projection for GC / ThreadPool / tiered-comp startup settings,
+plus the Phase 10.3 `inspect_process(view="resources")` FD / handle / socket inspector and
 Phase 10.4 `inspect_process(view="requests-now")` for an in-flight ASP.NET Core request snapshot.
 Each legacy view delegates to the same implementation as the removed tool of the same name, so
 the payload under `data` is byte-identical to the legacy envelope's `data`.
@@ -409,8 +411,8 @@ the payload under `data` is byte-identical to the legacy envelope's `data`.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend" \| "resources" \| "requests-now"` | `"list"` | Which bootstrap projection to compute. |
-| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` or `view="resources"` the server auto-resolves the lone reachable .NET process; `view="requests-now"` also auto-resolves but still requires a real .NET process because it opens EventPipe + a live thread snapshot. |
+| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend" \| "runtime-config" \| "resources" \| "requests-now"` | `"list"` | Which bootstrap projection to compute. |
+| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` or `view="resources"` the server auto-resolves the lone reachable .NET process; `view="runtime-config"` and `view="requests-now"` also auto-resolve but still require a real .NET process because they open a live diagnostics path. |
 | `durationSeconds` | `int` | `10` / `0` | Used by `view="memory_trend"` and `view="resources"`. Memory trend requires `>= 2`; resources uses `0` for a single snapshot (default) or `>= 2` for trend mode. |
 | `sampleEverySeconds` | `int` | `2` | Used only by `view="memory_trend"` / `view="resources"`. Must be ≥ 1. |
 | `depth` | `SamplingDepth?` | `Summary` | Used only by `view="container"`; forwarded to `inspect_process(view="container")`. |
@@ -426,6 +428,7 @@ populated field matching the requested view:
 | `capabilities` | `DiagnosticCapabilities` (see [`inspect_process(view="capabilities")`](#inspect_process(view="capabilities"))) |
 | `container` | `ContainerSignals` (see [`inspect_process(view="container")`](#inspect_process(view="container"))) |
 | `memory_trend` | `MemoryTrend` (see [`inspect_process(view="memory_trend")`](#inspect_process(view="memory_trend"))) |
+| `runtime-config` | `RuntimeConfigView` (see [`inspect_process(view="runtime-config")`](#inspect_process(view="runtime-config"))) |
 | `resources` | `ProcessResources` (see [`inspect_process(view="resources")`](#inspect_process(view="resources"))) |
 | `requests-now` | `InFlightHttpRequest[]` (see [`inspect_process(view="requests-now")`](#inspect_process(view="requests-now"))) |
 
@@ -434,10 +437,11 @@ populated field matching the requested view:
 ```text
 inspect_process(view="list")          # discover candidate PIDs (or rely on auto-resolve)
 inspect_process(view="capabilities")  # confirm CoreCLR vs NativeAOT + ptrace/PSI/perf gates
-inspect_process(view="container")     # cheap cgroup/PSI signals before any EventPipe session
-inspect_process(view="memory_trend")  # lightweight leak signal — any OS process, no IPC
-inspect_process(view="resources")     # unmanaged FD / socket / handle signal when heap is flat
-inspect_process(view="requests-now")  # in-flight ASP.NET Core requests + current thread stacks
+inspect_process(view="container")       # cheap cgroup/PSI signals before any EventPipe session
+inspect_process(view="memory_trend")    # lightweight leak signal — any OS process, no IPC
+inspect_process(view="runtime-config")  # GC / ThreadPool / tiered-comp startup settings + filtered env vars
+inspect_process(view="resources")       # unmanaged FD / socket / handle signal when heap is flat
+inspect_process(view="requests-now")    # in-flight ASP.NET Core requests + current thread stacks
 ```
 
 Unknown view values surface as the standard discriminator-dispatch error
@@ -603,6 +607,60 @@ stack allocations.
 - `verdict = "growing"` → suggests `inspect_heap(source="live")` (identify dominant
   retainers) and `inspect_process(view="container")` (cross-check against cgroup limits).
 - `verdict = "stable"` or `"shrinking"` → suggests `collect_events(kind="counters")`.
+
+---
+
+## `inspect_process(view="runtime-config")`
+
+Cheap startup-configuration snapshot for questions like "is this Server GC?", "what are the ThreadPool min/max settings?", and "did someone override tiered compilation?".
+
+- **GC / ThreadPool**: best-effort ClrMD live attach. On Linux, ptrace restrictions degrade to `notes[]` instead of failing the whole view.
+- **Tiered compilation**: sourced from startup env overrides (`DOTNET_TieredCompilation`, `DOTNET_TC_QuickJit`, `DOTNET_TieredPGO`, plus `COMPlus_` aliases when present).
+- **Environment variables**: Linux reads `/proc/<pid>/environ`; Windows currently returns an explanatory note and an empty `envVars[]`.
+- **Security boundary**: `envVars[]` is strictly filtered to `DOTNET_`, `COMPlus_`, `ASPNETCORE_`, and `DOTNET_SYSTEM_` prefixes. Everything else is intentionally dropped.
+- **AppContext switches**: forward-compatible field shape; today returns `[]` with a note because the runtime does not expose them out-of-process.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target .NET process id. When omitted the server auto-resolves the lone reachable .NET process. |
+
+**Returns:** `RuntimeConfigView`:
+
+```json
+{
+  "processId": 12345,
+  "gc": {
+    "isServerGc": false,
+    "isConcurrent": true,
+    "isBackground": true,
+    "heapCount": 1,
+    "largeObjectHeapCompactionMode": null
+  },
+  "threadPool": {
+    "minWorkerThreads": 1,
+    "maxWorkerThreads": 32767,
+    "minIocpThreads": 1,
+    "maxIocpThreads": 1000,
+    "hillClimbingEnabled": true
+  },
+  "tieredCompilation": {
+    "enabled": true,
+    "quickJitEnabled": true,
+    "dynamicPgoEnabled": true
+  },
+  "envVars": [
+    { "name": "DOTNET_TieredCompilation", "value": "1" },
+    { "name": "ASPNETCORE_URLS", "value": "http://127.0.0.1:0" }
+  ],
+  "appContextSwitches": [],
+  "notes": [
+    "Environment variables are filtered to known runtime prefixes (DOTNET_ / COMPlus_ / ASPNETCORE_ / DOTNET_SYSTEM_); all other process env vars are intentionally omitted as a security boundary.",
+    "AppContext switches are not introspectable without an in-process probe; appContextSwitches is currently empty by design."
+  ]
+}
+```
 
 ---
 

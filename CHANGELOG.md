@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `inspect_process(view="runtime-config")` now reports best-effort GC / ThreadPool startup settings, tiered-compilation env overrides, filtered runtime environment variables, and a forward-compatible `appContextSwitches` field. **Security boundary:** `envVars[]` is strictly filtered to `DOTNET_`, `COMPlus_`, `ASPNETCORE_`, and `DOTNET_SYSTEM_` prefixes so secrets like `*_TOKEN` / `*_KEY` outside those prefixes are never exposed.
+
 ## [0.5.0] — 2026-05-26
 
 Highlights: Phase 10 application-semantics gaps. Eight new curated views

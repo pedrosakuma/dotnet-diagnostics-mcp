@@ -324,6 +324,34 @@ public sealed class DiagnosticTools
 
     [RequireScope("read-counters")]
     [Description(
+        "Reads a managed process's runtime configuration: best-effort GC and ThreadPool settings from a short ClrMD attach, tiered-compilation overrides from filtered runtime env vars, and a forward-compatible appContextSwitches field that currently stays empty with an explanatory note. " +
+        "Environment variables are filtered to the DOTNET_ / COMPlus_ / ASPNETCORE_ / DOTNET_SYSTEM_ prefixes as a hard security boundary. " +
+        "When processId is omitted the server auto-selects the lone reachable .NET process.")]
+    public static async Task<DiagnosticResult<RuntimeConfigView>> GetRuntimeConfig(
+        IRuntimeConfigInspector inspector,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (processId is < 0)
+        {
+            return InvalidArg<RuntimeConfigView>(nameof(processId), "must be a positive process id");
+        }
+
+        var resolved = await ResolveContextAsync<RuntimeConfigView>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null)
+        {
+            return resolved.Failure;
+        }
+
+        var runtimeConfig = await inspector.InspectAsync(resolved.ProcessId, cancellationToken).ConfigureAwait(false);
+        var summary = SummariseRuntimeConfig(runtimeConfig);
+        var hints = BuildRuntimeConfigHints(runtimeConfig);
+        return WithContext(DiagnosticResult.Ok(runtimeConfig, summary, hints), resolved.Context);
+    }
+
+    [RequireScope("read-counters")]
+    [Description(
         "Inspects OS-level FD / handle / socket state for a process. On Linux it reads /proc/<pid>/fd, /proc/<pid>/net/tcp{,6} and /proc/<pid>/limits to classify descriptors, aggregate TCP states and compute the nofile usage fraction. " +
         "On Windows it queries GetProcessHandleCount and reports a note that per-handle and per-socket breakdown is not yet implemented. " +
         "durationSeconds=0 returns a single snapshot (default); durationSeconds >= 2 samples a short trend window. " +
@@ -398,6 +426,53 @@ public sealed class DiagnosticTools
         var summary = SummariseRequestsNow(snapshot, windowSeconds);
         var hints = BuildRequestsNowHints(snapshot);
         return WithContext(DiagnosticResult.Ok(snapshot, summary, hints), resolved.Context);
+    }
+
+    private static string SummariseRuntimeConfig(RuntimeConfigView runtimeConfig)
+    {
+        var parts = new List<string>();
+        if (runtimeConfig.Gc is { } gc)
+        {
+            parts.Add($"GC server={gc.IsServerGc}, concurrent={gc.IsConcurrent?.ToString() ?? "unknown"}, background={gc.IsBackground?.ToString() ?? "unknown"}, heaps={gc.HeapCount}");
+        }
+
+        if (runtimeConfig.ThreadPool is { } threadPool)
+        {
+            parts.Add($"ThreadPool worker={FormatNullableInt(threadPool.MinWorkerThreads)}/{FormatNullableInt(threadPool.MaxWorkerThreads)}, iocp={FormatNullableInt(threadPool.MinIocpThreads)}/{FormatNullableInt(threadPool.MaxIocpThreads)}");
+        }
+
+        if (runtimeConfig.TieredCompilation is { } tiered)
+        {
+            parts.Add($"tiered={tiered.Enabled?.ToString() ?? "unknown"}, quickjit={tiered.QuickJitEnabled?.ToString() ?? "unknown"}, pgo={tiered.DynamicPgoEnabled?.ToString() ?? "unknown"}");
+        }
+
+        parts.Add($"env={runtimeConfig.EnvVars.Count}");
+        return $"Process {runtimeConfig.ProcessId} runtime-config: {string.Join("; ", parts)}.";
+    }
+
+    private static string FormatNullableInt(int? value)
+        => value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : "?";
+
+    private static NextActionHint[] BuildRuntimeConfigHints(RuntimeConfigView runtimeConfig)
+    {
+        if (runtimeConfig.ThreadPool is { HillClimbingEnabled: false })
+        {
+            return
+            [
+                new NextActionHint(
+                    "collect_events",
+                    "ThreadPool hill-climbing is not active; capture runtime counters before investigating starvation symptoms further.",
+                    new Dictionary<string, object?> { ["kind"] = "threadpool", ["processId"] = runtimeConfig.ProcessId, ["durationSeconds"] = 6 }),
+            ];
+        }
+
+        return
+        [
+            new NextActionHint(
+                "collect_events",
+                "Use runtime counters as the next cheap signal after confirming the startup configuration.",
+                new Dictionary<string, object?> { ["kind"] = "counters", ["processId"] = runtimeConfig.ProcessId, ["durationSeconds"] = 5 }),
+        ];
     }
 
     private static string SummariseProcessResources(ProcessResources resources, int durationSeconds)
