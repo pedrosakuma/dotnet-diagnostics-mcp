@@ -87,6 +87,8 @@ public sealed class CapabilityDetector : ICapabilityDetector
             threadSnapshotPreconditions);
 
         var (inContainer, cgroupV2, canSeeThrottle, psiAvailable) = await DetectContainerFlagsAsync(processId, cancellationToken).ConfigureAwait(false);
+        var canReadProcFs = DetectCanReadProcFs(processId);
+        var canReadHandleCount = OperatingSystem.IsWindows();
 
         return new DiagnosticCapabilities(
             ProcessId: processId,
@@ -116,6 +118,8 @@ public sealed class CapabilityDetector : ICapabilityDetector
             CanCollectThreadSnapshot = canCollectThreadSnapshot,
             ThreadSnapshotSource = threadSnapshotSource,
             ThreadSnapshotPreconditions = threadSnapshotPreconditions,
+            CanReadProcFs = canReadProcFs,
+            CanReadHandleCount = canReadHandleCount,
             EtwKernelOk = etwAvailable,
         };
     }
@@ -136,6 +140,31 @@ public sealed class CapabilityDetector : ICapabilityDetector
         {
             _logger.LogDebug(ex, "Container signal probe failed for pid {Pid} during capability detection.", processId);
             return (false, false, false, false);
+        }
+    }
+
+    private static bool DetectCanReadProcFs(int processId)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return false;
+        }
+
+        var fdDir = Path.Combine("/proc", processId.ToString(System.Globalization.CultureInfo.InvariantCulture), "fd");
+        if (!Directory.Exists(fdDir))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var enumerator = Directory.EnumerateFileSystemEntries(fdDir).GetEnumerator();
+            _ = enumerator.MoveNext();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
@@ -352,6 +381,15 @@ public sealed class CapabilityDetector : ICapabilityDetector
             primary += " collect_off_cpu_sample is not supported on this OS in this release.";
         }
 
+        if (OperatingSystem.IsLinux())
+        {
+            primary += DetectCanReadProcFsProbeSentence();
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            primary += " Windows handle count inspection is available via inspect_process(view=resources); per-handle and per-socket breakdown remains unsupported in this release.";
+        }
+
         // ClrMD live attach (collect_thread_snapshot, inspect_live_heap, inspect_dump on live
         // PID, collect_process_dump, plus collect_cpu_sample(resolveMethodInstantiations=true))
         // is also a host-side capability. Tell the LLM up front when the live-attach path
@@ -435,6 +473,21 @@ public sealed class CapabilityDetector : ICapabilityDetector
             CanCollect: false,
             Source: null,
             Preconditions: "No thread snapshot backend is registered for this runtime/OS.");
+    }
+
+    private static string DetectCanReadProcFsProbeSentence()
+    {
+        try
+        {
+            var selfFdDir = Path.Combine("/proc", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture), "fd");
+            using var enumerator = Directory.EnumerateFileSystemEntries(selfFdDir).GetEnumerator();
+            _ = enumerator.MoveNext();
+            return " /proc/<pid>/fd is readable, so inspect_process(view=resources) can classify descriptors without ptrace.";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return " /proc/<pid>/fd is not readable for this sidecar UID, so inspect_process(view=resources) may return partial data.";
+        }
     }
 
     private static bool IsEuStackAvailable()

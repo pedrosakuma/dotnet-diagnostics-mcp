@@ -318,6 +318,163 @@ public sealed class DiagnosticTools
 
     [RequireScope("read-counters")]
     [Description(
+        "Inspects OS-level FD / handle / socket state for a process. On Linux it reads /proc/<pid>/fd, /proc/<pid>/net/tcp{,6} and /proc/<pid>/limits to classify descriptors, aggregate TCP states and compute the nofile usage fraction. " +
+        "On Windows it queries GetProcessHandleCount and reports a note that per-handle and per-socket breakdown is not yet implemented. " +
+        "durationSeconds=0 returns a single snapshot (default); durationSeconds >= 2 samples a short trend window. " +
+        "When processId is provided it is used directly as the OS pid (no .NET IPC check). " +
+        "When processId is omitted the server auto-selects the lone reachable .NET process.")]
+    public static async Task<DiagnosticResult<ProcessResources>> GetProcessResources(
+        IProcessResourcesCollector collector,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target process. When provided, any OS process is accepted (no .NET IPC required). Optional — omit to auto-select the lone reachable .NET process.")] int? processId = null,
+        [Description("Observation window length in seconds. 0 returns a single snapshot (default); values >= 2 enable trend mode.")] int durationSeconds = 0,
+        [Description("Interval between consecutive samples in seconds when trend mode is enabled. Must be >= 1. Defaults to 2.")] int sampleEverySeconds = 2,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 0 || durationSeconds == 1)
+        {
+            return InvalidArg<ProcessResources>(nameof(durationSeconds), "must be 0 or >= 2");
+        }
+
+        if (sampleEverySeconds < 1)
+        {
+            return InvalidArg<ProcessResources>(nameof(sampleEverySeconds), "must be >= 1");
+        }
+
+        int pid;
+        ProcessContext? context = null;
+
+        if (processId is > 0)
+        {
+            pid = processId.Value;
+        }
+        else if (processId is < 0)
+        {
+            return InvalidArg<ProcessResources>(nameof(processId), "must be a positive process id");
+        }
+        else
+        {
+            var resolved = await ResolveContextAsync<ProcessResources>(resolver, null, cancellationToken).ConfigureAwait(false);
+            if (resolved.Failure is not null) return resolved.Failure;
+            pid = resolved.ProcessId;
+            context = resolved.Context;
+        }
+
+        var resources = await collector.CollectAsync(pid, durationSeconds, sampleEverySeconds, cancellationToken).ConfigureAwait(false);
+        var summary = SummariseProcessResources(resources, durationSeconds);
+        var hints = BuildProcessResourceHints(resources, durationSeconds);
+        return WithContext(DiagnosticResult.Ok(resources, summary, hints), context);
+    }
+
+    private static string SummariseProcessResources(ProcessResources resources, int durationSeconds)
+    {
+        var parts = new List<string>();
+        if (resources.FdCount is { } fdCount)
+        {
+            parts.Add($"fd={fdCount}");
+        }
+
+        if (resources.HandleCount is { } handleCount)
+        {
+            parts.Add($"handles={handleCount}");
+        }
+
+        if (resources.Sockets is { } sockets)
+        {
+            parts.Add($"tcp est={sockets.Established}, listen={sockets.Listen}, close_wait={sockets.CloseWait}, time_wait={sockets.TimeWait}");
+        }
+
+        if (resources.Limits?.NoFileSoft is { } noFileSoft)
+        {
+            var limitText = resources.Limits.NoFileUsageFraction is { } usage
+                ? $"nofile={resources.FdCount ?? 0}/{noFileSoft} ({usage * 100:F0}%)"
+                : $"nofile={noFileSoft}";
+            parts.Add(limitText);
+        }
+
+        if (parts.Count == 0)
+        {
+            return resources.Notes.Count > 0
+                ? resources.Notes[0]
+                : $"Process {resources.ProcessId}: no resource data collected.";
+        }
+
+        var prefix = durationSeconds >= 2 && resources.Trend is { Samples.Count: > 0 }
+            ? $"Process {resources.ProcessId} resources over {durationSeconds}s ({resources.Trend.Samples.Count} samples): "
+            : $"Process {resources.ProcessId} resource snapshot: ";
+        return prefix + string.Join("; ", parts) + ".";
+    }
+
+    private static NextActionHint[] BuildProcessResourceHints(ProcessResources resources, int durationSeconds)
+    {
+        var hints = new List<NextActionHint>();
+        var closeWaitGrowing = resources.Trend is { Samples.Count: > 1 } trend &&
+                               GetSocketMetric(trend.Samples[^1].Sockets, static sockets => sockets.CloseWait) >
+                               GetSocketMetric(trend.Samples[0].Sockets, static sockets => sockets.CloseWait);
+        var fdFlat = resources.Trend is { Samples.Count: > 1 } trendSamples &&
+                     Math.Abs((trendSamples.Samples[^1].FdCount ?? 0) - (trendSamples.Samples[0].FdCount ?? 0)) <= 5;
+
+        if (resources.Sockets?.CloseWait is > 100 && (durationSeconds == 0 || closeWaitGrowing))
+        {
+            hints.Add(new NextActionHint(
+                "collect_events",
+                "Likely undisposed HttpResponseMessage / HttpClient — collect System.Net.Http EventSource events to confirm.",
+                new Dictionary<string, object?>
+                {
+                    ["kind"] = "event_source",
+                    ["processId"] = resources.ProcessId,
+                    ["providerName"] = "System.Net.Http",
+                    ["durationSeconds"] = 10,
+                }));
+        }
+
+        if (resources.Limits?.NoFileUsageFraction is > 0.85)
+        {
+            hints.Add(new NextActionHint(
+                "collect_process_dump",
+                "Approaching the FD ceiling — consider collect_process_dump before the crash to capture state.",
+                new Dictionary<string, object?>
+                {
+                    ["processId"] = resources.ProcessId,
+                    ["dumpType"] = "Mini",
+                }));
+        }
+
+        if (resources.Sockets?.TimeWait is > 100 && fdFlat)
+        {
+            hints.Add(new NextActionHint(
+                "collect_events",
+                "Connection churn pattern; check connection pooling config and confirm with System.Net.Http EventSource activity.",
+                new Dictionary<string, object?>
+                {
+                    ["kind"] = "event_source",
+                    ["processId"] = resources.ProcessId,
+                    ["providerName"] = "System.Net.Http",
+                    ["durationSeconds"] = 10,
+                }));
+        }
+
+        if (hints.Count == 0)
+        {
+            hints.Add(new NextActionHint(
+                "collect_events",
+                "Resource usage looks unremarkable — move up the stack to runtime counters.",
+                new Dictionary<string, object?>
+                {
+                    ["kind"] = "counters",
+                    ["processId"] = resources.ProcessId,
+                    ["durationSeconds"] = 5,
+                }));
+        }
+
+        return hints.ToArray();
+    }
+
+    private static int GetSocketMetric(SocketBreakdown? sockets, Func<SocketBreakdown, int> selector)
+        => sockets is null ? 0 : selector(sockets);
+
+    [RequireScope("read-counters")]
+    [Description(
         "Collects EventCounters from the target process over a fixed time window and returns the " +
         "latest value seen per counter. Default providers cover the .NET runtime, ASP.NET Core hosting " +
         "and Kestrel; pass a custom list to observe other EventSources. Cheapest first signal — always run " +

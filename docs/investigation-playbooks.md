@@ -64,10 +64,21 @@ A steadily-growing `gen-2-size` with a flat `working-set` is leak-shaped; both
 growing is more like fragmentation or unmanaged growth.
 
 ### Step 2
+If `working-set` / RSS is growing **without** corresponding `gc-heap-size` growth,
+branch to `inspect_process(view="resources")` before taking a dump. This catches the
+classic unmanaged-FD leak shape:
+
+- rising `fdCount` + `noFileUsageFraction` → file/socket leak approaching `ulimit -n`
+- rising `sockets.closeWait` → likely undisposed `HttpResponseMessage` / pooled HTTP misuse
+- huge `sockets.timeWait` with flat `fdCount` → connection churn / pooling misconfiguration
+
+If `resources` looks clean, continue with GC-focused investigation.
+
+### Step 3
 `collect_events(kind="gc")` for 15–30 s. If gen-2 collections happen but `gen-2-size`
 doesn't drop, you have surviving objects (leak or long-lived cache).
 
-### Step 3
+### Step 4
 `collect_process_dump` with `dumpType = "WithHeap"`. **Defense in depth (B5.6 / RFC
 0001 §4):** call it once first *without* `confirm` to preview the dump that would be
 written (returns a `{ kind: "confirmation_required", targetPid, dumpType,

@@ -15,8 +15,10 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// RFC 0002 / §4.6 — single bootstrap entrypoint that subsumes the five read-only
 /// process inspection tools (<c>list_dotnet_processes</c>, <c>get_process_info</c>,
 /// <c>get_diagnostic_capabilities</c>, <c>get_container_signals</c>, <c>get_memory_trend</c>)
-/// behind one <c>view=</c> discriminator. RFC 0002 §7.3 #9 / #213 — the five legacy tools
-/// have been deleted in the alias removal wave; this is now the sole bootstrap entrypoint.
+/// behind one <c>view=</c> discriminator, plus the Phase 10.3 <c>view=resources</c>
+/// extension for FD / handle / socket inspection. RFC 0002 §7.3 #9 / #213 — the five
+/// legacy tools have been deleted in the alias removal wave; this is now the sole
+/// bootstrap entrypoint.
 /// </summary>
 /// <remarks>
 /// <para>The tool is a thin dispatcher: every view forwards to the matching
@@ -32,9 +34,10 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// <list type="bullet">
 ///   <item><description><c>view=list</c> never touches the resolver — it just lists every
 ///   .NET process visible to the diagnostic IPC and ignores <c>processId</c>.</description></item>
-///   <item><description><c>view=memory_trend</c> preserves <see cref="DiagnosticTools.GetMemoryTrend"/>'s
-///   contract: when the caller supplies <c>processId</c> explicitly it is used as a raw OS
-///   pid (no .NET IPC check), so the view works on NativeAOT and non-.NET processes.</description></item>
+///   <item><description><c>view=memory_trend</c> and <c>view=resources</c> preserve the
+///   underlying collector contract: when the caller supplies <c>processId</c> explicitly it is
+///   used as a raw OS pid (no .NET IPC check), so both views work on NativeAOT and non-.NET
+///   processes.</description></item>
 ///   <item><description>Every other view auto-resolves the lone visible .NET process when
 ///   <c>processId</c> is omitted, matching the legacy bootstrap-implicit behavior.</description></item>
 /// </list></para>
@@ -57,6 +60,9 @@ public sealed class InspectProcessTool
     /// <summary>Sample OS-level memory growth over a configurable window. Works on any OS process.</summary>
     public const string MemoryTrendView = "memory_trend";
 
+    /// <summary>Inspect FD / handle / socket state, optionally over a short trend window.</summary>
+    public const string ResourcesView = "resources";
+
     private static readonly IReadOnlyList<string> AllowedViews = new[]
     {
         ListView,
@@ -64,24 +70,25 @@ public sealed class InspectProcessTool
         CapabilitiesView,
         ContainerView,
         MemoryTrendView,
+        ResourcesView,
     };
 
     [RequireScope("read-counters")]
     [McpServerTool(
         Name = "inspect_process",
-        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend)",
+        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / resources)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
         UseStructuredContent = true)]
     [Description(
         "RFC 0002 §4.6 — single bootstrap entrypoint that subsumes list_dotnet_processes, " +
-        "get_process_info, get_diagnostic_capabilities, get_container_signals and get_memory_trend. " +
-        "Pick the projection with view=list|info|capabilities|container|memory_trend. " +
+        "get_process_info, get_diagnostic_capabilities, get_container_signals and get_memory_trend, " +
+        "plus the Phase 10.3 resources view. Pick the projection with view=list|info|capabilities|container|memory_trend|resources. " +
         "view=list returns every .NET process visible to the diagnostic IPC and ignores processId. " +
         "All other views auto-resolve the lone visible .NET process when processId is omitted; " +
-        "view=memory_trend additionally accepts any OS pid (NativeAOT / non-.NET) when processId is explicit, " +
-        "and uses durationSeconds + sampleEverySeconds to shape its observation window. " +
+        "view=memory_trend and view=resources additionally accept any OS pid (NativeAOT / non-.NET) when processId is explicit, " +
+        "and use durationSeconds + sampleEverySeconds to shape their observation windows. " +
         "No EventPipe session is opened by any view — same boundary as the five legacy tools.")]
     public static async Task<DiagnosticResult<InspectProcessReport>> InspectProcess(
         IProcessDiscovery discovery,
@@ -89,13 +96,14 @@ public sealed class InspectProcessTool
         ICapabilityDetector detector,
         IContainerSignalsCollector containerCollector,
         IMemoryTrendCollector memoryCollector,
-        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend. Defaults to 'list'.")]
+        IProcessResourcesCollector resourcesCollector,
+        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|resources. Defaults to 'list'.")]
         string? view = ListView,
         [Description("Operating system process id of the target. Required by no view: list ignores it, every other view auto-resolves the lone visible .NET process when omitted.")]
         int? processId = null,
-        [Description("view=memory_trend only — duration of the observation window in seconds. Must be >= 2. Defaults to 10.")]
-        int durationSeconds = 10,
-        [Description("view=memory_trend only — interval between consecutive samples in seconds. Must be >= 1. Defaults to 2.")]
+        [Description("view=memory_trend only — duration of the observation window in seconds. Must be >= 2 and defaults to 10. view=resources uses 0 for a single sample (default) and >= 2 for trend mode.")]
+        int? durationSeconds = null,
+        [Description("view=memory_trend or view=resources only — interval between consecutive samples in seconds. Must be >= 1. Defaults to 2.")]
         int sampleEverySeconds = 2,
         [Description("view=container only — depth knob forwarded to get_container_signals. Summary (default) drops the Notes[] caveats; Detail / Raw keep them.")]
         SamplingDepth depth = SamplingDepth.Summary,
@@ -128,10 +136,16 @@ public sealed class InspectProcessTool
                 (report, data) => report with { Container = data }),
             MemoryTrendView => Wrap(
                 await DiagnosticTools.GetMemoryTrend(
-                        memoryCollector, resolver, processId, durationSeconds, sampleEverySeconds, cancellationToken)
+                        memoryCollector, resolver, processId, durationSeconds ?? 10, sampleEverySeconds, cancellationToken)
                     .ConfigureAwait(false),
                 canonical,
                 (report, data) => report with { MemoryTrend = data }),
+            ResourcesView => Wrap(
+                await DiagnosticTools.GetProcessResources(
+                        resourcesCollector, resolver, processId, durationSeconds ?? 0, sampleEverySeconds, cancellationToken)
+                    .ConfigureAwait(false),
+                canonical,
+                (report, data) => report with { Resources = data }),
             _ => throw new InvalidOperationException(
                 $"DiscriminatorDispatch accepted unknown view '{canonical}'."),
         };
@@ -181,10 +195,12 @@ public sealed class InspectProcessTool
 /// <param name="Capabilities">Populated when <c>view=capabilities</c> — capability matrix.</param>
 /// <param name="Container">Populated when <c>view=container</c> — cgroup v2 signals.</param>
 /// <param name="MemoryTrend">Populated when <c>view=memory_trend</c> — OS memory samples + verdict.</param>
+/// <param name="Resources">Populated when <c>view=resources</c> — FD / handle / socket state.</param>
 public sealed record InspectProcessReport(
     string View,
     IReadOnlyList<DotnetProcess>? List = null,
     DotnetProcess? Info = null,
     DiagnosticCapabilities? Capabilities = null,
     ContainerSignals? Container = null,
-    MemoryTrend? MemoryTrend = null);
+    MemoryTrend? MemoryTrend = null,
+    ProcessResources? Resources = null);

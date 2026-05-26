@@ -16,9 +16,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DotnetDiagnosticsMcp.Core\DotnetDiagnosticsMcp.Core.csproj" />
-    <!-- Live tests spawn the CoreClrSample to attach to it. Build it but do not
-         reference its assembly (we shell out to `dotnet <dll>` directly). -->
+    <!-- Live tests spawn the sample apps directly. Build them but do not
+         reference their assemblies (the tests shell out to `dotnet <dll>`). -->
     <ProjectReference Include="..\..\samples\CoreClrSample\CoreClrSample.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\..\samples\BadCodeSample\BadCodeSample.csproj"
                       ReferenceOutputAssembly="false"
                       Private="false"
                       SkipGetTargetFrameworkProperties="true" />

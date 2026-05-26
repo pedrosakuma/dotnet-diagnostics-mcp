@@ -156,6 +156,84 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         snapshot.Counters.Should().Contain(c => c.Provider == "System.Runtime" && c.Name == "cpu-usage");
     }
 
+    [LinuxOnlyFact]
+    public async Task Resources_DetectsFdLeak_FromBadCodeSample()
+    {
+
+        await using var sample = await LiveHttpSample.StartAsync("BadCodeSample", "/");
+        var collector = new ProcessResourcesCollector();
+        var before = await collector.CollectAsync(sample.ProcessId, durationSeconds: 0, sampleEverySeconds: 2, CancellationToken.None);
+
+        using var http = new HttpClient { BaseAddress = new Uri(sample.BaseUrl) };
+        using var response = await http.GetAsync("/fd-leak?count=64");
+        response.EnsureSuccessStatusCode();
+
+        var after = await collector.CollectAsync(sample.ProcessId, durationSeconds: 0, sampleEverySeconds: 2, CancellationToken.None);
+        after.FdCount.Should().NotBeNull();
+        after.FdCount!.Value.Should().BeGreaterThan((before.FdCount ?? 0) + 50);
+    }
+
+    [LinuxOnlyFact]
+    public async Task Resources_DetectsCloseWaitGrowth()
+    {
+
+        await using var sample = await LiveHttpSample.StartAsync("BadCodeSample", "/");
+        using var http = new HttpClient { BaseAddress = new Uri(sample.BaseUrl) };
+        using var response = await http.GetAsync("/socket-leak?count=8");
+        response.EnsureSuccessStatusCode();
+        await Task.Delay(500);
+
+        var collector = new ProcessResourcesCollector();
+        var resources = await collector.CollectAsync(sample.ProcessId, durationSeconds: 0, sampleEverySeconds: 2, CancellationToken.None);
+        resources.Sockets.Should().NotBeNull();
+        resources.Sockets!.CloseWait.Should().BeGreaterThan(0);
+    }
+
+    [LinuxOnlyFact]
+    public async Task Resources_RlimitFraction_IsCalculated()
+    {
+
+        await using var sample = await LiveHttpSample.StartAsync("BadCodeSample", "/");
+        using var http = new HttpClient { BaseAddress = new Uri(sample.BaseUrl) };
+        using var response = await http.GetAsync("/fd-leak?count=8");
+        response.EnsureSuccessStatusCode();
+
+        var collector = new ProcessResourcesCollector();
+        var resources = await collector.CollectAsync(sample.ProcessId, durationSeconds: 0, sampleEverySeconds: 2, CancellationToken.None);
+        resources.Limits.Should().NotBeNull();
+        resources.Limits!.NoFileSoft.Should().NotBeNull();
+        resources.Limits.NoFileUsageFraction.Should().NotBeNull();
+        resources.Limits.NoFileUsageFraction.Should().BeGreaterThan(0);
+        resources.Limits.NoFileUsageFraction.Should().BeLessThan(1);
+    }
+
+    [Fact]
+    public async Task Resources_TrendModeReturnsSamples()
+    {
+        EnsureSampleRunning();
+
+        var collector = new ProcessResourcesCollector();
+        var resources = await collector.CollectAsync(Pid, durationSeconds: 5, sampleEverySeconds: 2, CancellationToken.None);
+
+        resources.Trend.Should().NotBeNull();
+        resources.Trend!.Samples.Should().HaveCountGreaterThanOrEqualTo(2);
+        resources.CapturedAt.Should().Be(resources.Trend.Samples[^1].Timestamp);
+    }
+
+    [WindowsOnlyFact]
+    public async Task Resources_ReturnsHandleCount_OnWindows()
+    {
+
+        EnsureSampleRunning();
+        var collector = new ProcessResourcesCollector();
+        var resources = await collector.CollectAsync(Pid, durationSeconds: 0, sampleEverySeconds: 2, CancellationToken.None);
+
+        resources.HandleCount.Should().NotBeNull();
+        resources.HandleCount!.Value.Should().BeGreaterThan(0);
+        resources.Fd.Should().BeNull();
+        resources.Sockets.Should().BeNull();
+    }
+
     [Fact]
     public async Task MeterApi_ReturnsBusinessCounter_FromBadCodeSample()
     {
@@ -1037,14 +1115,12 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
 
     private static string? LocateSampleDll(string sampleName = "CoreClrSample")
     {
-        // Walk up from the test bin dir until we find the repo root containing samples/.
         var probe = AppContext.BaseDirectory;
         for (var i = 0; i < 8; i++)
         {
             var sampleDir = Path.Combine(probe, "samples", sampleName);
             if (Directory.Exists(sampleDir))
             {
-                // Match the configuration the tests were built with — falls back to whichever exists.
                 foreach (var configuration in new[] { "Release", "Debug" })
                 {
                     var dll = Path.Combine(sampleDir, "bin", configuration, "net10.0", $"{sampleName}.dll");
@@ -1061,6 +1137,161 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         }
 
         return null;
+    }
+}
+
+internal sealed class LiveHttpSample : IAsyncDisposable
+{
+    private readonly TaskCompletionSource<string> _listeningUrlTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Process? _process;
+
+    internal static string? LocateSampleDll(string sampleName)
+    {
+        var probe = AppContext.BaseDirectory;
+        for (var i = 0; i < 8; i++)
+        {
+            var sampleDir = Path.Combine(probe, "samples", sampleName);
+            if (Directory.Exists(sampleDir))
+            {
+                foreach (var configuration in new[] { "Release", "Debug" })
+                {
+                    var dll = Path.Combine(sampleDir, "bin", configuration, "net10.0", $"{sampleName}.dll");
+                    if (File.Exists(dll))
+                    {
+                        return dll;
+                    }
+                }
+
+                return null;
+            }
+
+            probe = Path.GetFullPath(Path.Combine(probe, ".."));
+        }
+
+        return null;
+    }
+
+    private LiveHttpSample()
+    {
+    }
+
+    public int ProcessId => _process?.Id ?? throw new InvalidOperationException("Sample not started.");
+
+    public string BaseUrl { get; private set; } = string.Empty;
+
+    public static async Task<LiveHttpSample> StartAsync(string sampleName, string readyPath)
+    {
+        var sampleDll = LocateSampleDll(sampleName)
+            ?? throw new InvalidOperationException($"{sampleName}.dll not found.");
+
+        var sample = new LiveHttpSample();
+        await sample.StartCoreAsync(sampleDll, readyPath, sampleName).ConfigureAwait(false);
+        return sample;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_process is { HasExited: false })
+        {
+            try
+            {
+                _process.Kill(entireProcessTree: true);
+                await _process.WaitForExitAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+        }
+
+        _process?.Dispose();
+    }
+
+    private async Task StartCoreAsync(string sampleDll, string readyPath, string sampleName)
+    {
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(sampleDll)!,
+        };
+        psi.ArgumentList.Add(sampleDll);
+        psi.ArgumentList.Add("--urls");
+        psi.ArgumentList.Add("http://127.0.0.1:0");
+        psi.Environment["DOTNET_NOLOGO"] = "1";
+        psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
+
+        _process = Process.Start(psi) ?? throw new InvalidOperationException($"Failed to start {sampleName}.");
+        _ = ConsumeStandardOutputAsync(_process);
+        _ = Task.Run(async () =>
+        {
+            try { using var err = _process.StandardError; while (await err.ReadLineAsync() is not null) { } }
+            catch { }
+        });
+
+        await LiveCoreClrProcessTests.WaitForDiagnosticEndpointAsync(_process.Id, TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        BaseUrl = await EnsureListeningUrlAsync(sampleName, readyPath, TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    private async Task ConsumeStandardOutputAsync(Process process)
+    {
+        try
+        {
+            using var reader = process.StandardOutput;
+            string? line;
+            while ((line = await reader.ReadLineAsync()) is not null)
+            {
+                var idx = line.IndexOf("Now listening on:", StringComparison.Ordinal);
+                if (idx >= 0 && !_listeningUrlTcs.Task.IsCompleted)
+                {
+                    var url = line[(idx + "Now listening on:".Length)..].Trim();
+                    _listeningUrlTcs.TrySetResult(url);
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private async Task<string> EnsureListeningUrlAsync(string sampleName, string readyPath, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            var url = await _listeningUrlTcs.Task.WaitAsync(cts.Token).ConfigureAwait(false);
+            await WaitForHttpReadyAsync(url, readyPath, timeout, sampleName).ConfigureAwait(false);
+            return url;
+        }
+        catch (OperationCanceledException)
+        {
+            throw SkipException.ForReason($"{sampleName} did not advertise an HTTP listening URL within the timeout.");
+        }
+    }
+
+    private static async Task WaitForHttpReadyAsync(string baseUrl, string readyPath, TimeSpan timeout, string sampleName)
+    {
+        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var response = await http.GetAsync(readyPath, CancellationToken.None).ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+            }
+            catch (HttpRequestException)
+            {
+            }
+
+            await Task.Delay(250).ConfigureAwait(false);
+        }
+
+        throw SkipException.ForReason($"{sampleName} did not accept HTTP requests on {baseUrl} within the timeout.");
     }
 }
 

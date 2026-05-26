@@ -310,6 +310,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`inspect_process(view="capabilities")`](#inspect_process(view="capabilities")) *(deprecated — use `inspect_process(view="capabilities")`)* | ~2 s | no | ✅ | opens a short EventPipe probe |
 | [`inspect_process(view="container")`](#inspect_process(view="container")) *(deprecated — use `inspect_process(view="container")`)* | cheap | no | ✅ (Linux) | reads `/sys/fs/cgroup` + `/proc` files |
 | [`inspect_process(view="memory_trend")`](#inspect_process(view="memory_trend")) *(deprecated — use `inspect_process(view="memory_trend")`)* | window-bound | no | ✅ | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
+| [`inspect_process(view="resources")`](#inspect_process(view="resources")) | cheap / window-bound | no | ✅ (Linux/Windows partial) | reads `/proc/<pid>/fd`, `/proc/<pid>/net/tcp{,6}`, `/proc/<pid>/limits` (Linux) or `GetProcessHandleCount` (Windows) |
 | `collect_sample(kind="off_cpu")` (Linux/Windows) | window-bound | no | ✅ (Linux) | **Deprecated — use `collect_sample(kind="off_cpu")`.** system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
 | `query_snapshot` | cheap | no | ✅ | drilldown on handle from `collect_sample(kind="off_cpu")` |
 | [`collect_events`](#collect_events) | window-bound | no | ✅ (mostly — see kind) | **Canonical EventPipe collector.** Dispatches by `kind` to counters/exceptions/gc/event_source/activities. |
@@ -325,16 +326,9 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | `inspect_heap` (canonical) / `inspect_heap(source="live")` / `inspect_heap(source="dump")` (deprecated aliases, 0.7.0) / `query_snapshot` | seconds | **yes** | ❌ | ClrMD walks managed heap (heap drilldown values metadata-only by default — see [Security gates](#security-gates-b4)) |
 | [`collect_process_dump`](#collect_process_dump) | seconds–minutes | no | ✅ (native dump) | **writes a dump file to disk** |
 | [`capture_method_bytes`](#capture_method_bytes) | cheap | **yes** | ❌ (use `dotnet-native-mcp.disassemble`) | reads JIT code-heap |
-<<<<<<< HEAD
-| `get_bytes(kind="module")` | cheap | **yes** (live module attach) | ❌ (materialize locally, then hand off) | streams PE / PDB bytes over MCP chunks (**deprecated — use `get_bytes(kind=module)`**) |
-| `get_bytes(kind="dump")` | cheap | no | ❌ (materialize locally, then hand off) | streams dump bytes from `MCP_ARTIFACT_ROOT` (**deprecated — use `get_bytes(kind=dump)`**) |
-| `get_bytes` | cheap | when `kind=module` | ❌ (materialize locally, then hand off) | RFC 0002 §4.4 successor; dispatches on `kind=module|dump` |
-| `list_orchestrator(kind="pods")` (orchestrator) | cheap | n/a | n/a | Kubernetes `pods.list` only — **opt-in**, registered only when `Orchestrator:Enabled=true` |
-=======
 | `get_bytes(kind="module")` | cheap | **yes** (live module attach) | ❌ (materialize locally, then hand off) | streams PE / PDB bytes over MCP chunks |
 | `get_bytes(kind="dump")` | cheap | no | ❌ (materialize locally, then hand off) | streams dump bytes from `MCP_ARTIFACT_ROOT` |
 | `list_orchestrator(kind=pods\|investigations)` (orchestrator) | cheap | n/a | n/a | RFC 0002 §4.7 successor to `list_orchestrator(kind="pods")` + `list_orchestrator(kind="investigations")`. `kind=pods` → Kubernetes `pods.list` (scope `orchestrator-list`); `kind=investigations` → in-memory handle snapshot (scope `orchestrator-attach`). **Opt-in**, registered only when `Orchestrator:Enabled=true`. Legacy tool names remain accepted for one deprecation window (removed in 0.7.0). |
->>>>>>> 8642067 (feat(rfc0002): list_orchestrator(kind=pods|investigations) — orchestrator list consolidation (closes #212))
 
 "Window-bound" means the duration is the dominant cost; the tool will block for
 ~`durationSeconds`.
@@ -387,20 +381,19 @@ hint to the perf-replay fallback tracked in issue #92.
 **Canonical bootstrap tool** ([RFC 0002 §4.6](./rfcs/0002-tool-surface-consolidation.md)).
 Consolidates the five legacy metadata tools — `inspect_process(view="list")`,
 `inspect_process(view="info")`, `inspect_process(view="capabilities")`, `inspect_process(view="container")`,
-`inspect_process(view="memory_trend")` — behind one `view` discriminator. Each view delegates to
-the same implementation as the legacy tool of the same name, so the payload
-under `data` is byte-identical to the legacy envelope's `data`. The five
-legacy tools remain wired (marked `Deprecated` on tools/list output) and will
-be retired in a future release.
+`inspect_process(view="memory_trend")` — behind one `view` discriminator, and adds the
+Phase 10.3 `inspect_process(view="resources")` projection for FD / handle / socket inspection.
+Each legacy view delegates to the same implementation as the removed tool of the same name, so
+the payload under `data` is byte-identical to the legacy envelope's `data`.
 
 **Parameters:**
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend"` | `"list"` | Which bootstrap projection to compute. |
-| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` the server auto-resolves the lone reachable .NET process; for any other view, omitting it triggers the standard resolver. |
-| `durationSeconds` | `int` | `10` | Used only by `view="memory_trend"`. Must be ≥ 2. |
-| `sampleEverySeconds` | `int` | `2` | Used only by `view="memory_trend"`. Must be ≥ 1. |
+| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend" \| "resources"` | `"list"` | Which bootstrap projection to compute. |
+| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` or `view="resources"` the server auto-resolves the lone reachable .NET process; for any other view, omitting it triggers the standard resolver. |
+| `durationSeconds` | `int` | `10` / `0` | Used by `view="memory_trend"` and `view="resources"`. Memory trend requires `>= 2`; resources uses `0` for a single snapshot (default) or `>= 2` for trend mode. |
+| `sampleEverySeconds` | `int` | `2` | Used only by `view="memory_trend"` / `view="resources"`. Must be ≥ 1. |
 | `depth` | `SamplingDepth?` | `Summary` | Used only by `view="container"`; forwarded to `inspect_process(view="container")`. |
 
 **Returns:** `InspectProcessReport` — a standard envelope (`summary` / `hints` /
@@ -414,6 +407,7 @@ populated field matching the requested view:
 | `capabilities` | `DiagnosticCapabilities` (see [`inspect_process(view="capabilities")`](#inspect_process(view="capabilities"))) |
 | `container` | `ContainerSignals` (see [`inspect_process(view="container")`](#inspect_process(view="container"))) |
 | `memory_trend` | `MemoryTrend` (see [`inspect_process(view="memory_trend")`](#inspect_process(view="memory_trend"))) |
+| `resources` | `ProcessResources` (see [`inspect_process(view="resources")`](#inspect_process(view="resources"))) |
 
 **Recommended bootstrap sequence:**
 
@@ -422,6 +416,7 @@ inspect_process(view="list")          # discover candidate PIDs (or rely on auto
 inspect_process(view="capabilities")  # confirm CoreCLR vs NativeAOT + ptrace/PSI/perf gates
 inspect_process(view="container")     # cheap cgroup/PSI signals before any EventPipe session
 inspect_process(view="memory_trend")  # lightweight leak signal — any OS process, no IPC
+inspect_process(view="resources")     # unmanaged FD / socket / handle signal when heap is flat
 ```
 
 Unknown view values surface as the standard discriminator-dispatch error
@@ -587,6 +582,46 @@ stack allocations.
 - `verdict = "growing"` → suggests `inspect_heap(source="live")` (identify dominant
   retainers) and `inspect_process(view="container")` (cross-check against cgroup limits).
 - `verdict = "stable"` or `"shrinking"` → suggests `collect_events(kind="counters")`.
+
+---
+
+## `inspect_process(view="resources")`
+
+Cheap OS-level resource inspector for the classic "RSS grows but `gc-heap-size` stays flat" case.
+
+- **Linux**: counts `/proc/<pid>/fd`, classifies symlink targets (`socket:[...]`, `/...`, `pipe:[...]`, `anon_inode:[eventfd]`), aggregates TCP states from `/proc/<pid>/net/tcp{,6}`, and parses `Max open files` from `/proc/<pid>/limits`.
+- **Windows**: calls `GetProcessHandleCount`; FD/socket breakdowns stay `null` with a note.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target process id. Explicit values bypass .NET IPC resolution, so any OS pid is accepted. |
+| `durationSeconds` | `int` | `0` | `0` = single snapshot; values `>= 2` enable trend mode. |
+| `sampleEverySeconds` | `int` | `2` | Interval between trend samples. Must be ≥ 1. Ignored when `durationSeconds = 0`. |
+
+**Returns:** `ProcessResources`:
+
+```json
+{
+  "processId": 12345,
+  "capturedAt": "2026-05-25T22:40:00Z",
+  "fdCount": 186,
+  "handleCount": null,
+  "fd": { "sockets": 42, "regular": 96, "pipes": 16, "eventfds": 2, "other": 30 },
+  "sockets": { "established": 12, "timeWait": 51, "closeWait": 0, "listen": 2, "other": 1 },
+  "limits": { "noFileSoft": 1024, "noFileHard": 1024, "noFileUsageFraction": 0.1816 },
+  "notes": [],
+  "trend": null
+}
+```
+
+`trend.samples[]` repeats the same headline fields (`fdCount`, `handleCount`, `fd`, `sockets`, `limits`) per sample, with the top-level properties set to the latest sample.
+
+**Next-action hints:**
+- `closeWait > 100` and rising → `collect_events(kind="event_source", providerName="System.Net.Http")` to confirm undisposed responses / client misuse.
+- `noFileUsageFraction > 0.85` → consider `collect_process_dump` before the process hits `EMFILE` / "Too many open files".
+- huge `timeWait` with flat `fdCount` → connection churn / pooling issue, again best cross-checked with `System.Net.Http` events.
 
 ---
 

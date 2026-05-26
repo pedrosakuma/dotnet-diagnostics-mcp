@@ -123,6 +123,14 @@ public sealed record DiagnosticCapabilities(
     /// </summary>
     public string? ThreadSnapshotPreconditions { get; init; }
 
+    /// <summary>True when the diagnostics host can enumerate <c>/proc/&lt;pid&gt;/fd</c> for the target
+    /// on Linux. False on non-Linux hosts and when procfs is restricted for the sidecar UID.</summary>
+    public bool CanReadProcFs { get; init; }
+
+    /// <summary>True when the diagnostics host can query a Windows process handle count via
+    /// <c>GetProcessHandleCount</c>. False on non-Windows hosts.</summary>
+    public bool CanReadHandleCount { get; init; }
+
     /// <summary>True when Windows kernel ContextSwitch tracing is available to the diagnostics
     /// host (administrative elevation / <c>SeSystemProfilePrivilege</c>). Mirrors the ETW half
     /// of the kernel capability matrix; false on non-Windows hosts.</summary>

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -21,13 +22,10 @@ builder.Services.AddHttpClient("slow", c =>
 var app = builder.Build();
 
 var leakedBuffers = new List<byte[]>();
-var lockObject = new object();
-var meterFactory = app.Services.GetRequiredService<IMeterFactory>();
-var meter = meterFactory.Create("BadCodeSample");
-var ordersTotal = meter.CreateCounter<long>("orders.total", unit: "{orders}", description: "Synthetic business counter for tests.");
-var workDuration = meter.CreateHistogram<double>("work.duration", unit: "ms", description: "Synthetic histogram for meter tests.");
-string[] endpoints =
-[
+var leakedFiles = new List<FileStream>();
+var leakedSockets = new List<LeakedSocketConnection>();
+var badCodeEndpoints = new[]
+{
     "/cpu-burn?ms=2000",
     "/leak?mb=4",
     "/exceptions?count=200",
@@ -35,13 +33,22 @@ string[] endpoints =
     "/lock-contention?threads=32&ms=1500",
     "/loh-alloc?count=20",
     "/slow-http?url=https://httpbin.org/delay/3",
+    "/fd-leak?count=64",
+    "/socket-leak?count=32&host=loopback",
     "/meter-spam?count=5&kind=counter",
-];
+};
+var lockObject = new object();
+var meterFactory = app.Services.GetRequiredService<IMeterFactory>();
+var meter = meterFactory.Create("BadCodeSample");
+var ordersTotal = meter.CreateCounter<long>("orders.total", unit: "{orders}", description: "Synthetic business counter for tests.");
+var workDuration = meter.CreateHistogram<double>("work.duration", unit: "ms", description: "Synthetic histogram for meter tests.");
+using var loopbackCloser = new LoopbackCloseServer();
+loopbackCloser.Start();
 
 app.MapGet("/", () => Results.Ok(new
 {
     name = "BadCodeSample",
-    endpoints,
+    endpoints = badCodeEndpoints,
 }));
 
 // 1. CPU burn — detect with collect_events(kind="counters") + collect_sample(kind="cpu")
@@ -207,4 +214,164 @@ app.MapGet("/meter-spam", (int? count, string? kind) =>
     return Results.Ok(new { samples, kind = mode });
 });
 
+// 9. FD leak — detect with inspect_process(view="resources") (FdCount / nofile fraction)
+app.MapGet("/fd-leak", (int? count) =>
+{
+    var n = Math.Clamp(count ?? 64, 1, 1_024);
+    var path = Environment.ProcessPath ?? typeof(Program).Assembly.Location;
+    var opened = 0;
+    lock (leakedFiles)
+    {
+        for (var i = 0; i < n; i++)
+        {
+            leakedFiles.Add(File.OpenRead(path));
+            opened++;
+        }
+    }
+
+    return Results.Ok(new { opened, totalLeaked = leakedFiles.Count, path });
+});
+
+// 10. Socket leak / CLOSE_WAIT growth — detect with inspect_process(view="resources")
+app.MapGet("/socket-leak", async (int? count, string? host) =>
+{
+    var n = Math.Clamp(count ?? 32, 1, 256);
+    var target = string.IsNullOrWhiteSpace(host) ? "loopback" : host.Trim();
+    var leaked = 0;
+
+    for (var i = 0; i < n; i++)
+    {
+        var connection = target.Equals("loopback", StringComparison.OrdinalIgnoreCase)
+            ? await LeakLoopbackSocketAsync(loopbackCloser.Port)
+            : await LeakRemoteSocketAsync(target);
+        lock (leakedSockets)
+        {
+            leakedSockets.Add(connection);
+        }
+        leaked++;
+    }
+
+    return Results.Ok(new { leaked, totalLeaked = leakedSockets.Count, host = target, loopbackPort = loopbackCloser.Port });
+});
+
 app.Run();
+
+static async Task<LeakedSocketConnection> LeakLoopbackSocketAsync(int port)
+{
+    var client = new TcpClient();
+    await client.ConnectAsync(IPAddress.Loopback, port);
+    return await CompleteCloseWaitHandshakeAsync(client, "localhost", "/");
+}
+
+static async Task<LeakedSocketConnection> LeakRemoteSocketAsync(string host)
+{
+    string requestHost;
+    string requestPath;
+    int port;
+
+    if (Uri.TryCreate(host, UriKind.Absolute, out var absolute) && absolute.Scheme == Uri.UriSchemeHttp)
+    {
+        requestHost = absolute.Host;
+        requestPath = string.IsNullOrEmpty(absolute.PathAndQuery) ? "/" : absolute.PathAndQuery;
+        port = absolute.Port;
+    }
+    else
+    {
+        requestHost = host;
+        requestPath = "/get";
+        port = 80;
+    }
+
+    var client = new TcpClient();
+    await client.ConnectAsync(requestHost, port);
+    return await CompleteCloseWaitHandshakeAsync(client, requestHost, requestPath);
+}
+
+static async Task<LeakedSocketConnection> CompleteCloseWaitHandshakeAsync(TcpClient client, string host, string path)
+{
+    var stream = client.GetStream();
+    var request = Encoding.ASCII.GetBytes($"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    await stream.WriteAsync(request);
+
+    var buffer = new byte[512];
+    while (true)
+    {
+        var read = await stream.ReadAsync(buffer);
+        if (read == 0)
+        {
+            break;
+        }
+    }
+
+    return new LeakedSocketConnection(client, stream);
+}
+
+sealed class LeakedSocketConnection(TcpClient client, NetworkStream stream)
+{
+    public TcpClient Client { get; } = client;
+    public NetworkStream Stream { get; } = stream;
+}
+
+sealed class LoopbackCloseServer : IDisposable
+{
+    private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _acceptLoop;
+
+    public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+    public void Start()
+    {
+        _listener.Start();
+        _acceptLoop = Task.Run(AcceptLoopAsync);
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _listener.Stop();
+        try
+        {
+            _acceptLoop?.GetAwaiter().GetResult();
+        }
+        catch
+        {
+        }
+        _cts.Dispose();
+    }
+
+    private async Task AcceptLoopAsync()
+    {
+        while (!_cts.IsCancellationRequested)
+        {
+            TcpClient? client = null;
+            try
+            {
+                client = await _listener.AcceptTcpClientAsync(_cts.Token);
+                _ = Task.Run(async () =>
+                {
+                    using (client)
+                    {
+                        try
+                        {
+                            using var stream = client.GetStream();
+                            var buffer = new byte[256];
+                            _ = await stream.ReadAsync(buffer, _cts.Token);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }, _cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+        }
+    }
+}

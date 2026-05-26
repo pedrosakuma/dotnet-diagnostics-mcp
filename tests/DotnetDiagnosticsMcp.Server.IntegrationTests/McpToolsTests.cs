@@ -1073,6 +1073,36 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         });
     }
 
+    [Fact]
+    public async Task GetProcessResources_ReturnsSnapshot()
+    {
+        await using var client = await ConnectAsync();
+
+        var result = await client.CallToolAsync(
+            "inspect_process",
+            new Dictionary<string, object?>
+            {
+                ["view"] = "resources",
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 0,
+            },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var envelope = DeserializeStructured<InspectProcessReport>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Resources.Should().NotBeNull();
+        envelope.Resources!.ProcessId.Should().Be(Environment.ProcessId);
+        if (OperatingSystem.IsWindows())
+        {
+            envelope.Resources.HandleCount.Should().BeGreaterThan(0);
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            envelope.Resources.FdCount.Should().BeGreaterThan(0);
+        }
+    }
+
     private async Task<McpClient> ConnectAsync(ModelContextProtocol.Client.McpClientOptions? clientOptions = null)
     {
         var httpClient = _factory.CreateClient();
