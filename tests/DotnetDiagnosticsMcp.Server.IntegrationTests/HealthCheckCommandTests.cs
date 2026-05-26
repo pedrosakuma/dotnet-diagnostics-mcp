@@ -13,6 +13,7 @@ namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
 /// supervisor / container HEALTHCHECK contract: exit 0 when a server answers /health
 /// with 2xx, exit 1 on any failure (connection refused, non-2xx, timeout).
 /// </summary>
+[Collection(nameof(EnvSerial))]
 public class HealthCheckCommandTests
 {
     [Fact]
@@ -56,7 +57,7 @@ public class HealthCheckCommandTests
     public async Task RunAsync_ReturnsOne_WhenServerNotReachable()
     {
         var port = GetFreePort();
-        var exit = await HealthCheckCommand.RunAsync(["--urls", $"http://127.0.0.1:{port}"]);
+        var exit = await HealthCheckCommand.RunAsync(["--urls", $"http://127.0.0.1:{port}"], TextWriter.Null, TextWriter.Null);
         Assert.Equal(1, exit);
     }
 
@@ -73,7 +74,7 @@ public class HealthCheckCommandTests
         await app.StartAsync();
         try
         {
-            var exit = await HealthCheckCommand.RunAsync(["--urls", $"http://127.0.0.1:{port}"]);
+            var exit = await HealthCheckCommand.RunAsync(["--urls", $"http://127.0.0.1:{port}"], TextWriter.Null, TextWriter.Null);
             Assert.Equal(0, exit);
         }
         finally

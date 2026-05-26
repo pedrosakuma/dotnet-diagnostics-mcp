@@ -101,6 +101,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.ISummaryComparer, DotnetDiagnosticsMcp.Core.Memory.SummaryComparer>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Memory.IMemoryTrendCollector, DotnetDiagnosticsMcp.Core.Memory.MemoryTrendCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.ProcessDiscovery.IProcessResourcesCollector, DotnetDiagnosticsMcp.Core.ProcessDiscovery.ProcessResourcesCollector>();
+        services.AddSingleton<DotnetDiagnosticsMcp.Core.ProcessDiscovery.IRequestsNowCollector, DotnetDiagnosticsMcp.Core.ProcessDiscovery.RequestsNowCollector>();
         services.AddSingleton<DotnetDiagnosticsMcp.Core.Drilldown.IDiagnosticHandleStore>(_ =>
             new DotnetDiagnosticsMcp.Core.Drilldown.MemoryDiagnosticHandleStore(maxEntries: 32));
         services.AddSingleton<ModelContextProtocol.IMcpTaskStore>(_ =>

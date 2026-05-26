@@ -229,6 +229,41 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         resources.CapturedAt.Should().Be(resources.Trend.Samples[^1].Timestamp);
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task RequestsNow_CapturesInFlightBadCodeSampleRequest()
+    {
+        await using var sample = await LiveHttpSample.StartAsync("BadCodeSample", "/");
+        using var http = new HttpClient
+        {
+            BaseAddress = new Uri(sample.BaseUrl),
+            Timeout = TimeSpan.FromSeconds(15),
+        };
+        var collector = new RequestsNowCollector(new ClrMdThreadSnapshotInspector());
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/slow-hang?seconds=5", CancellationToken.None);
+            response.EnsureSuccessStatusCode();
+        });
+
+        var snapshot = await collector.CollectAsync(
+            sample.ProcessId,
+            TimeSpan.FromSeconds(2),
+            topFrames: 8,
+            CancellationToken.None);
+
+        var request = snapshot.Requests.Should().Contain(request =>
+            request.ThreadId > 0 &&
+            request.TopFrames.Count > 0 &&
+            (request.Endpoint.Contains("slow-hang", StringComparison.OrdinalIgnoreCase) || request.Endpoint == "(unknown)"))
+            .Subject;
+        request.Method.Should().NotBeNullOrWhiteSpace();
+        request.TraceId.Should().NotBeNullOrWhiteSpace();
+
+        await driver;
+    }
+
     [WindowsOnlyFact]
     public async Task Resources_ReturnsHandleCount_OnWindows()
     {

@@ -75,16 +75,31 @@ public sealed class ToolScopeIntegrationTests
             ("counters-only", "counters-secret-aaa", new[] { "read-counters" }));
         await using var client = await ConnectWithTokenAsync(factory, "counters-secret-aaa");
 
-        // inspect_process is read-counters; no target attach needed, so the call
-        // returns a real success envelope. We only care that it was NOT rejected by the
-        // scope filter (which would surface as IsError=true with kind=forbidden).
+        // inspect_process has a static OR gate (read-counters | ptrace) but view=list must
+        // still preserve the legacy read-counters boundary at runtime.
         var result = await client.CallToolAsync(
             "inspect_process",
             arguments: new Dictionary<string, object?> { ["view"] = "list" },
             cancellationToken: CancellationToken.None);
 
-        // Either the tool succeeded or it failed for a non-scope reason — neither path
-        // produces our forbidden envelope.
+        var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? string.Empty;
+        text.Should().NotContain("\"kind\":\"forbidden\"");
+    }
+
+    [Fact]
+    public async Task InspectProcess_RequestsNow_Allows_PtraceOnly_Token()
+    {
+        await using var factory = CreateFactory(
+            ("ptrace-only", "ptrace-secret-now", new[] { "ptrace" }));
+        await using var client = await ConnectWithTokenAsync(factory, "ptrace-secret-now");
+
+        // Use an invalid pid so the test exercises only the scope boundary; attaching to the
+        // current integration-test host would suspend the shared process and make parallel tests flaky.
+        var result = await client.CallToolAsync(
+            "inspect_process",
+            arguments: new Dictionary<string, object?> { ["view"] = "requests-now", ["processId"] = -1 },
+            cancellationToken: CancellationToken.None);
+
         var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? string.Empty;
         text.Should().NotContain("\"kind\":\"forbidden\"");
     }
@@ -113,6 +128,24 @@ public sealed class ToolScopeIntegrationTests
             .Select(e => e.GetString()).Should().ContainSingle()
             .Which.Should().Be("read-counters");
         envelope.GetProperty("semantics").GetString().Should().Be("all");
+    }
+
+    [Fact]
+    public async Task InspectProcess_RequestsNow_Denies_When_Ptrace_Is_Missing()
+    {
+        await using var factory = CreateFactory(
+            ("counters-only", "counters-secret-now-deny", new[] { "read-counters" }));
+        await using var client = await ConnectWithTokenAsync(factory, "counters-secret-now-deny");
+
+        var result = await client.CallToolAsync(
+            "inspect_process",
+            arguments: new Dictionary<string, object?> { ["view"] = "requests-now", ["processId"] = -1 },
+            cancellationToken: CancellationToken.None);
+
+        result.IsError.Should().NotBe(true);
+        var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? string.Empty;
+        text.Should().Contain("\"kind\":\"Forbidden\"");
+        text.Should().Contain("ptrace");
     }
 
     [Fact]

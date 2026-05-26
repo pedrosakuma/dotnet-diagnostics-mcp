@@ -103,6 +103,7 @@ public sealed class ToolScopeAttributesTests
         // regressions in the mapping table.
         registry.TryGet("collect_events")!.Value.Any.Should().Equal("read-counters", "eventpipe");
         registry.TryGet("collect_sample")!.Value.All.Should().Equal("eventpipe");
+        registry.TryGet("inspect_process")!.Value.Any.Should().Equal("read-counters", "ptrace");
         registry.TryGet("inspect_heap")!.Value.All.Should().Equal("heap-read");
         registry.TryGet("collect_process_dump")!.Value.All.Should().Equal("dump-write", "ptrace");
         registry.TryGet("query_snapshot")!.Value.Any.Should().Equal("read-counters", "eventpipe", "heap-read", "ptrace", "investigation-export");

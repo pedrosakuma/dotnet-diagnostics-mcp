@@ -40,6 +40,8 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 [McpServerToolType]
 public sealed class DiagnosticTools
 {
+    private static readonly string[] HostingCounterProviders = ["Microsoft.AspNetCore.Hosting"];
+
     [RequireScope("read-counters")]
     [Description(
         "Lists all .NET processes on the local machine that expose a Diagnostic IPC endpoint. " +
@@ -368,6 +370,34 @@ public sealed class DiagnosticTools
         return WithContext(DiagnosticResult.Ok(resources, summary, hints), context);
     }
 
+    public static async Task<DiagnosticResult<RequestsNowSnapshot>> GetRequestsNow(
+        IRequestsNowCollector collector,
+        IProcessContextResolver resolver,
+        int? processId = null,
+        CancellationToken cancellationToken = default)
+    {
+        const int windowSeconds = 2;
+        const int topFrames = 8;
+
+        if (processId is < 0)
+        {
+            return InvalidArg<RequestsNowSnapshot>(nameof(processId), "must be a positive process id");
+        }
+
+        var resolved = await ResolveContextAsync<RequestsNowSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null)
+        {
+            return resolved.Failure;
+        }
+
+        var snapshot = await collector
+            .CollectAsync(resolved.ProcessId, TimeSpan.FromSeconds(windowSeconds), topFrames, cancellationToken)
+            .ConfigureAwait(false);
+        var summary = SummariseRequestsNow(snapshot, windowSeconds);
+        var hints = BuildRequestsNowHints(snapshot);
+        return WithContext(DiagnosticResult.Ok(snapshot, summary, hints), resolved.Context);
+    }
+
     private static string SummariseProcessResources(ProcessResources resources, int durationSeconds)
     {
         var parts = new List<string>();
@@ -405,6 +435,61 @@ public sealed class DiagnosticTools
             ? $"Process {resources.ProcessId} resources over {durationSeconds}s ({resources.Trend.Samples.Count} samples): "
             : $"Process {resources.ProcessId} resource snapshot: ";
         return prefix + string.Join("; ", parts) + ".";
+    }
+
+    private static string SummariseRequestsNow(RequestsNowSnapshot snapshot, int windowSeconds)
+    {
+        if (snapshot.Requests.Count == 0)
+        {
+            return $"Process {snapshot.ProcessId}: no in-flight ASP.NET Core requests observed during the last {windowSeconds}s.";
+        }
+
+        var preview = string.Join(", ", snapshot.Requests.Take(3).Select(request =>
+            $"{request.Method} {request.Endpoint} ({request.StartedAtMs:F0} ms, tid {request.ThreadId})"));
+        return $"Process {snapshot.ProcessId}: {snapshot.Requests.Count} in-flight ASP.NET Core request(s) observed during the last {windowSeconds}s: {preview}{(snapshot.Requests.Count > 3 ? ", …" : string.Empty)}.";
+    }
+
+    private static NextActionHint[] BuildRequestsNowHints(RequestsNowSnapshot snapshot)
+    {
+        if (snapshot.Requests.Count == 0)
+        {
+            return
+            [
+                new NextActionHint(
+                    "collect_events",
+                    "No hanging requests were active in this 2s window — re-run during the incident or cross-check Hosting counters.",
+                    new Dictionary<string, object?>
+                    {
+                        ["kind"] = "counters",
+                        ["processId"] = snapshot.ProcessId,
+                        ["durationSeconds"] = 5,
+                        ["providers"] = HostingCounterProviders,
+                    }),
+            ];
+        }
+
+        var oldest = snapshot.Requests.MaxBy(request => request.StartedAtMs)!;
+        return
+        [
+            new NextActionHint(
+                "collect_thread_snapshot",
+                $"Oldest in-flight request is {oldest.Method} {oldest.Endpoint} ({oldest.StartedAtMs:F0} ms). Capture a full thread snapshot if you need every thread and lock, not just the matched request thread.",
+                new Dictionary<string, object?>
+                {
+                    ["processId"] = snapshot.ProcessId,
+                    ["maxFramesPerThread"] = 64,
+                }),
+            new NextActionHint(
+                "collect_events",
+                "Correlate the hang with Hosting counters (current-requests / failed-requests) over a longer window.",
+                new Dictionary<string, object?>
+                {
+                    ["kind"] = "counters",
+                    ["processId"] = snapshot.ProcessId,
+                    ["durationSeconds"] = 5,
+                    ["providers"] = HostingCounterProviders,
+                }),
+        ];
     }
 
     private static NextActionHint[] BuildProcessResourceHints(ProcessResources resources, int durationSeconds)
