@@ -11,13 +11,13 @@ An **MCP server** for LLM-driven performance diagnostics on **.NET 10** applicat
 
 ## Table of Contents
 
-- [Quick Start](#-quick-start)
-- [Install](#-install)
-- [Tools Overview](#-tools-overview)
-- [Documentation](#-documentation)
-- [Goals](#-goals)
-- [Build & Test](#-build--test)
-- [Roadmap](#-roadmap)
+- [Quick Start](#quick-start)
+- [Install](#install)
+- [Tools Overview](#tools-overview)
+- [Documentation](#documentation)
+- [Goals](#goals)
+- [Build & Test](#build--test)
+- [Roadmap](#roadmap)
 
 ---
 
