@@ -93,7 +93,7 @@ spec:
 
         # ----- 2. dotnet-diagnostics-mcp sidecar -----
         - name: diagnosticsmcp
-          image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.3.1
+          image: ghcr.io/pedrosakuma/dotnet-diagnostics-mcp:0.6.0
           imagePullPolicy: IfNotPresent
           # ClrMD-backed tools (collect_thread_snapshot, inspect_live_heap,
           # inspect_dump on live PIDs, collect_process_dump) attach via
