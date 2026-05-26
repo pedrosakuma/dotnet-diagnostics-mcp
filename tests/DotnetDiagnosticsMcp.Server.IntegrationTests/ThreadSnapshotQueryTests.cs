@@ -61,6 +61,21 @@ public sealed class ThreadSnapshotQueryTests
         result.Data.Thread!.TopFrameMethod.Should().Be("GroupA.Leaf");
     }
 
+    [Fact]
+    public void QueryThreadSnapshot_AsyncStalls_ReturnsClassifierView()
+    {
+        var store = new MemoryDiagnosticHandleStore();
+        var snapshot = CreateSnapshot();
+        var handle = store.Register(snapshot.ProcessId, "thread-snapshot", snapshot, TimeSpan.FromMinutes(10), evictWhenProcessExits: false);
+
+        var result = DiagnosticTools.QueryThreadSnapshot(store, handle.Id, view: "async-stalls", topN: 2);
+
+        result.IsError.Should().BeFalse();
+        result.Data!.View.Should().Be("async-stalls");
+        result.Data.AsyncStalls.Should().NotBeNull();
+        result.Data.AsyncStalls!.ClassifiedThreads.Should().BeGreaterThan(0);
+    }
+
     private static ThreadSnapshotArtifact CreateSnapshot()
     {
         var threads = new List<ManagedThread>();
@@ -93,6 +108,12 @@ public sealed class ThreadSnapshotQueryTests
                 CreateFrame("GroupC.Mid", GroupCModuleVersionId, 0x06000022),
                 CreateFrame($"GroupC.Root{managedThreadId}", GroupCModuleVersionId, 0x06000300 + managedThreadId)));
         }
+
+        threads.Add(CreateThread(
+            13,
+            waitReason: "Task.Wait",
+            CreateFrame("System.Threading.Tasks.Task`1[[System.Int32]].get_Result()", GroupCModuleVersionId, 0x06000401),
+            CreateFrame("Tests.AsyncFixture+<RunAsync>d__4.MoveNext()", GroupCModuleVersionId, 0x06000402)));
 
         return new ThreadSnapshotArtifact(
             Origin: ThreadSnapshotOrigin.Live,

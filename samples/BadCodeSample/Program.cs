@@ -7,6 +7,7 @@ using System.Reflection.Emit;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.Channels;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -68,6 +69,7 @@ var badCodeEndpoints = new[]
     "/log-spam?count=200&level=warning",
     "/jit-pressure?count=200",
     "/slow-hang?seconds=5",
+    "/async-stall?bucket=tcs&seconds=5",
     "/threadpool-starve?blockers=50",
     "/lock-storm?seconds=5&blockers=8",
     "/db-n+1?count=15",
@@ -393,6 +395,23 @@ app.MapGet("/slow-hang", async (int? seconds) =>
     return Results.Ok(new { delayedSeconds = delay.TotalSeconds });
 });
 
+// 14. Async continuation stalls — detect with collect_thread_snapshot + query_snapshot(view="async-stalls")
+app.MapGet("/async-stall", async (string? bucket, int? seconds) =>
+{
+    var normalizedBucket = AsyncStallFixture.NormalizeBucket(bucket);
+    if (normalizedBucket is null)
+    {
+        return Results.BadRequest(new
+        {
+            error = "bucket must be one of: tcs, channel, sync-over-async, semaphore",
+        });
+    }
+
+    var delay = TimeSpan.FromSeconds(Math.Clamp(seconds ?? 5, 1, 30));
+    var waiters = await AsyncStallFixture.RunAsync(normalizedBucket, delay);
+    return Results.Ok(new { bucket = normalizedBucket, delayedSeconds = delay.TotalSeconds, waiters });
+});
+
 // 15. ThreadPool starvation — detect with collect_events(kind="threadpool")
 app.MapGet("/threadpool-starve", (int? blockers) =>
 {
@@ -535,6 +554,127 @@ sealed class LeakedSocketConnection(TcpClient client, NetworkStream stream)
 {
     public TcpClient Client { get; } = client;
     public NetworkStream Stream { get; } = stream;
+}
+
+static class AsyncStallFixture
+{
+    public static string? NormalizeBucket(string? bucket)
+        => bucket?.Trim().ToLowerInvariant() switch
+        {
+            "tcs" => "tcs",
+            "channel" => "channel",
+            "sync-over-async" => "sync-over-async",
+            "semaphore" => "semaphore",
+            _ => null,
+        };
+
+    public static Task<int> RunAsync(string bucket, TimeSpan delay)
+        => bucket switch
+        {
+            "tcs" => RunTcsAsync(delay),
+            "channel" => RunChannelAsync(delay),
+            "sync-over-async" => RunSyncOverAsyncAsync(delay),
+            "semaphore" => RunSemaphoreAsync(delay),
+            _ => Task.FromResult(0),
+        };
+
+    private static async Task<int> RunTcsAsync(TimeSpan delay)
+    {
+        var completions = Enumerable.Range(0, 16)
+            .Select(_ => new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously))
+            .ToArray();
+        var waiters = completions
+            .Select(tcs => Task.Run(() => BlockOnTaskCompletionSourceAsync(tcs)))
+            .ToArray();
+
+        await Task.Delay(delay).ConfigureAwait(false);
+        foreach (var tcs in completions)
+        {
+            tcs.TrySetResult(42);
+        }
+
+        await Task.WhenAll(waiters).ConfigureAwait(false);
+        return waiters.Length;
+    }
+
+    private static async Task<int> RunChannelAsync(TimeSpan delay)
+    {
+        var channels = new List<Channel<int>>();
+        var waiters = new List<Task>();
+        for (var i = 0; i < 16; i++)
+        {
+            var channel = Channel.CreateUnbounded<int>();
+            channels.Add(channel);
+            waiters.Add(Task.Run(async () => await AwaitChannelAsync(channel.Reader).ConfigureAwait(false)));
+        }
+
+        await Task.Delay(delay).ConfigureAwait(false);
+        foreach (var channel in channels)
+        {
+            channel.Writer.TryWrite(1);
+        }
+
+        await Task.WhenAll(waiters).ConfigureAwait(false);
+        return waiters.Count;
+    }
+
+    private static async Task<int> RunSemaphoreAsync(TimeSpan delay)
+    {
+        var semaphores = new List<SemaphoreSlim>();
+        var waiters = new List<Task>();
+        for (var i = 0; i < 16; i++)
+        {
+            var semaphore = new SemaphoreSlim(0, 1);
+            semaphores.Add(semaphore);
+            waiters.Add(Task.Run(async () => await AwaitSemaphoreAsync(semaphore).ConfigureAwait(false)));
+        }
+
+        await Task.Delay(delay).ConfigureAwait(false);
+        foreach (var semaphore in semaphores)
+        {
+            semaphore.Release();
+        }
+
+        await Task.WhenAll(waiters).ConfigureAwait(false);
+        foreach (var semaphore in semaphores)
+        {
+            semaphore.Dispose();
+        }
+
+        return waiters.Count;
+    }
+
+    private static async Task<int> RunSyncOverAsyncAsync(TimeSpan delay)
+    {
+        var blockers = Enumerable.Range(0, 16)
+            .Select(_ => Task.Run(() => BlockOnTaskResult(delay)))
+            .ToArray();
+        await Task.WhenAll(blockers).ConfigureAwait(false);
+        return blockers.Length;
+    }
+
+    private static int BlockOnTaskCompletionSourceAsync(TaskCompletionSource<int> tcs)
+        => AwaitTaskCompletionSourceAsync(tcs).GetAwaiter().GetResult();
+
+    private static async Task<int> AwaitTaskCompletionSourceAsync(TaskCompletionSource<int> tcs)
+        => await tcs.Task.ConfigureAwait(false);
+
+    private static async Task AwaitChannelAsync(ChannelReader<int> reader)
+    {
+        _ = await reader.WaitToReadAsync().ConfigureAwait(false);
+    }
+
+    private static async Task AwaitSemaphoreAsync(SemaphoreSlim semaphore)
+    {
+        await semaphore.WaitAsync().ConfigureAwait(false);
+    }
+
+    private static int BlockOnTaskResult(TimeSpan delay)
+        => Task.Run(async () =>
+        {
+            await Task.Delay(delay).ConfigureAwait(false);
+            return 42;
+        }).Result;
 }
 
 sealed class LoopbackCloseServer : IDisposable

@@ -81,7 +81,7 @@ Per-tool `Summary` semantics:
 | `collect_events(kind="threadpool")` | The full worker/IOCP timelines and hill-climbing sequence. Summary keeps headline counts + top origins; drill in with `query_snapshot(handle, view=timeline|hillClimbing|workItemOrigins)`. |
 | `collect_events(kind="contention")` | The raw contention event list. Summary keeps headline wait totals + percentiles; drill in with `query_snapshot(handle, view=byCallSite|byOwner)`. |
 | `collect_events(kind="db")` | The long `ByCommand[]` / `NPlusOne[]` lists. Summary keeps the headline aggregates + pool slice. |
-| `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_snapshot(view=lock-graph|deadlocks|unique-stacks)`. |
+| `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_snapshot(view=lock-graph|deadlocks|unique-stacks|async-stalls)`. |
 
 Explicit `topN` always wins over the depth default — if you pass
 `topN=10, depth=Summary` you get up to 10 hotspots inline (the LLM knows what
@@ -211,7 +211,7 @@ Visões disponíveis por `kind`:
 | `contention-snapshot` | `collect_events(kind="contention")` | `summary` (default), `byCallSite`, `byOwner` |
 | `db-snapshot` | `collect_events(kind="db")` | `summary` (default), `byCommand`, `n+1`, `connectionPool` |
 | `heap-snapshot` | `inspect_heap` / `inspect_heap(source="live")` / `inspect_heap(source="dump")` | `top-types` (default), `retention-paths`, `roots-by-kind`, `finalizer-queue`, `fragmentation`, `static-fields`, `delegate-targets`, `duplicate-strings`, `gchandles`, `object`, `gcroot`, `objsize`, `async`, `diff` |
-| `thread-snapshot` | `collect_thread_snapshot` | `top-blocked` (default), `threads-summary`, `stack`, `lock-graph`, `deadlocks`, `unique-stacks`, `threadpool` |
+| `thread-snapshot` | `collect_thread_snapshot` | `top-blocked` (default), `threads-summary`, `stack`, `lock-graph`, `deadlocks`, `unique-stacks`, `async-stalls`, `threadpool` |
 | `off-cpu-snapshot` | `collect_sample(kind="off_cpu")` | `topStacks` (default), `byThread`, `stack` |
 | `cpu-sample` / `allocation-sample` | `collect_sample(kind="cpu")` / `collect_sample(kind="allocation")` | `call-tree`, `diff` |
 

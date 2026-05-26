@@ -226,7 +226,21 @@ client-induced.
    - framework I/O (`Socket`, `SslStream`, `HttpClient`) → pivot to `collect_events(kind="event_source", providerName="System.Net.Http")`
 4. If the single-thread view is not enough, escalate to `collect_thread_snapshot` for the full thread + lock graph while the same request is still hanging.
 5. Reproduce locally with `samples/BadCodeSample`'s `/slow-hang?seconds=N` fixture.
-## 4b. "Slow query / N+1 suspected"
+
+## 4c. "This looks like a parked async continuation"
+
+1. Capture `collect_thread_snapshot` while the hang is happening.
+2. Run `query_snapshot(handle, view="async-stalls")`.
+3. Read `byBucket[]` first:
+   - `SyncOverAsync` → somebody blocked on `Task.Result`, `Task.Wait`, or `GetResult()`.
+   - `ChannelAwait` → a `ChannelReader` is waiting for a producer.
+   - `TcsPending` → a `TaskCompletionSource`-backed handoff never completed.
+   - `SemaphoreAwait` → an async semaphore waiter needs a matching `Release()`.
+   - `Delay` → timer/backoff noise; often low priority.
+   - `Unknown` → async-looking stack, but inspect `query_snapshot(handle, view="stack", threadId=...)` before concluding.
+4. Reproduce locally with `samples/BadCodeSample`'s `/async-stall?bucket=tcs|channel|sync-over-async|semaphore&seconds=N` fixture.
+
+## 4d. "Slow query / N+1 suspected"
 
 1. Start `collect_events(kind="db", durationSeconds=10-15)` **before** driving the
    slow endpoint.

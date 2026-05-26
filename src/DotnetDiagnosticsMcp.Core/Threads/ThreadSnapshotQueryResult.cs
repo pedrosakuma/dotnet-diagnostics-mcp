@@ -2,9 +2,10 @@ namespace DotnetDiagnosticsMcp.Core.Threads;
 
 /// <summary>
 /// Typed payload returned by <c>query_thread_snapshot</c>. Carries the slice requested by the LLM
-/// (threads list, one thread's stack, lock graph, deadlock analysis, top-blocked ranking, or
-/// unique stack groups) plus provenance fields (origin, pid, captured-at, suspend duration) so
-/// the model can reason about freshness without a second roundtrip.
+/// (threads list, one thread's stack, lock graph, deadlock analysis, top-blocked ranking,
+/// unique stack groups, or async-stall classification) plus provenance fields (origin, pid,
+/// captured-at, suspend duration) so the model can reason about freshness without a second
+/// roundtrip.
 /// </summary>
 public sealed record ThreadSnapshotQueryResult(
     string Handle,
@@ -26,6 +27,8 @@ public sealed record ThreadSnapshotQueryResult(
     public IReadOnlyList<UniqueThreadStackGroup>? UniqueStacks { get; init; }
     /// <summary>Populated for <c>threadpool</c>.</summary>
     public ThreadPoolSnapshot? ThreadPool { get; init; }
+    /// <summary>Populated for <c>async-stalls</c>.</summary>
+    public AsyncStallsView? AsyncStalls { get; init; }
     /// <summary>Echoes the thread id used by the <c>stack</c> view.</summary>
     public int? ThreadId { get; init; }
 }
@@ -69,3 +72,23 @@ public sealed record UniqueThreadStackGroup(
     /// <summary>Coarse wait reason inferred from the representative thread when available.</summary>
     public string? InferredWaitReason { get; init; }
 }
+
+/// <summary>Aggregate returned by <c>query_thread_snapshot(view="async-stalls")</c>.</summary>
+public sealed record AsyncStallsView(
+    string View,
+    int ClassifiedThreads,
+    IReadOnlyList<AsyncStallBucketSummary> ByBucket,
+    IReadOnlyList<AsyncStalledThread> TopBlockedAsync);
+
+/// <summary>One async-stall bucket with a small sample of matching managed thread ids.</summary>
+public sealed record AsyncStallBucketSummary(
+    string Bucket,
+    int Count,
+    IReadOnlyList<int> SampleThreadIds);
+
+/// <summary>Representative classified thread surfaced by <c>query_thread_snapshot(view="async-stalls")</c>.</summary>
+public sealed record AsyncStalledThread(
+    int ThreadId,
+    string Bucket,
+    double? DurationMs,
+    IReadOnlyList<string> TopFrames);
