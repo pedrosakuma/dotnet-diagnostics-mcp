@@ -22,7 +22,8 @@ public sealed class ThreadSnapshotQueryTests
         groups.Should().NotBeNull();
         var uniqueStacks = groups!;
         uniqueStacks.Select(group => group.ThreadCount).Should().Equal(6, 4, 2);
-        uniqueStacks[0].ThreadPercentage.Should().BeApproximately(0.5, 0.0001);
+        // 6 threads out of 13 total ≈ 46.15%
+        uniqueStacks[0].ThreadPercentage.Should().BeApproximately(6.0 / 13.0, 0.0001);
         uniqueStacks[0].SampleThreads.Should().HaveCount(5, "sample thread ids are capped for large groups");
         uniqueStacks[0].SampleThreads.Select(sample => sample.ManagedThreadId).Should().Equal(1, 2, 3, 4, 5);
         uniqueStacks[0].CanonicalFrames.Select(frame => frame.DisplayName).Should().Equal("GroupA.Mid", "GroupA.Leaf");
@@ -61,6 +62,21 @@ public sealed class ThreadSnapshotQueryTests
         result.Data.Thread!.TopFrameMethod.Should().Be("GroupA.Leaf");
     }
 
+    [Fact]
+    public void QueryThreadSnapshot_AsyncStalls_ReturnsClassifierView()
+    {
+        var store = new MemoryDiagnosticHandleStore();
+        var snapshot = CreateSnapshot();
+        var handle = store.Register(snapshot.ProcessId, "thread-snapshot", snapshot, TimeSpan.FromMinutes(10), evictWhenProcessExits: false);
+
+        var result = DiagnosticTools.QueryThreadSnapshot(store, handle.Id, view: "async-stalls", topN: 2);
+
+        result.IsError.Should().BeFalse();
+        result.Data!.View.Should().Be("async-stalls");
+        result.Data.AsyncStalls.Should().NotBeNull();
+        result.Data.AsyncStalls!.ClassifiedThreads.Should().BeGreaterThan(0);
+    }
+
     private static ThreadSnapshotArtifact CreateSnapshot()
     {
         var threads = new List<ManagedThread>();
@@ -93,6 +109,12 @@ public sealed class ThreadSnapshotQueryTests
                 CreateFrame("GroupC.Mid", GroupCModuleVersionId, 0x06000022),
                 CreateFrame($"GroupC.Root{managedThreadId}", GroupCModuleVersionId, 0x06000300 + managedThreadId)));
         }
+
+        threads.Add(CreateThread(
+            13,
+            waitReason: "Task.Wait",
+            CreateFrame("System.Threading.Tasks.Task`1[[System.Int32]].get_Result()", GroupCModuleVersionId, 0x06000401),
+            CreateFrame("Tests.AsyncFixture+<RunAsync>d__4.MoveNext()", GroupCModuleVersionId, 0x06000402)));
 
         return new ThreadSnapshotArtifact(
             Origin: ThreadSnapshotOrigin.Live,

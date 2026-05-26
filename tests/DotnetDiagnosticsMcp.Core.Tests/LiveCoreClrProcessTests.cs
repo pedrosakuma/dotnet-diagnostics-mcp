@@ -718,6 +718,40 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         snapshot.Locks.Should().NotBeNull();
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task AsyncStallClassifier_FindsTcsPending_FromBadCodeSample()
+    {
+        await using var sample = await LiveHttpSample.StartAsync("BadCodeSample", "/");
+        using var http = new HttpClient { BaseAddress = new Uri(sample.BaseUrl) };
+        var requestTask = http.GetAsync("/async-stall?bucket=tcs&seconds=4", CancellationToken.None);
+        var inspector = new ClrMdThreadSnapshotInspector();
+
+        await Task.Delay(TimeSpan.FromMilliseconds(150));
+
+        AsyncStallsView? matched = null;
+        for (var attempt = 0; attempt < 8 && matched is null; attempt++)
+        {
+            var snapshot = await inspector.InspectLiveAsync(
+                sample.ProcessId,
+                new ThreadSnapshotOptions(MaxFramesPerThread: 32),
+                CancellationToken.None);
+
+            var view = AsyncStallClassifier.Classify(snapshot, topN: 10);
+            if (view.ByBucket.Any(bucket => bucket.Bucket == "TcsPending" && bucket.Count >= 1))
+            {
+                matched = view;
+                break;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(200));
+        }
+
+        using var response = await requestTask;
+        response.EnsureSuccessStatusCode();
+        matched.Should().NotBeNull("the /async-stall?bucket=tcs fixture should leave at least one TCS-backed async continuation visible to the classifier");
+        matched!.ByBucket.Should().Contain(bucket => bucket.Bucket == "TcsPending" && bucket.Count >= 1);
+    }
+
     [Fact]
     public async Task JitMapEmitter_EmitsPerfMap_WithManagedSymbols()
     {
