@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.Logs;
 
 namespace DotnetDiagnosticsMcp.Core.Collection;
@@ -191,3 +192,38 @@ public sealed record LogErrorsView(
     long TotalEvents,
     int Returned,
     IReadOnlyList<Logs.LogEntry> Errors);
+
+
+// --- JIT snapshot views ------------------------------------------------------------------------
+
+public sealed record JitSummaryView(
+    int JitStartCount,
+    int CompletedCompilations,
+    int UniqueMethods,
+    JitTierDistribution Distribution,
+    int R2RLookupCount,
+    int ReJitCount,
+    int OsrCount,
+    int IlMapCount,
+    double Tier1Percent,
+    double? R2RHitRatePercent,
+    string HealthCheck,
+    IReadOnlyList<JitMethodSummary> TopMethods,
+    IReadOnlyList<string> Notes);
+
+public sealed record JitTopMethodsView(
+    int UniqueMethods,
+    int Returned,
+    IReadOnlyList<JitMethodSummary> Methods);
+
+public sealed record JitTierDistributionView(
+    JitTierDistribution Distribution,
+    double Tier1Percent,
+    double? R2RHitRatePercent,
+    string HealthCheck);
+
+public sealed record JitReJitView(
+    int ReJitCount,
+    int OsrCount,
+    int Returned,
+    IReadOnlyList<JitMethodSummary> Methods);

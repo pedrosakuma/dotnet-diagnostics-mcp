@@ -11,7 +11,8 @@
 - `samples/BadCodeSample` gained `/fd-leak` and `/socket-leak` fixtures, plus live/integration coverage and docs for the new unmanaged-resource investigation path.
 - `query_snapshot(view="diff")` can now diff `cpu-sample`, `heap-snapshot`, and `allocation-sample` handles against a `baselineHandle`, including per-second normalization for allocation windows.
 - `collect_events(kind="logs")` adds a curated `ILogger` view over the `Microsoft-Extensions-Logging` EventSource with per-level counts, per-category rollups, redacted scopes, bounded recent entries, and `query_snapshot(handle, view="summary|byCategory|byLevel|recent|errors")` drilldown.
-- `samples/BadCodeSample` now exposes `/log-spam?count=N&level=warning|error|...` so live tests and playbooks can reproduce warning/error storms.
+- `collect_events(kind="jit")` adds a tiered-compilation / ReadyToRun view over `Microsoft-Windows-DotNETRuntime`, reconstructing inclusive JIT time, Tier0 vs Tier1 distribution, R2R hit vs miss-then-jit, ReJIT / OSR counts, and `query_snapshot(handle, view="summary|topMethods|tierDistribution|reJIT")` drilldown.
+- `samples/BadCodeSample` now exposes `/log-spam?count=N&level=warning|error|...` and `/jit-pressure?count=N` so live tests and playbooks can reproduce logging storms and post-deploy cold-start JIT pressure.
 
 ### Fixed
 - `deploy/Dockerfile`: removed dev-only `"Urls": "http://127.0.0.1:8787"` from

@@ -7,6 +7,7 @@ using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.Logs;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
@@ -47,12 +48,13 @@ public sealed class CollectEventsTool
         "event_source",
         "activities",
         "logs",
+        "jit",
     };
 
     [RequireAnyScope("read-counters", "eventpipe")]
     [McpServerTool(
         Name = "collect_events",
-        Title = "Collect EventPipe events (counters | exceptions | gc | event_source | activities | logs)",
+        Title = "Collect EventPipe events (counters | exceptions | gc | event_source | activities | logs | jit)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
@@ -62,10 +64,11 @@ public sealed class CollectEventsTool
         "capture: 'counters' (EventCounter snapshot — cheap first signal), 'exceptions' (managed " +
         "exception stream), 'gc' (GC start/stop pairs and pause durations), 'event_source' " +
         "(generic provider passthrough — requires providerName), 'activities' (ActivitySource " +
-        "spans), or 'logs' (curated ILogger view from Microsoft-Extensions-Logging). Each kind preserves the full behavior of its legacy collector tool, including " +
+        "spans), 'logs' (curated ILogger view from Microsoft-Extensions-Logging), or 'jit' " +
+        "(tiered compilation / ReadyToRun activity). Each kind preserves the full behavior of its legacy collector tool, including " +
         "the original authorization scope: 'counters' uses 'read-counters'; all other kinds use " +
         "'eventpipe'. Returns a polymorphic envelope with exactly one of " +
-        "{counters, exceptions, gc, eventSource, activities, logs} populated alongside the chosen " +
+        "{counters, exceptions, gc, eventSource, activities, logs, jit} populated alongside the chosen " +
         "kind, the issued handle, and standard NextActionHints. " +
         "IMPORTANT: for 'exceptions' and 'gc', start collection BEFORE the workload you want to " +
         "observe — EventPipe sessions take ~500 ms–1 s to fully start and events before then are " +
@@ -79,6 +82,7 @@ public sealed class CollectEventsTool
         IActivityCollector activityCollector,
         IEventSourceCollector eventSourceCollector,
         ILogCollector logCollector,
+        IJitCollector jitCollector,
         IProcessContextResolver resolver,
         IDiagnosticHandleStore handles,
         EventSourceAllowlist allowlist,
@@ -86,7 +90,7 @@ public sealed class CollectEventsTool
         IPrincipalAccessor principalAccessor,
         [Description(
             "Which EventPipe family to collect. One of: 'counters', 'exceptions', 'gc', " +
-            "'event_source', 'activities', 'logs'. Each kind preserves the options of its legacy " +
+            "'event_source', 'activities', 'logs', 'jit'. Each kind preserves the options of its legacy " +
             "collector tool; irrelevant options are ignored.")]
         string kind = "counters",
         // Shared options.
@@ -229,6 +233,14 @@ public sealed class CollectEventsTool
                         "logs",
                         (env, data) => env with { Logs = data }),
 
+                    "jit" => Project(
+                        await DiagnosticTools.CollectJit(
+                            jitCollector, resolver, handles,
+                            processId, effectiveDuration, depth,
+                            ct).ConfigureAwait(false),
+                        "jit",
+                        (env, data) => env with { Jit = data }),
+
                     // Unreachable — TryValidate narrowed canonicalKind to the AllowedKinds set above.
                     _ => DiagnosticResult.Fail<CollectEventsEnvelope>(
                         $"Unhandled kind '{canonicalKind}'.",
@@ -279,7 +291,7 @@ public sealed class CollectEventsTool
 /// <summary>
 /// Polymorphic payload returned by <see cref="CollectEventsTool.CollectEvents"/>. Exactly one
 /// of the kind-specific fields (<see cref="Counters"/>, <see cref="Exceptions"/>,
-/// <see cref="Gc"/>, <see cref="EventSource"/>, <see cref="Activities"/>, <see cref="Logs"/>) is populated, matched
+/// <see cref="Gc"/>, <see cref="EventSource"/>, <see cref="Activities"/>, <see cref="Logs"/>, <see cref="Jit"/>) is populated, matched
 /// by <see cref="Kind"/>. Mirrors the discriminator-envelope convention used by other
 /// consolidated tools (e.g. <c>get_method_il</c>).
 /// </summary>
@@ -290,4 +302,5 @@ public sealed record CollectEventsEnvelope(
     GcSummary? Gc = null,
     EventSourceCapture? EventSource = null,
     ActivityCapture? Activities = null,
-    LogSnapshot? Logs = null);
+    LogSnapshot? Logs = null,
+    JitSnapshot? Jit = null);

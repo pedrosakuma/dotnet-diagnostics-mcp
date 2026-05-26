@@ -4,6 +4,7 @@ using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.Logs;
 using FluentAssertions;
 
@@ -262,6 +263,45 @@ public class CollectionQueryDispatcherTests
         errors.Errors.Should().OnlyContain(entry =>
             entry.Level == "Warning" || entry.Level == "Error" || entry.Level == "Critical");
         errors.Errors.Should().Contain(entry => entry.ExceptionType == "System.InvalidOperationException");
+    }
+
+    [Fact]
+    public void Jit_SummaryAndReJitViews_RenderExpectedSlices()
+    {
+        var snapshot = new JitSnapshot(
+            ProcessId: 42,
+            StartedAt: At,
+            Duration: TimeSpan.FromSeconds(5),
+            JitStartCount: 4,
+            CompletedCompilations: 4,
+            UniqueMethods: 3,
+            Distribution: new JitTierDistribution(Tier0: 3, Tier1: 1, ReadyToRun: 0, R2RHit: 2, R2RMissThenJit: 1),
+            R2RLookupCount: 3,
+            ReJitCount: 1,
+            OsrCount: 1,
+            IlMapCount: 2,
+            Tier1Percent: 25,
+            R2RHitRatePercent: 66.7,
+            HealthCheck: "25% of completed methods reached Tier1; R2R hit rate 67%.",
+            Methods:
+            [
+                new JitMethodSummary("BadCodeSample", "JitPressureDynamicMethod0001", "(Int32)", "BadCodeSample.JitPressureDynamicMethod0001(Int32)", 12.5, 1, "QuickJitted", 1, 0, 0, 0, 0, true),
+                new JitMethodSummary("BadCodeSample", "JitPressureDynamicMethod0002", "(Int32)", "BadCodeSample.JitPressureDynamicMethod0002(Int32)", 10.1, 1, "OptimizedTier1OSR", 0, 1, 0, 1, 1, true),
+                new JitMethodSummary("BadCodeSample", "JitPressureDynamicMethod0003", "(Int32)", "BadCodeSample.JitPressureDynamicMethod0003(Int32)", 6.2, 2, "QuickJitted", 2, 0, 0, 0, 0, false),
+            ],
+            Notes: new[] { "note" });
+
+        var summaryOutcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.JitSnapshot, "summary", snapshot, 2);
+        var summary = summaryOutcome.Result!.Payload.Should().BeOfType<JitSummaryView>().Subject;
+        summary.TopMethods.Should().HaveCount(2);
+        summary.Distribution.Tier0.Should().Be(3);
+        summary.R2RLookupCount.Should().Be(3);
+
+        var rejitOutcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.JitSnapshot, "reJIT", snapshot, 10);
+        var rejit = rejitOutcome.Result!.Payload.Should().BeOfType<JitReJitView>().Subject;
+        rejit.ReJitCount.Should().Be(1);
+        rejit.OsrCount.Should().Be(1);
+        rejit.Methods.Should().ContainSingle(method => method.OsrCount == 1);
     }
 
     [Fact]

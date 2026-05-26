@@ -3,6 +3,7 @@ using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.Logs;
 
 namespace DotnetDiagnosticsMcp.Core.Collection;
@@ -30,6 +31,7 @@ public static class CollectionQueryDispatcher
         CollectionHandleKinds.EventSource => new[] { "summary", "byEventName", "events" },
         CollectionHandleKinds.Activities => new[] { "summary", "bySource", "byOperation", "activities" },
         CollectionHandleKinds.LogSnapshot => new[] { "summary", "byCategory", "byLevel", "recent", "errors" },
+        CollectionHandleKinds.JitSnapshot => new[] { "summary", "topMethods", "tierDistribution", "reJIT" },
         _ => Array.Empty<string>(),
     };
 
@@ -81,6 +83,8 @@ public static class CollectionQueryDispatcher
                 => Ok(Render(a, effectiveView, topN)),
             CollectionHandleKinds.LogSnapshot when artifact is LogSnapshot logs
                 => Ok(Render(logs, effectiveView, topN)),
+            CollectionHandleKinds.JitSnapshot when artifact is JitSnapshot jit
+                => Ok(Render(jit, effectiveView, topN)),
             _ => new DispatchOutcome(null, kind, null, null, null),
         };
     }
@@ -310,4 +314,37 @@ public static class CollectionQueryDispatcher
         string.Equals(level, "Warning", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(level, "Error", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(level, "Critical", StringComparison.OrdinalIgnoreCase);
+
+    private static CollectionQueryResult Render(JitSnapshot snapshot, string view, int topN)
+    {
+        var topMethods = snapshot.Methods.Take(topN).ToList();
+        var rejitMethods = snapshot.Methods
+            .Where(static method => method.ReJitCount > 0 || method.OsrCount > 0)
+            .Take(topN)
+            .ToList();
+
+        object payload = view.ToLowerInvariant() switch
+        {
+            "topmethods" => new JitTopMethodsView(snapshot.UniqueMethods, topMethods.Count, topMethods),
+            "tierdistribution" => new JitTierDistributionView(snapshot.Distribution, snapshot.Tier1Percent, snapshot.R2RHitRatePercent, snapshot.HealthCheck),
+            "rejit" => new JitReJitView(snapshot.ReJitCount, snapshot.OsrCount, rejitMethods.Count, rejitMethods),
+            _ => new JitSummaryView(
+                snapshot.JitStartCount,
+                snapshot.CompletedCompilations,
+                snapshot.UniqueMethods,
+                snapshot.Distribution,
+                snapshot.R2RLookupCount,
+                snapshot.ReJitCount,
+                snapshot.OsrCount,
+                snapshot.IlMapCount,
+                snapshot.Tier1Percent,
+                snapshot.R2RHitRatePercent,
+                snapshot.HealthCheck,
+                topMethods,
+                snapshot.Notes),
+        };
+
+        return new CollectionQueryResult(
+            CollectionHandleKinds.JitSnapshot, view, snapshot.ProcessId, snapshot.StartedAt, snapshot.Duration, payload);
+    }
 }

@@ -24,4 +24,7 @@ public static class CollectionHandleKinds
 
     /// <summary>Handle backing a <see cref="Logs.LogSnapshot"/> emitted by <c>collect_events(kind="logs")</c>.</summary>
     public const string LogSnapshot = "log-snapshot";
+
+    /// <summary>Handle backing a <see cref="Jit.JitSnapshot"/> emitted by <c>collect_events(kind="jit")</c>.</summary>
+    public const string JitSnapshot = "jit-snapshot";
 }

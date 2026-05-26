@@ -248,6 +248,7 @@ public sealed class QuerySnapshotTool
                 case CollectionHandleKinds.EventSource:
                 case CollectionHandleKinds.Activities:
                 case CollectionHandleKinds.LogSnapshot:
+                case CollectionHandleKinds.JitSnapshot:
                 {
                     if (!RequireScope(principal, ScopeEventPipe, out var forbidden))
                     {
@@ -377,6 +378,7 @@ public sealed class QuerySnapshotTool
         CollectionHandleKinds.EventSource,
         CollectionHandleKinds.Activities,
         CollectionHandleKinds.LogSnapshot,
+        CollectionHandleKinds.JitSnapshot,
     };
 
     /// <summary>

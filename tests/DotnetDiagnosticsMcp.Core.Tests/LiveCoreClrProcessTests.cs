@@ -8,6 +8,7 @@ using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Dump;
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.Logs;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
@@ -1384,6 +1385,76 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         errors.Returned.Should().Be(6);
         errors.Errors.Should().OnlyContain(entry =>
             entry.Level == "Warning" || entry.Level == "Error" || entry.Level == "Critical");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task Jit_HandleEnablesDrilldown()
+    {
+        await using var badSample = await StartPublishedSampleAsync("BadCodeSample");
+        using var http = new HttpClient { BaseAddress = new Uri(badSample.BaseUrl) };
+        var collector = new EventPipeJitCollector();
+        var handles = new MemoryDiagnosticHandleStore();
+        var resolver = new FixedProcessContextResolver(badSample.ProcessId);
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/jit-pressure?count=200");
+            response.EnsureSuccessStatusCode();
+        });
+
+        var collected = await DiagnosticTools.CollectJit(
+            collector,
+            resolver,
+            handles,
+            processId: badSample.ProcessId,
+            durationSeconds: 5,
+            depth: SamplingDepth.Detail,
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        collected.Error.Should().BeNull();
+        collected.Handle.Should().NotBeNullOrWhiteSpace();
+        collected.Data.Should().NotBeNull();
+        collected.Data!.Methods.Should().Contain(method =>
+            method.MethodName.Contains("JitPressureDynamicMethod", StringComparison.Ordinal));
+
+        var topMethodsResult = await QuerySnapshotTool.QuerySnapshot(
+            handles,
+            new ClrMdDumpInspector(),
+            new SensitiveDataRedactor(),
+            new SensitiveValueGate(null),
+            new RootPrincipalAccessor(),
+            collected.Handle!,
+            view: "topMethods",
+            topN: collected.Data.Methods.Count,
+            cancellationToken: CancellationToken.None);
+
+        topMethodsResult.Error.Should().BeNull();
+        var topMethodsQuery = topMethodsResult.Data.Should().BeOfType<CollectionQueryResult>().Subject;
+        topMethodsQuery.Kind.Should().Be(CollectionHandleKinds.JitSnapshot);
+        topMethodsQuery.View.Should().Be("topMethods");
+        var topMethods = topMethodsQuery.Payload.Should().BeOfType<JitTopMethodsView>().Subject;
+        topMethods.Methods.Should().Contain(method =>
+            method.MethodName.Contains("JitPressureDynamicMethod", StringComparison.Ordinal));
+
+        var tierResult = await QuerySnapshotTool.QuerySnapshot(
+            handles,
+            new ClrMdDumpInspector(),
+            new SensitiveDataRedactor(),
+            new SensitiveValueGate(null),
+            new RootPrincipalAccessor(),
+            collected.Handle!,
+            view: "tierDistribution",
+            cancellationToken: CancellationToken.None);
+
+        tierResult.Error.Should().BeNull();
+        var tierQuery = tierResult.Data.Should().BeOfType<CollectionQueryResult>().Subject;
+        tierQuery.Kind.Should().Be(CollectionHandleKinds.JitSnapshot);
+        tierQuery.View.Should().Be("tierDistribution");
+        var tierDistribution = tierQuery.Payload.Should().BeOfType<JitTierDistributionView>().Subject;
+        tierDistribution.Distribution.Tier0.Should().BeGreaterThan(0);
     }
 
     private static IEnumerable<CallTreeNode> Flatten(CallTreeNode root)

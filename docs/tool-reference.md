@@ -77,6 +77,7 @@ Per-tool `Summary` semantics:
 | `collect_events(kind="gc")` | The `Events[]` list. Totals, max pause, per-gen counts remain exact. |
 | `collect_events(kind="event_source")` | The `Events[]` list. Provider + total count remain. Drill in with `query_snapshot(handle, view=byEventName)`. |
 | `collect_events(kind="logs")` | The `Recent[]` list. Level counts + per-category rollups remain exact for the window. |
+| `collect_events(kind="jit")` | Method rows beyond the hottest 10. Healthcheck + tier counts remain exact for the window. |
 | `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_snapshot(view=lock-graph|deadlocks|unique-stacks)`. |
 
 Explicit `topN` always wins over the depth default — if you pass
@@ -163,8 +164,8 @@ The LLM may always ignore a prompt and drive ad-hoc.
 
 ### Handle chaining nos coletores (`query_snapshot`)
 
-Os 6 coletores windowed — `collect_events(kind="counters")`, `collect_events(kind="exceptions")`,
-`collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`, `collect_events(kind="logs")` — devolvem, junto do summary +
+Os 7 coletores windowed — `collect_events(kind="counters")`, `collect_events(kind="exceptions")`,
+`collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`, `collect_events(kind="logs")`, `collect_events(kind="jit")` — devolvem, junto do summary +
 top-N inline, um `handle` opaco (Crockford-base32, TTL ~10 min) registrado num
 store em memória. A LLM pode então re-projetar o mesmo artefato sob outra
 visão **sem rodar o EventPipe de novo** chamando `query_snapshot`:
@@ -180,7 +181,7 @@ query_snapshot(handle="01H...XY", view="byType")
 ```
 
 `query_snapshot` (RFC 0002 §4.1 / #207) é o verbo único de drilldown — ele
-faz dispatch pelo `kind` que o handle carrega e cobre os 10 kinds emitidos
+faz dispatch pelo `kind` que o handle carrega e cobre os 11 kinds emitidos
 pelos coletores acima + heap (`heap-snapshot`), thread (`thread-snapshot`),
 off-CPU (`off-cpu-snapshot`) e call-tree (`cpu-sample` / `allocation-sample`).
 Os 5 verbos legados (`query_snapshot`, `query_snapshot`,
@@ -198,6 +199,7 @@ Visões disponíveis por `kind`:
 | `activities` | `collect_events(kind="activities")` | `summary` (default), `bySource`, `byOperation`, `activities` |
 | `event-source` | `collect_events(kind="event_source")` | `summary` (default), `byEventName`, `events` |
 | `log-snapshot` | `collect_events(kind="logs")` | `summary` (default), `byCategory`, `byLevel`, `recent`, `errors` |
+| `jit-snapshot` | `collect_events(kind="jit")` | `summary` (default), `topMethods`, `tierDistribution`, `reJIT` |
 | `heap-snapshot` | `inspect_heap` / `inspect_heap(source="live")` / `inspect_heap(source="dump")` | `top-types` (default), `retention-paths`, `roots-by-kind`, `finalizer-queue`, `fragmentation`, `static-fields`, `delegate-targets`, `duplicate-strings`, `object`, `gcroot`, `objsize`, `async`, `diff` |
 | `thread-snapshot` | `collect_thread_snapshot` | `top-blocked` (default), `threads-summary`, `stack`, `lock-graph`, `deadlocks`, `unique-stacks`, `threadpool` |
 | `off-cpu-snapshot` | `collect_sample(kind="off_cpu")` | `topStacks` (default), `byThread`, `stack` |
@@ -646,7 +648,7 @@ identical, but each carries a `DEPRECATED` notice and will be removed in
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`, `logs`. Case-sensitive. |
+| `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`, `logs`, `jit`. Case-sensitive. |
 | `processId` | `int?` | auto | Target process id. |
 | `durationSeconds` | `int` | 5 (counters) / 10 (others) | Collection window. |
 | `providers` / `meters` / `intervalSeconds` / `maxInstrumentTimeSeries` | counters only | — | Same as [`collect_events(kind="counters")`](#collect_events(kind="counters")). |
@@ -655,10 +657,11 @@ identical, but each carries a `DEPRECATED` notice and will be removed in
 | `providerName` / `keywords` / `eventLevel` / `depth` / `unsafeProvider` | event_source only | — | Same as [`collect_events(kind="event_source")`](#collect_events(kind="event_source")). |
 | `sources` / `maxActivities` | activities only | — | Same as [`collect_events(kind="activities")`](#collect_events(kind="activities")). |
 | `categories` / `minLevel` / `maxMessageBytes` / `depth` | logs only | — | Same as [`collect_events(kind="logs")`](#collect_events(kind="logs")). |
+| `depth` | jit only | `Summary` | Same as [`collect_events(kind="jit")`](#collect_events(kind="jit")). |
 
 **Returns:** `CollectEventsEnvelope` — a polymorphic record that carries the
 `kind` discriminator plus exactly one populated payload field
-(`counters` / `exceptions` / `gc` / `eventSource` / `activities` / `logs`). The
+(`counters` / `exceptions` / `gc` / `eventSource` / `activities` / `logs` / `jit`). The
 envelope's `summary`, `hints`, `handle`, `handleExpiresAt`, and
 `resolvedProcess` are passed through from the underlying collector verbatim,
 so `query_snapshot` drilldowns continue to work unchanged.
@@ -1198,6 +1201,44 @@ ring buffer, and redacted scope / exception detail when `depth != "Summary"`.
 - `MessageJson` is enabled only when `depth != "Summary"` to reduce collector overhead.
 - Messages and scope values always pass through `SensitiveDataRedactor` before they are retained.
 - When `truncated=true`, the collector dropped oldest retained entries after `maxEvents`.
+
+---
+
+## `collect_events(kind="jit")`
+
+Collects CLR JIT / tiered-compilation activity from `Microsoft-Windows-DotNETRuntime`,
+reconstructing inclusive JIT time from `MethodJittingStarted` → `MethodLoadVerbose`
+pairs and tracking Tier0 vs Tier1, ReadyToRun hits/miss-then-jit, ReJIT, OSR,
+and IL-map counts.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | — | Target process id |
+| `durationSeconds` | `int` | `10` | Window length |
+| `depth` | `SamplingDepth` | `Summary` | `Summary` keeps only the hottest 10 methods inline; `Detail` / `Raw` return every observed method row |
+
+**Returns:** `JitSnapshot` with:
+
+- `jitStartCount`, `completedCompilations`, `uniqueMethods`
+- `distribution` (`tier0`, `tier1`, `readyToRun`, `r2rHit`, `r2rMissThenJit`)
+- `reJitCount`, `osrCount`, `ilMapCount`, `r2rLookupCount`
+- `tier1Percent`, `r2rHitRatePercent`, `healthCheck`
+- `methods` (`JitMethodSummary[]` sorted by `inclusiveJitTimeMs` descending)
+- `notes`
+
+`JitMethodSummary` carries `methodNamespace`, `methodName`, `methodSignature`,
+`displayName`, `inclusiveJitTimeMs`, `compilationCount`, `lastOptimizationTier`,
+per-tier counts, `reJitCount`, `osrCount`, and `hasIlMap`.
+
+**Drilldown:** `query_snapshot(handle, view="summary" | "topMethods" | "tierDistribution" | "reJIT")`.
+
+**Notes:**
+
+- The collector enables the runtime's JIT + JIT tracing keywords **plus** IL-map / compilation-diagnostic keywords so ReadyToRun lookup and IL-map events are visible in the same window.
+- `R2R hit rate` is computed over all observed `r2rLookupCount` lookups; `R2RMissThenJit` remains a separate correlation metric for misses that fell back to JIT within the same window.
+- `OSR` is surfaced from `OptimizationTier=OptimizedTier1OSR` on `MethodLoadVerbose`.
 
 ---
 

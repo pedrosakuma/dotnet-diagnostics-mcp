@@ -16,6 +16,7 @@ using DotnetDiagnosticsMcp.Core.Gc;
 using DotnetDiagnosticsMcp.Core.Logs;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Investigation;
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.JitCapture;
 using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.OffCpu;
@@ -1036,20 +1037,20 @@ public sealed class DiagnosticTools
 
     [RequireAnyScope("read-counters", "eventpipe")]
     [Description(
-        "Re-projects a previously-collected counter/exception/GC/EventSource/Activity/log artifact under a " +
+        "Re-projects a previously-collected counter/exception/GC/EventSource/Activity/log/JIT artifact under a " +
         "named view, without re-running the underlying EventPipe session. Use the `handle` " +
-        "returned by snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source / collect_activities / collect_events(kind=\"logs\"). " +
+        "returned by snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source / collect_activities / collect_events(kind=\"logs\") / collect_events(kind=\"jit\"). " +
         "Supported views per kind: counters → summary|byProvider; exception-snapshot → " +
         "summary|byType|recent; gc-events → summary|events|pauseHistogram; event-source → " +
         "summary|byEventName|events; activities → summary|bySource|byOperation|activities; " +
-        "log-snapshot → summary|byCategory|byLevel|recent|errors. " +
+        "log-snapshot → summary|byCategory|byLevel|recent|errors; jit-snapshot → summary|topMethods|tierDistribution|reJIT. " +
         "Handles expire ~10 minutes after collection.")]
     public static DiagnosticResult<CollectionQueryResult> QueryCollection(
         IDiagnosticHandleStore handles,
         IPrincipalAccessor principalAccessor,
-        [Description("Handle returned by a prior collection tool (snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source / collect_activities / collect_events(kind=\"logs\")). ")] string handle,
+        [Description("Handle returned by a prior collection tool (snapshot_counters / collect_exceptions / collect_gc_events / collect_event_source / collect_activities / collect_events(kind=\"logs\") / collect_events(kind=\"jit\")). ")] string handle,
         [Description("View name (kind-dependent). Defaults to 'summary'.")] string? view = null,
-        [Description("Cap on inline items for paginated views (recent / events / byType / byEventName / bySource / byOperation / activities / byCategory / byLevel / errors). Must be >= 1. Defaults to 50.")] int topN = 50)
+        [Description("Cap on inline items for paginated views (recent / events / byType / byEventName / bySource / byOperation / activities / byCategory / byLevel / errors / topMethods / reJIT). Must be >= 1. Defaults to 50.")] int topN = 50)
     {
         if (string.IsNullOrWhiteSpace(handle)) return InvalidArg<CollectionQueryResult>(nameof(handle), "is required");
         if (topN < 1) return InvalidArg<CollectionQueryResult>(nameof(topN), "must be >= 1");
@@ -1087,7 +1088,7 @@ public sealed class DiagnosticTools
                 $"Handle '{handle}' is of kind '{outcome.UnknownKind}' which query_collection does not support.",
                 new DiagnosticError(
                     "UnsupportedHandleKind",
-                    $"query_collection dispatches over kinds: {string.Join(", ", new[] { CollectionHandleKinds.Counters, CollectionHandleKinds.ExceptionSnapshot, CollectionHandleKinds.GcEvents, CollectionHandleKinds.EventSource, CollectionHandleKinds.Activities, CollectionHandleKinds.LogSnapshot })}.",
+                    $"query_collection dispatches over kinds: {string.Join(", ", new[] { CollectionHandleKinds.Counters, CollectionHandleKinds.ExceptionSnapshot, CollectionHandleKinds.GcEvents, CollectionHandleKinds.EventSource, CollectionHandleKinds.Activities, CollectionHandleKinds.LogSnapshot, CollectionHandleKinds.JitSnapshot })}.",
                     outcome.UnknownKind),
                 new NextActionHint("query_snapshot", "Use the kind-specific drill-down tool for heap/thread/cpu handles.", null));
         }
@@ -1376,6 +1377,66 @@ public sealed class DiagnosticTools
                     ? "Correlate warning/error spikes with CPU hotspots from the same window."
                     : "If the app was slow without warning/error logs, pivot to CPU sampling for the same process.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 })),
+            resolved.Context);
+    }
+
+    [RequireScope("eventpipe")]
+    [Description(
+        "Captures CLR JIT / tiered-compilation activity via the Microsoft-Windows-DotNETRuntime provider. " +
+        "Reconstructs inclusive JIT time from MethodJittingStarted→MethodLoadVerbose, tracks Tier0/Tier1/ReadyToRun distribution, R2R hit vs miss-then-jit, ReJIT and OSR counts, and returns a drill-down handle.")]
+    public static async Task<DiagnosticResult<JitSnapshot>> CollectJit(
+        IJitCollector collector,
+        IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' trims the inline method list to the hottest 10 entries; the handle retains every observed method.")]
+        SamplingDepth depth = SamplingDepth.Summary,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1) return InvalidArg<JitSnapshot>(nameof(durationSeconds), "must be >= 1");
+
+        var resolved = await ResolveContextAsync<JitSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
+        var snapshot = await collector
+            .CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), cancellationToken)
+            .ConfigureAwait(false);
+
+        var inlineSnapshot = snapshot;
+        var droppedMethods = 0;
+        if (depth == SamplingDepth.Summary && snapshot.Methods.Count > 10)
+        {
+            droppedMethods = snapshot.Methods.Count - 10;
+            var inlineNotes = snapshot.Notes
+                .Append($"{droppedMethods} additional method(s) omitted from the inline payload (handle has all).")
+                .ToList();
+            inlineSnapshot = snapshot with
+            {
+                Methods = snapshot.Methods.Take(10).ToList(),
+                Notes = inlineNotes,
+            };
+        }
+
+        var summary = snapshot.CompletedCompilations == 0 && snapshot.R2RLookupCount == 0
+            ? $"No JIT or ReadyToRun activity captured in {durationSeconds}s. Trigger a cold path during the window and retry."
+            : (depth == SamplingDepth.Summary && droppedMethods > 0
+                ? $"Observed {snapshot.CompletedCompilations} completed JIT compilation(s) across {snapshot.UniqueMethods} method(s) in {durationSeconds}s. {snapshot.HealthCheck} ReJIT={snapshot.ReJitCount}, OSR={snapshot.OsrCount}. Dropped {droppedMethods} method row(s) from inline (handle has all)."
+                : $"Observed {snapshot.CompletedCompilations} completed JIT compilation(s) across {snapshot.UniqueMethods} method(s) in {durationSeconds}s. {snapshot.HealthCheck} ReJIT={snapshot.ReJitCount}, OSR={snapshot.OsrCount}.");
+
+        var handle = handles.Register(pid, CollectionHandleKinds.JitSnapshot, snapshot, CollectionHandleTtl);
+        return WithContext(DiagnosticResult.OkWithHandle(
+            inlineSnapshot,
+            summary,
+            handle.Id,
+            handle.ExpiresAt,
+            new NextActionHint("query_snapshot",
+                "Drill into this JIT snapshot without re-collecting (views: summary, topMethods, tierDistribution, reJIT).",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "topMethods", ["topN"] = 25 }),
+            new NextActionHint("collect_sample",
+                "If cold-start JIT pressure lines up with latency, correlate it with CPU hotspots from the same process.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "cpu", ["durationSeconds"] = 10 })),
             resolved.Context);
     }
 

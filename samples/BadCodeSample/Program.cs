@@ -3,6 +3,7 @@ using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection.Emit;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -38,6 +39,7 @@ var badCodeEndpoints = new[]
     "/socket-leak?count=32&host=loopback",
     "/meter-spam?count=5&kind=counter",
     "/log-spam?count=200&level=warning",
+    "/jit-pressure?count=200",
 };
 var lockObject = new object();
 var meterFactory = app.Services.GetRequiredService<IMeterFactory>();
@@ -289,7 +291,39 @@ app.MapGet("/log-spam", (ILoggerFactory loggerFactory, int? count, string? level
     return Results.Ok(new { count = n, level = parsedLevel.ToString() });
 });
 
+// 12. JIT pressure / cold-start compilation — detect with collect_events(kind="jit")
+app.MapGet("/jit-pressure", (int? count) =>
+{
+    var n = Math.Clamp(count ?? 200, 1, 2_000);
+    long checksum = 0;
+    for (var i = 0; i < n; i++)
+    {
+        checksum += CreateAndInvokeJitPressureMethod(i);
+    }
+
+    return Results.Ok(new { count = n, checksum });
+});
+
 app.Run();
+
+static int CreateAndInvokeJitPressureMethod(int seed)
+{
+    var method = new DynamicMethod($"JitPressureDynamicMethod{seed:D4}", typeof(int), new[] { typeof(int) }, typeof(Program).Module, skipVisibility: true);
+    var il = method.GetILGenerator();
+    il.Emit(OpCodes.Ldarg_0);
+    for (var i = 0; i < 24; i++)
+    {
+        il.Emit(OpCodes.Ldc_I4, seed + i + 1);
+        il.Emit(OpCodes.Add);
+        il.Emit(OpCodes.Ldc_I4, (i % 7) + 1);
+        il.Emit(OpCodes.Xor);
+    }
+
+    il.Emit(OpCodes.Ret);
+
+    var handler = method.CreateDelegate<Func<int, int>>();
+    return handler(seed);
+}
 
 static async Task<LeakedSocketConnection> LeakLoopbackSocketAsync(int port)
 {

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
+using System.Reflection.Emit;
 using System.Text.Json;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Activities;
@@ -12,6 +13,7 @@ using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Core.EventSources;
 using DotnetDiagnosticsMcp.Core.Exceptions;
 using DotnetDiagnosticsMcp.Core.Gc;
+using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Server.Tools;
@@ -584,6 +586,39 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
     }
 
     [Fact]
+    public async Task CollectJit_CapturesDynamicMethodPressure()
+    {
+        await using var client = await ConnectAsync();
+
+        var driver = Task.Run(() =>
+        {
+            Thread.Sleep(1200);
+            _ = GenerateIntegrationJitPressure(200);
+        });
+
+        var result = await client.CallToolAsync(
+            "collect_events",
+            new Dictionary<string, object?>
+            {
+                ["kind"] = "jit",
+                ["processId"] = Environment.ProcessId,
+                ["durationSeconds"] = 5,
+                ["depth"] = "detail",
+            },
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        result.IsError.Should().NotBe(true);
+        var envelope = DeserializeStructured<CollectEventsEnvelope>(result);
+        envelope.Should().NotBeNull();
+        envelope!.Jit.Should().NotBeNull();
+        envelope.Jit!.Distribution.Tier0.Should().BeGreaterThan(0);
+        envelope.Jit.Methods.Should().Contain(method =>
+            method.MethodName.Contains("IntegrationJitMethod", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CollectProcessDump_WritesMiniDumpToDisk()
     {
         await using var client = await ConnectAsync();
@@ -1101,6 +1136,31 @@ public sealed class McpToolsTests : IClassFixture<McpToolsTests.AuthedFactory>
         {
             envelope.Resources.FdCount.Should().BeGreaterThan(0);
         }
+    }
+
+    private static int GenerateIntegrationJitPressure(int count)
+    {
+        var n = Math.Clamp(count, 1, 2_000);
+        var checksum = 0;
+        for (var i = 0; i < n; i++)
+        {
+            var method = new DynamicMethod($"IntegrationJitMethod{i:D4}", typeof(int), new[] { typeof(int) }, typeof(McpToolsTests).Module, skipVisibility: true);
+            var il = method.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            for (var step = 0; step < 24; step++)
+            {
+                il.Emit(OpCodes.Ldc_I4, i + step + 1);
+                il.Emit(OpCodes.Add);
+                il.Emit(OpCodes.Ldc_I4, (step % 5) + 1);
+                il.Emit(OpCodes.Xor);
+            }
+
+            il.Emit(OpCodes.Ret);
+            var handler = method.CreateDelegate<Func<int, int>>();
+            checksum += handler(i);
+        }
+
+        return checksum;
     }
 
     private async Task<McpClient> ConnectAsync(ModelContextProtocol.Client.McpClientOptions? clientOptions = null)

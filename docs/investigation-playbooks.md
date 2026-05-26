@@ -68,6 +68,19 @@ legacy EventCounters. Look at:
 
 ---
 
+## 1c. "Post-deploy cold-start is slow"
+
+1. Start `collect_events(kind="jit", durationSeconds=10)` **before** sending the first real request after deploy / rollout.
+2. During the window, hit the cold path once or a small handful of times.
+3. Inspect `summary` first:
+   - high `distribution.tier0` with low `tier1Percent` → the process is still mostly running first-pass codegen
+   - low `r2rHitRatePercent` or high `distribution.r2rMissThenJit` → ReadyToRun coverage is poor for this startup path
+   - non-zero `reJitCount` / `osrCount` → tiered recompilation is already happening during warmup
+4. Drill in with `query_snapshot(handle, view="topMethods")` to see which methods paid the largest inclusive JIT cost.
+5. If the same endpoints stay slow after the cold window, pivot to `collect_sample(kind="cpu")` — the problem is no longer just startup compilation.
+
+---
+
 ## 2. "Memory keeps growing"
 
 ### Step 1
