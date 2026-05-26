@@ -693,6 +693,7 @@ public sealed class DiagnosticTools
         var queueLength = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "threadpool-queue-length");
         var allocRate = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "alloc-rate");
         var gen2Count = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "gen-2-gc-count");
+        var contention = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "monitor-lock-contention-count");
 
         // Build hints based on counter thresholds (highest priority first).
         var hints = new List<NextActionHint>();
@@ -728,6 +729,24 @@ public sealed class DiagnosticTools
         {
             hints.Add(new NextActionHint("collect_sample", $"alloc-rate={allocRate!.Value / 1_000_000:F1} MB/s + gen-2 GCs active — allocation hotspot likely.",
                 new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "allocation", ["durationSeconds"] = 10 }));
+        }
+
+        // High lock contention → investigate contention sources (Phase 12 Wave 1.4).
+        // monitor-lock-contention-count > 10/interval suggests lock storms worth investigating.
+        if ((contention?.Value ?? 0) > 10)
+        {
+            hints.Add(new NextActionHint("collect_events", $"monitor-lock-contention-count={contention!.Value:F0} — lock contention detected.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "contention", ["durationSeconds"] = 10 }));
+        }
+
+        // I/O bounded pattern: low CPU (< 30%) but queue building up → likely waiting on external I/O.
+        // Suggest thread snapshot to see blocking stacks + activities to see what's in-flight.
+        if ((cpu?.Value ?? 0) < 30 && (queueLength?.Value ?? 0) > 10)
+        {
+            hints.Add(new NextActionHint("collect_thread_snapshot", $"cpu-usage={cpu?.Value:F1}% but threadpool-queue-length={queueLength?.Value:F0} — I/O bound likely, inspect blocking stacks.",
+                new Dictionary<string, object?> { ["processId"] = pid }));
+            hints.Add(new NextActionHint("collect_events", "Low CPU + queue buildup — trace activities to see what's waiting.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "activities", ["durationSeconds"] = 10 }));
         }
 
         // Fallback: counters look quiet, suggest GC events to confirm.
