@@ -1931,7 +1931,7 @@ public sealed class DiagnosticTools
 
                 hints.Add(new NextActionHint(
                     "collect_thread_snapshot",
-                    "Take a thread snapshot to identify threads blocked on Monitor.Enter and inspect the lock-graph for contended SyncBlocks.",
+                    "Take a thread snapshot then use query_snapshot(view='lock-graph') to see contended SyncBlocks with waiter counts.",
                     new Dictionary<string, object?> { ["processId"] = pid }));
             }
             else
