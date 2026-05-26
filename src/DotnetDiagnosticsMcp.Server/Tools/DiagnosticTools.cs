@@ -3712,18 +3712,22 @@ public sealed class DiagnosticTools
             // cheap (two /proc reads on Linux) and pure on hot failure paths.
             var ptrace = DotnetDiagnosticsMcp.Core.Capabilities.PtraceProbe.Detect();
             var headline = ptrace.CanAttach
-                ? $"{tool} could not attach{pidHint}: ptrace was denied even though the sidecar's static capability probe expected attach to succeed ({ptrace.Reason}). Likely cause: target process exited, or it runs under a different UID."
+                ? $"{tool} could not attach{pidHint}: ptrace was denied even though the sidecar's static capability probe expected attach to succeed ({ptrace.Reason}). " +
+                  "Likely cause: target process exited, runs under a different UID, or containers are in separate PID namespaces (use Docker '--pid=container:target' or K8s 'shareProcessNamespace: true')."
                 : $"{tool} could not attach{pidHint}: ptrace was denied — {ptrace.Reason}";
 
             var hints = new List<NextActionHint>
             {
                 new("inspect_process",
-                    "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason) so the LLM can route around ClrMD-backed tools entirely.",
+                    "Re-check sidecar capabilities (CanAttachClrMD, AttachClrMdReason). " +
+                    "If CAP_SYS_PTRACE is granted, containers may be in separate PID namespaces — " +
+                    "use Docker '--pid=container:target' or K8s 'shareProcessNamespace: true'.",
                     processId is int pidForCap && pidForCap > 0
                         ? new Dictionary<string, object?> { ["view"] = "capabilities", ["processId"] = pidForCap }
                         : new Dictionary<string, object?> { ["view"] = "capabilities" }),
-                new("inspect_dump",
-                    "Fall back to a dump-based workflow (collect_process_dump then inspect_dump) when ptrace cannot be granted.",
+                new("collect_process_dump",
+                    "Fall back to dump-based workflow (collect_process_dump then inspect_heap/inspect_dump). " +
+                    "Dumps use the diagnostic IPC socket (no ptrace) and work across PID namespaces.",
                     processId is int pp && pp > 0 ? new Dictionary<string, object?> { ["processId"] = pp } : null),
             };
 
@@ -3743,20 +3747,37 @@ public sealed class DiagnosticTools
 
         if (ex is UnauthorizedAccessException)
         {
+            // Enhanced hints covering both capability and PID namespace issues.
+            var accessHints = new List<NextActionHint>
+            {
+                new("inspect_process",
+                    "Verify UID alignment and capabilities. If CAP_SYS_PTRACE is granted but attach still fails, " +
+                    "containers may be in separate PID namespaces — use Docker '--pid=container:target' or K8s 'shareProcessNamespace: true'.",
+                    processId is int pid && pid > 0
+                        ? new Dictionary<string, object?> { ["view"] = "capabilities", ["processId"] = pid }
+                        : new Dictionary<string, object?> { ["view"] = "capabilities" }),
+                new("collect_process_dump",
+                    "Fall back to dump-based workflow: collect_process_dump then inspect_heap(source=\"dump\"). " +
+                    "Dumps use the diagnostic IPC socket (no ptrace) and work across PID namespaces.",
+                    processId is int pidForDump && pidForDump > 0
+                        ? new Dictionary<string, object?> { ["processId"] = pidForDump }
+                        : null),
+            };
+
             if (string.Equals(tool, "collect_thread_snapshot", StringComparison.Ordinal))
             {
-                return DiagnosticResult.Fail<T>(
-                    $"{tool} was denied access{pidHint}.",
-                    new DiagnosticError("PermissionDenied", message, typeName),
-                    new NextActionHint("inspect_process", "Verify the MCP server runs as the same UID as the target process."),
-                    new NextActionHint("collect_sample", "When ptrace cannot be granted, use the perf-replay fallback tracked in issue #92.",
-                        processId is int pidForReplay && pidForReplay > 0 ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 } : null));
+                accessHints.Add(new NextActionHint(
+                    "collect_sample",
+                    "When ptrace cannot be granted, use the perf-replay fallback tracked in issue #92.",
+                    processId is int pidForReplay && pidForReplay > 0
+                        ? new Dictionary<string, object?> { ["processId"] = pidForReplay, ["durationSeconds"] = 5 }
+                        : null));
             }
 
             return DiagnosticResult.Fail<T>(
                 $"{tool} was denied access{pidHint}.",
                 new DiagnosticError("PermissionDenied", message, typeName),
-                new NextActionHint("inspect_process", "Verify the MCP server runs as the same UID as the target process."));
+                accessHints.ToArray());
         }
 
         if (ex is ExternalToolNotFoundException missingTool)
