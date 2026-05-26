@@ -1692,23 +1692,54 @@ public sealed class DiagnosticTools
             };
         }
 
-        var summary = snapshot.TotalEvents == 0
-            ? $"No lock contention events were captured in {durationSeconds}s. Start the collection before the workload and retry if you expected waits."
-            : $"Captured {snapshot.TotalEvents} lock-contention event(s) over {durationSeconds}s across {snapshot.DistinctMonitors} contended monitor(s). " +
-              $"Total wait={snapshot.TotalContentionDuration.TotalMilliseconds:F1}ms, p95={snapshot.P95ContentionDuration.TotalMilliseconds:F1}ms, max={snapshot.MaxContentionDuration.TotalMilliseconds:F1}ms.";
-
         var handle = handles.Register(pid, CollectionHandleKinds.ContentionSnapshot, snapshot, CollectionHandleTtl);
+        var hints = new List<NextActionHint>();
+
+        string summary;
+        if (snapshot.TotalEvents == 0)
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                // Linux doesn't emit ContentionStart/Stop via EventPipe (nomac exclusion in runtime).
+                // Guide the LLM toward alternative diagnostic paths that DO work.
+                summary = $"No lock contention events were captured in {durationSeconds}s. " +
+                          "Linux runtimes do not emit ContentionStart/Stop over EventPipe (known limitation). " +
+                          "Use alternative signals: 'monitor-lock-contention-count' counter + thread snapshots to identify blocked threads.";
+
+                hints.Add(new NextActionHint(
+                    "collect_events",
+                    "Collect counters to see if monitor-lock-contention-count is rising (confirms contention exists even without events).",
+                    new Dictionary<string, object?> { ["kind"] = "counters", ["processId"] = pid, ["durationSeconds"] = 5, ["providers"] = (IReadOnlyList<string>)["System.Runtime"] }));
+
+                hints.Add(new NextActionHint(
+                    "collect_thread_snapshot",
+                    "Take a thread snapshot to identify threads blocked on Monitor.Enter and inspect the lock-graph for contended SyncBlocks.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+            }
+            else
+            {
+                summary = $"No lock contention events were captured in {durationSeconds}s. Start the collection before the workload and retry if you expected waits.";
+            }
+        }
+        else
+        {
+            summary = $"Captured {snapshot.TotalEvents} lock-contention event(s) over {durationSeconds}s across {snapshot.DistinctMonitors} contended monitor(s). " +
+                      $"Total wait={snapshot.TotalContentionDuration.TotalMilliseconds:F1}ms, p95={snapshot.P95ContentionDuration.TotalMilliseconds:F1}ms, max={snapshot.MaxContentionDuration.TotalMilliseconds:F1}ms.";
+
+            hints.Add(new NextActionHint("query_snapshot",
+                "Group this contention window by call site without re-collecting.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byCallSite", ["topN"] = 20 }));
+            hints.Add(new NextActionHint("query_snapshot",
+                "Group this contention window by owner thread without re-collecting.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byOwner", ["topN"] = 20 }));
+        }
+
         return WithContext(DiagnosticResult.OkWithHandle(
             inlineSnapshot,
             summary,
             handle.Id,
             handle.ExpiresAt,
-            new NextActionHint("query_snapshot",
-                "Group this contention window by call site without re-collecting.",
-                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byCallSite", ["topN"] = 20 }),
-            new NextActionHint("query_snapshot",
-                "Group this contention window by owner thread without re-collecting.",
-                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byOwner", ["topN"] = 20 })),
+            hints.ToArray()),
             resolved.Context);
     }
 
