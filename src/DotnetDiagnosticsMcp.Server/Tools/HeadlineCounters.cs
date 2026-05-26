@@ -17,6 +17,8 @@ internal static class HeadlineCounters
         ("System.Runtime", "working-set"),
         ("System.Runtime", "gc-heap-size"),
         ("System.Runtime", "gen-2-gc-count"),
+        ("System.Runtime", "time-in-gc"),
+        ("System.Runtime", "alloc-rate"),
         ("System.Runtime", "threadpool-thread-count"),
         ("System.Runtime", "threadpool-queue-length"),
         ("System.Runtime", "exception-count"),

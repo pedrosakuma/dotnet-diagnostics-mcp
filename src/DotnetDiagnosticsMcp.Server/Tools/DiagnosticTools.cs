@@ -26,6 +26,7 @@ using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Security;
 using DotnetDiagnosticsMcp.Core.ThreadPool;
 using DotnetDiagnosticsMcp.Core.Threads;
+using DotnetDiagnosticsMcp.Core.Triage;
 using DotnetDiagnosticsMcp.Server.Security;
 using DotnetDiagnosticsMcp.Server.Diagnostics;
 using Microsoft.Diagnostics.NETCore.Client;
@@ -350,6 +351,127 @@ public sealed class DiagnosticTools
         var hints = BuildRuntimeConfigHints(runtimeConfig);
         return WithContext(DiagnosticResult.Ok(runtimeConfig, summary, hints), resolved.Context);
     }
+
+    [RequireScope("read-counters")]
+    [Description(
+        "Phase 12 IoT-style triage: collects counters (5s), runs server-side classification, and returns a verdict with actionable hints. " +
+        "The LLM just follows the first hint — no interpretation needed. " +
+        "Verdicts: cpu-bound, gc-pressure, threadpool-starvation, lock-contention, io-bound, healthy. " +
+        "Severity: critical (immediate action), degraded (investigate), healthy (all clear).")]
+    public static async Task<DiagnosticResult<TriageResult>> PerformTriage(
+        ICounterCollector collector,
+        IProcessContextResolver resolver,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Duration of the counter collection window in seconds. Must be >= 1. Defaults to 5.")] int durationSeconds = 5,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1)
+        {
+            return InvalidArg<TriageResult>(nameof(durationSeconds), "must be >= 1");
+        }
+
+        var resolved = await ResolveContextAsync<TriageResult>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null)
+        {
+            return resolved.Failure;
+        }
+
+        var pid = resolved.ProcessId;
+
+        // Collect counters with default providers (System.Runtime, ASP.NET Core, Kestrel).
+        var snapshot = await collector.CollectAsync(
+            pid,
+            TimeSpan.FromSeconds(durationSeconds),
+            providers: null, // defaults
+            meters: ["Microsoft.AspNetCore.Hosting"], // for request duration p95
+            intervalSeconds: 1,
+            maxInstrumentTimeSeries: 100,
+            cancellationToken).ConfigureAwait(false);
+
+        // Extract request duration p95 if available.
+        var requestDuration = HeadlineCounters.FindRequestDuration(snapshot.Meters);
+        var requestDurationP95 = requestDuration?.Histogram?.P95;
+
+        // Classify using the shared logic.
+        var triage = TriageClassifier.Classify(snapshot, requestDurationP95);
+
+        // Build hints based on verdict.
+        var hints = BuildTriageHints(triage, pid);
+
+        // Build summary.
+        var secondaryText = triage.SecondaryVerdicts?.Count > 0
+            ? $" (also: {string.Join(", ", triage.SecondaryVerdicts)})"
+            : string.Empty;
+        var summary = $"Triage: {triage.Verdict} ({triage.Severity}){secondaryText} — cpu={triage.Evidence.CpuUsage:F1}%, time-in-gc={triage.Evidence.TimeInGc:F1}%, queue={triage.Evidence.ThreadPoolQueueLength:F0}";
+
+        var ok = DiagnosticResult.Ok(triage, summary, [.. hints]);
+        return WithContext(ok, resolved.Context);
+    }
+
+    private static List<NextActionHint> BuildTriageHints(TriageResult triage, int pid)
+    {
+        var hints = new List<NextActionHint>();
+
+        // Add hints based on verdict (same logic as auto-hints in SnapshotCounters).
+        switch (triage.Verdict)
+        {
+            case TriageClassifier.CpuBound:
+                hints.Add(new NextActionHint("collect_sample", $"cpu-usage={triage.Evidence.CpuUsage:F1}% — investigate the hot path.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10, ["topN"] = 25 }));
+                break;
+
+            case TriageClassifier.GcPressure:
+                hints.Add(new NextActionHint("collect_events", $"time-in-gc={triage.Evidence.TimeInGc:F1}% — GC pressure detected.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "gc", ["durationSeconds"] = 10 }));
+                hints.Add(new NextActionHint("inspect_heap", "GC pressure — inspect heap for allocation patterns.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["source"] = "live" }));
+                break;
+
+            case TriageClassifier.ThreadPoolStarvation:
+                hints.Add(new NextActionHint("collect_events", $"threadpool-queue-length={triage.Evidence.ThreadPoolQueueLength:F0} — possible ThreadPool starvation.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "threadpool", ["durationSeconds"] = 10 }));
+                break;
+
+            case TriageClassifier.LockContention:
+                hints.Add(new NextActionHint("collect_events", $"monitor-lock-contention-count={triage.Evidence.MonitorLockContentionCount:F0} — lock contention detected.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "contention", ["durationSeconds"] = 10 }));
+                break;
+
+            case TriageClassifier.IoBound:
+                hints.Add(new NextActionHint("collect_thread_snapshot", $"cpu-usage={triage.Evidence.CpuUsage:F1}% but queue={triage.Evidence.ThreadPoolQueueLength:F0} — I/O bound likely, inspect blocking stacks.",
+                    new Dictionary<string, object?> { ["processId"] = pid }));
+                hints.Add(new NextActionHint("collect_events", "Low CPU + queue buildup — trace activities to see what's waiting.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "activities", ["durationSeconds"] = 10 }));
+                break;
+
+            default: // Healthy
+                hints.Add(new NextActionHint("collect_events", "System looks healthy — confirm with GC events if response times are high.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "gc", ["durationSeconds"] = 10 }));
+                break;
+        }
+
+        // Add hints for secondary verdicts (less detailed).
+        if (triage.SecondaryVerdicts is not null)
+        {
+            foreach (var secondary in triage.SecondaryVerdicts)
+            {
+                hints.Add(new NextActionHint("collect_events", $"Also detected: {secondary} — follow up after primary issue.",
+                    new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = GetKindForVerdict(secondary), ["durationSeconds"] = 10 }));
+            }
+        }
+
+        return hints;
+    }
+
+    private static string GetKindForVerdict(string verdict) => verdict switch
+    {
+        TriageClassifier.CpuBound => "counters",
+        TriageClassifier.GcPressure => "gc",
+        TriageClassifier.ThreadPoolStarvation => "threadpool",
+        TriageClassifier.LockContention => "contention",
+        TriageClassifier.IoBound => "activities",
+        _ => "counters"
+    };
 
     [RequireScope("read-counters")]
     [Description(
@@ -689,11 +811,72 @@ public sealed class DiagnosticTools
 
         var cpu = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "cpu-usage");
         var heap = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "gc-heap-size");
-        var hint = (cpu?.Value ?? 0) >= 70
-            ? new NextActionHint("collect_sample", $"cpu-usage={cpu!.Value:F1}% over {durationSeconds}s — investigate the hot path.",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10, ["topN"] = 25 })
-            : new NextActionHint("collect_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
-                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10 });
+        var timeInGc = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "time-in-gc");
+        var queueLength = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "threadpool-queue-length");
+        var allocRate = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "alloc-rate");
+        var gen2Count = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "gen-2-gc-count");
+        var contention = snapshot.Counters.FirstOrDefault(c => c.Provider == "System.Runtime" && c.Name == "monitor-lock-contention-count");
+
+        // Build hints based on counter thresholds (highest priority first).
+        var hints = new List<NextActionHint>();
+
+        // CPU > 70% → recommend CPU sampling (existing behavior, highest priority).
+        if ((cpu?.Value ?? 0) >= 70)
+        {
+            hints.Add(new NextActionHint("collect_sample", $"cpu-usage={cpu!.Value:F1}% — investigate the hot path.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["durationSeconds"] = 10, ["topN"] = 25 }));
+        }
+
+        // ThreadPool queue > 50 → potential starvation (Phase 12 Wave 1.1).
+        if ((queueLength?.Value ?? 0) > 50)
+        {
+            hints.Add(new NextActionHint("collect_events", $"threadpool-queue-length={queueLength!.Value:F0} — possible ThreadPool starvation.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "threadpool", ["durationSeconds"] = 10 }));
+        }
+
+        // GC time > 15% → GC pressure (Phase 12 Wave 1.2).
+        if ((timeInGc?.Value ?? 0) > 15)
+        {
+            hints.Add(new NextActionHint("collect_events", $"time-in-gc={timeInGc!.Value:F1}% — GC pressure detected.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "gc", ["durationSeconds"] = 10 }));
+            hints.Add(new NextActionHint("inspect_heap", "GC pressure — inspect heap for allocation patterns.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["source"] = "live" }));
+        }
+
+        // High allocation rate with active Gen2 GCs → allocation pressure (Phase 12 Wave 1.3).
+        // gen-2-gc-count is an EventCounter increment that shows the count in the last interval only,
+        // not the cumulative total. Any Gen2 GC activity (> 0 in last interval) combined with high
+        // alloc-rate (> 50 MB/s) signals an allocation hotspot worth investigating.
+        if ((allocRate?.Value ?? 0) > 50_000_000 && (gen2Count?.Value ?? 0) > 0)
+        {
+            hints.Add(new NextActionHint("collect_sample", $"alloc-rate={allocRate!.Value / 1_000_000:F1} MB/s + gen-2 GCs active — allocation hotspot likely.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "allocation", ["durationSeconds"] = 10 }));
+        }
+
+        // High lock contention → investigate contention sources (Phase 12 Wave 1.4).
+        // monitor-lock-contention-count > 10/interval suggests lock storms worth investigating.
+        if ((contention?.Value ?? 0) > 10)
+        {
+            hints.Add(new NextActionHint("collect_events", $"monitor-lock-contention-count={contention!.Value:F0} — lock contention detected.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "contention", ["durationSeconds"] = 10 }));
+        }
+
+        // I/O bounded pattern: low CPU (< 30%) but queue building up → likely waiting on external I/O.
+        // Suggest thread snapshot to see blocking stacks + activities to see what's in-flight.
+        if ((cpu?.Value ?? 0) < 30 && (queueLength?.Value ?? 0) > 10)
+        {
+            hints.Add(new NextActionHint("collect_thread_snapshot", $"cpu-usage={cpu?.Value:F1}% but threadpool-queue-length={queueLength?.Value:F0} — I/O bound likely, inspect blocking stacks.",
+                new Dictionary<string, object?> { ["processId"] = pid }));
+            hints.Add(new NextActionHint("collect_events", "Low CPU + queue buildup — trace activities to see what's waiting.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "activities", ["durationSeconds"] = 10 }));
+        }
+
+        // Fallback: counters look quiet, suggest GC events to confirm.
+        if (hints.Count == 0)
+        {
+            hints.Add(new NextActionHint("collect_events", "Counters look quiet — confirm there are no GC pauses before widening scope.",
+                new Dictionary<string, object?> { ["processId"] = pid, ["kind"] = "gc", ["durationSeconds"] = 10 }));
+        }
 
         // The handle always carries the FULL snapshot (query_collection drilldown stays cheap),
         // but the inline payload is depth-gated to keep first-look responses small.
@@ -723,15 +906,17 @@ public sealed class DiagnosticTools
             ? $"Captured {snapshot.Counters.Count} counter(s) and {snapshot.Meters.Count} meter series over {durationSeconds}s — showing {inlinePayload.Counters.Count} headline counter(s) and {inlinePayload.Meters.Count} headline meter(s) (dropped {droppedCounters} counter(s), {droppedMeters} meter(s); handle has all). cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}{requestDurationText}.{noteText}"
             : $"Captured {snapshot.Counters.Count} counter(s) and {snapshot.Meters.Count} meter series over {durationSeconds}s — cpu-usage={cpu?.Value:F1}%, gc-heap-size={heap?.Value:F1}{requestDurationText}.{noteText}";
 
+        // Always add the drill-down hint at the end.
+        hints.Add(new NextActionHint("query_snapshot",
+            "Drill into this counter snapshot without re-collecting (views: summary, byProvider).",
+            new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byProvider" }));
+
         var ok = DiagnosticResult.OkWithHandle(
             inlinePayload,
             summaryText,
             handle.Id,
             handle.ExpiresAt,
-            hint,
-            new NextActionHint("query_snapshot",
-                "Drill into this counter snapshot without re-collecting (views: summary, byProvider).",
-                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byProvider" }));
+            [.. hints]);
         return WithContext(ok, resolved.Context);
     }
 

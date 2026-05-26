@@ -3,9 +3,11 @@ using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Collection;
 using DotnetDiagnosticsMcp.Core.Container;
+using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.Memory;
 using DotnetDiagnosticsMcp.Core.ProcessDiscovery;
 using DotnetDiagnosticsMcp.Core.Tools.Dispatch;
+using DotnetDiagnosticsMcp.Core.Triage;
 using DotnetDiagnosticsMcp.Server.Security;
 using ModelContextProtocol.Server;
 
@@ -72,6 +74,9 @@ public sealed class InspectProcessTool
     /// <summary>Capture in-flight ASP.NET Core requests and enrich them with the current thread stack.</summary>
     public const string RequestsNowView = "requests-now";
 
+    /// <summary>Phase 12 IoT-style triage: collect counters, classify, return verdict + hints.</summary>
+    public const string TriageView = "triage";
+
     private static readonly IReadOnlyList<string> AllowedViews = new[]
     {
         ListView,
@@ -82,12 +87,13 @@ public sealed class InspectProcessTool
         RuntimeConfigView,
         ResourcesView,
         RequestsNowView,
+        TriageView,
     };
 
     [RequireAnyScope("read-counters", "ptrace")]
     [McpServerTool(
         Name = "inspect_process",
-        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / runtime-config / resources / requests-now)",
+        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / runtime-config / resources / requests-now / triage)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
@@ -95,13 +101,14 @@ public sealed class InspectProcessTool
     [Description(
         "RFC 0002 §4.6 — single bootstrap entrypoint that subsumes list_dotnet_processes, " +
         "get_process_info, get_diagnostic_capabilities, get_container_signals and get_memory_trend, " +
-        "plus the Phase 11 runtime-config view, the Phase 10.3 resources view, and the Phase 10.4 requests-now view. Pick the projection with view=list|info|capabilities|container|memory_trend|runtime-config|resources|requests-now. " +
+        "plus the Phase 11 runtime-config view, the Phase 10.3 resources view, the Phase 10.4 requests-now view, and the Phase 12 triage view. Pick the projection with view=list|info|capabilities|container|memory_trend|runtime-config|resources|requests-now|triage. " +
         "view=list returns every .NET process visible to the diagnostic IPC and ignores processId. " +
         "All other views auto-resolve the lone visible .NET process when processId is omitted; " +
         "view=memory_trend and view=resources additionally accept any OS pid (NativeAOT / non-.NET) when processId is explicit, " +
         "and use durationSeconds + sampleEverySeconds to shape their observation windows. " +
         "view=runtime-config reads filtered runtime env vars plus best-effort ClrMD GC / ThreadPool settings without adding a new auth scope. " +
-        "view=requests-now opens a short EventPipe session on Microsoft.AspNetCore.Hosting and then captures a live thread snapshot, so it requires the ptrace scope.")]
+        "view=requests-now opens a short EventPipe session on Microsoft.AspNetCore.Hosting and then captures a live thread snapshot, so it requires the ptrace scope. " +
+        "view=triage collects counters (5s), classifies the workload (cpu-bound, gc-pressure, threadpool-starvation, lock-contention, io-bound, healthy), and returns actionable hints — the LLM just follows the first hint.")]
     public static async Task<DiagnosticResult<InspectProcessReport>> InspectProcess(
         IProcessDiscovery discovery,
         IProcessContextResolver resolver,
@@ -111,12 +118,13 @@ public sealed class InspectProcessTool
         IRuntimeConfigInspector runtimeConfigInspector,
         IProcessResourcesCollector resourcesCollector,
         IRequestsNowCollector requestsNowCollector,
+        ICounterCollector counterCollector,
         IPrincipalAccessor principalAccessor,
-        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|runtime-config|resources|requests-now. Defaults to 'list'.")]
+        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|runtime-config|resources|requests-now|triage. Defaults to 'list'.")]
         string? view = ListView,
         [Description("Operating system process id of the target. Required by no view: list ignores it, every other view auto-resolves the lone visible .NET process when omitted.")]
         int? processId = null,
-        [Description("view=memory_trend only — duration of the observation window in seconds. Must be >= 2 and defaults to 10. view=resources uses 0 for a single sample (default) and >= 2 for trend mode.")]
+        [Description("view=memory_trend only — duration of the observation window in seconds. Must be >= 2 and defaults to 10. view=resources uses 0 for a single sample (default) and >= 2 for trend mode. view=triage uses durationSeconds for counter collection (defaults to 5).")]
         int? durationSeconds = null,
         [Description("view=memory_trend or view=resources only — interval between consecutive samples in seconds. Must be >= 1. Defaults to 2.")]
         int sampleEverySeconds = 2,
@@ -195,6 +203,12 @@ public sealed class InspectProcessTool
                     .ConfigureAwait(false),
                 canonical,
                 (report, data) => report with { RequestsNow = data?.Requests }),
+            TriageView => Wrap(
+                await DiagnosticTools.PerformTriage(
+                        counterCollector, resolver, processId, durationSeconds ?? 5, cancellationToken)
+                    .ConfigureAwait(false),
+                canonical,
+                (report, data) => report with { Triage = data }),
             _ => throw new InvalidOperationException(
                 $"DiscriminatorDispatch accepted unknown view '{canonical}'."),
         };
@@ -247,6 +261,7 @@ public sealed class InspectProcessTool
 /// <param name="RuntimeConfig">Populated when <c>view=runtime-config</c> — GC / ThreadPool / tiered-comp settings plus filtered env vars.</param>
 /// <param name="Resources">Populated when <c>view=resources</c> — FD / handle / socket state.</param>
 /// <param name="RequestsNow">Populated when <c>view=requests-now</c> — in-flight ASP.NET Core requests with thread stacks.</param>
+/// <param name="Triage">Populated when <c>view=triage</c> — Phase 12 IoT-style classification with verdict, severity, evidence, and actionable hints.</param>
 public sealed record InspectProcessReport(
     string View,
     IReadOnlyList<DotnetProcess>? List = null,
@@ -256,4 +271,5 @@ public sealed record InspectProcessReport(
     MemoryTrend? MemoryTrend = null,
     RuntimeConfigView? RuntimeConfig = null,
     ProcessResources? Resources = null,
-    IReadOnlyList<InFlightHttpRequest>? RequestsNow = null);
+    IReadOnlyList<InFlightHttpRequest>? RequestsNow = null,
+    TriageResult? Triage = null);
