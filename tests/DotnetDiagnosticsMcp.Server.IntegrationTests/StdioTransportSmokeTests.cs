@@ -18,6 +18,7 @@ namespace DotnetDiagnosticsMcp.Server.IntegrationTests;
 /// The test is gated by the same environment guard the HealthCheckCommand E2E uses —
 /// the published DLL must exist on disk (Release build with this same TFM).
 /// </summary>
+[Collection(nameof(EnvSerial))]
 public class StdioTransportSmokeTests
 {
     [Fact]

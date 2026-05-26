@@ -12,7 +12,9 @@
 - `query_snapshot(view="diff")` can now diff `cpu-sample`, `heap-snapshot`, and `allocation-sample` handles against a `baselineHandle`, including per-second normalization for allocation windows.
 - `collect_events(kind="logs")` adds a curated `ILogger` view over the `Microsoft-Extensions-Logging` EventSource with per-level counts, per-category rollups, redacted scopes, bounded recent entries, and `query_snapshot(handle, view="summary|byCategory|byLevel|recent|errors")` drilldown.
 - `collect_events(kind="jit")` adds a tiered-compilation / ReadyToRun view over `Microsoft-Windows-DotNETRuntime`, reconstructing inclusive JIT time, Tier0 vs Tier1 distribution, R2R hit vs miss-then-jit, ReJIT / OSR counts, and `query_snapshot(handle, view="summary|topMethods|tierDistribution|reJIT")` drilldown.
+- `inspect_process(view="requests-now")` now opens a short ASP.NET Core request window, keeps `HttpRequestIn` spans that started without stopping, and enriches each in-flight request with the current thread id plus top stack frames.
 - `samples/BadCodeSample` now exposes `/log-spam?count=N&level=warning|error|...` and `/jit-pressure?count=N` so live tests and playbooks can reproduce logging storms and post-deploy cold-start JIT pressure.
+- `samples/BadCodeSample` now exposes `/slow-hang?seconds=N` so live tests and playbooks can reproduce a hanging endpoint for `inspect_process(view="requests-now")`.
 
 ### Fixed
 - `deploy/Dockerfile`: removed dev-only `"Urls": "http://127.0.0.1:8787"` from

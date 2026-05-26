@@ -321,6 +321,7 @@ unified drilldown**: `view="topStacks"` (default), `view="byThread"`
 | [`inspect_process(view="container")`](#inspect_process(view="container")) *(deprecated — use `inspect_process(view="container")`)* | cheap | no | ✅ (Linux) | reads `/sys/fs/cgroup` + `/proc` files |
 | [`inspect_process(view="memory_trend")`](#inspect_process(view="memory_trend")) *(deprecated — use `inspect_process(view="memory_trend")`)* | window-bound | no | ✅ | reads `/proc/<pid>/smaps_rollup` + `/proc/<pid>/stat` (Linux) or `GetProcessMemoryInfo` (Windows) |
 | [`inspect_process(view="resources")`](#inspect_process(view="resources")) | cheap / window-bound | no | ✅ (Linux/Windows partial) | reads `/proc/<pid>/fd`, `/proc/<pid>/net/tcp{,6}`, `/proc/<pid>/limits` (Linux) or `GetProcessHandleCount` (Windows) |
+| [`inspect_process(view="requests-now")`](#inspect_process(view="requests-now")) | ~2 s | no | ✅ (ptrace required) | short EventPipe request window + live thread snapshot |
 | `collect_sample(kind="off_cpu")` (Linux/Windows) | window-bound | no | ✅ (Linux) | **Deprecated — use `collect_sample(kind="off_cpu")`.** system-wide `perf record` (Linux) / NT Kernel Logger CSwitch (Windows, admin) |
 | `query_snapshot` | cheap | no | ✅ | drilldown on handle from `collect_sample(kind="off_cpu")` |
 | [`collect_events`](#collect_events) | window-bound | no | ✅ (mostly — see kind) | **Canonical EventPipe collector.** Dispatches by `kind` to counters/exceptions/gc/event_source/activities/logs. |
@@ -392,7 +393,8 @@ hint to the perf-replay fallback tracked in issue #92.
 Consolidates the five legacy metadata tools — `inspect_process(view="list")`,
 `inspect_process(view="info")`, `inspect_process(view="capabilities")`, `inspect_process(view="container")`,
 `inspect_process(view="memory_trend")` — behind one `view` discriminator, and adds the
-Phase 10.3 `inspect_process(view="resources")` projection for FD / handle / socket inspection.
+Phase 10.3 `inspect_process(view="resources")` projection for FD / handle / socket inspection plus
+Phase 10.4 `inspect_process(view="requests-now")` for an in-flight ASP.NET Core request snapshot.
 Each legacy view delegates to the same implementation as the removed tool of the same name, so
 the payload under `data` is byte-identical to the legacy envelope's `data`.
 
@@ -400,8 +402,8 @@ the payload under `data` is byte-identical to the legacy envelope's `data`.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend" \| "resources"` | `"list"` | Which bootstrap projection to compute. |
-| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` or `view="resources"` the server auto-resolves the lone reachable .NET process; for any other view, omitting it triggers the standard resolver. |
+| `view` | `"list" \| "info" \| "capabilities" \| "container" \| "memory_trend" \| "resources" \| "requests-now"` | `"list"` | Which bootstrap projection to compute. |
+| `processId` | `int?` | auto | Target PID. **Ignored when `view="list"`** (the list view is process-agnostic). When omitted on `view="memory_trend"` or `view="resources"` the server auto-resolves the lone reachable .NET process; `view="requests-now"` also auto-resolves but still requires a real .NET process because it opens EventPipe + a live thread snapshot. |
 | `durationSeconds` | `int` | `10` / `0` | Used by `view="memory_trend"` and `view="resources"`. Memory trend requires `>= 2`; resources uses `0` for a single snapshot (default) or `>= 2` for trend mode. |
 | `sampleEverySeconds` | `int` | `2` | Used only by `view="memory_trend"` / `view="resources"`. Must be ≥ 1. |
 | `depth` | `SamplingDepth?` | `Summary` | Used only by `view="container"`; forwarded to `inspect_process(view="container")`. |
@@ -418,6 +420,7 @@ populated field matching the requested view:
 | `container` | `ContainerSignals` (see [`inspect_process(view="container")`](#inspect_process(view="container"))) |
 | `memory_trend` | `MemoryTrend` (see [`inspect_process(view="memory_trend")`](#inspect_process(view="memory_trend"))) |
 | `resources` | `ProcessResources` (see [`inspect_process(view="resources")`](#inspect_process(view="resources"))) |
+| `requests-now` | `InFlightHttpRequest[]` (see [`inspect_process(view="requests-now")`](#inspect_process(view="requests-now"))) |
 
 **Recommended bootstrap sequence:**
 
@@ -427,6 +430,7 @@ inspect_process(view="capabilities")  # confirm CoreCLR vs NativeAOT + ptrace/PS
 inspect_process(view="container")     # cheap cgroup/PSI signals before any EventPipe session
 inspect_process(view="memory_trend")  # lightweight leak signal — any OS process, no IPC
 inspect_process(view="resources")     # unmanaged FD / socket / handle signal when heap is flat
+inspect_process(view="requests-now")  # in-flight ASP.NET Core requests + current thread stacks
 ```
 
 Unknown view values surface as the standard discriminator-dispatch error
@@ -632,6 +636,43 @@ Cheap OS-level resource inspector for the classic "RSS grows but `gc-heap-size` 
 - `closeWait > 100` and rising → `collect_events(kind="event_source", providerName="System.Net.Http")` to confirm undisposed responses / client misuse.
 - `noFileUsageFraction > 0.85` → consider `collect_process_dump` before the process hits `EMFILE` / "Too many open files".
 - huge `timeWait` with flat `fdCount` → connection churn / pooling issue, again best cross-checked with `System.Net.Http` events.
+
+---
+
+## `inspect_process(view="requests-now")`
+
+Short ASP.NET Core request snapshot for the "which requests are hanging right now?" question.
+
+- Opens a ~2 s EventPipe window against the ASP.NET Core `HttpRequestIn` activity stream.
+- Keeps only requests whose start event was observed **without** a matching stop before the window closed.
+- Captures one live thread snapshot and maps the observed OS thread id back to top managed frames.
+- Requires the `ptrace` scope because the enrichment step uses the same live-attach path as `collect_thread_snapshot`.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target .NET process id. When omitted the server auto-resolves the lone reachable .NET process. |
+
+**Returns:** `InFlightHttpRequest[]`:
+
+```json
+[
+  {
+    "traceId": "4b89c4e2f7c4b0d7b34d2d9739f52f01",
+    "endpoint": "/slow-hang",
+    "method": "GET",
+    "startedAtMs": 1840.0,
+    "threadId": 12345,
+    "topFrames": [
+      "System.Threading.Tasks.Task.Delay(Int32, CancellationToken)",
+      "BadCodeSample.Program+<>c.<<Main>$>b__0_11>d.MoveNext()"
+    ]
+  }
+]
+```
+
+`method` and `endpoint` are best-effort projections from the request activity metadata. If ASP.NET Core did not stamp those fields before the snapshot, the server returns `"(unknown)"` rather than dropping the request row.
 
 ---
 

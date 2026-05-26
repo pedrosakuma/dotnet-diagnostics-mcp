@@ -13,8 +13,14 @@ public static class HealthCheckCommand
     private const string DefaultUrl = "http://127.0.0.1:8787";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
 
-    public static async Task<int> RunAsync(string[] args)
+    public static Task<int> RunAsync(string[] args)
+        => RunAsync(args, Console.Out, Console.Error);
+
+    internal static async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr)
     {
+        ArgumentNullException.ThrowIfNull(stdout);
+        ArgumentNullException.ThrowIfNull(stderr);
+
         var baseUrl = ResolveBaseUrl(args);
         var url = baseUrl.TrimEnd('/') + "/health";
 
@@ -35,15 +41,15 @@ public static class HealthCheckCommand
             using var response = await client.GetAsync(url).ConfigureAwait(false);
             if (response.StatusCode == HttpStatusCode.OK || (int)response.StatusCode is >= 200 and < 300)
             {
-                await Console.Out.WriteLineAsync($"OK {url} ({(int)response.StatusCode})").ConfigureAwait(false);
+                await stdout.WriteLineAsync($"OK {url} ({(int)response.StatusCode})").ConfigureAwait(false);
                 return 0;
             }
-            await Console.Error.WriteLineAsync($"FAIL {url} (HTTP {(int)response.StatusCode})").ConfigureAwait(false);
+            await stderr.WriteLineAsync($"FAIL {url} (HTTP {(int)response.StatusCode})").ConfigureAwait(false);
             return 1;
         }
         catch (Exception ex)
         {
-            await Console.Error.WriteLineAsync($"FAIL {url} ({ex.GetType().Name}: {ex.Message})").ConfigureAwait(false);
+            await stderr.WriteLineAsync($"FAIL {url} ({ex.GetType().Name}: {ex.Message})").ConfigureAwait(false);
             return 1;
         }
     }

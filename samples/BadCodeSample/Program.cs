@@ -40,6 +40,7 @@ var badCodeEndpoints = new[]
     "/meter-spam?count=5&kind=counter",
     "/log-spam?count=200&level=warning",
     "/jit-pressure?count=200",
+    "/slow-hang?seconds=5",
 };
 var lockObject = new object();
 var meterFactory = app.Services.GetRequiredService<IMeterFactory>();
@@ -302,6 +303,14 @@ app.MapGet("/jit-pressure", (int? count) =>
     }
 
     return Results.Ok(new { count = n, checksum });
+});
+
+// 13. Slow in-flight request — detect with inspect_process(view="requests-now")
+app.MapGet("/slow-hang", async (int? seconds) =>
+{
+    var delay = TimeSpan.FromSeconds(Math.Clamp(seconds ?? 5, 1, 30));
+    await Task.Delay(delay);
+    return Results.Ok(new { delayedSeconds = delay.TotalSeconds });
 });
 
 app.Run();

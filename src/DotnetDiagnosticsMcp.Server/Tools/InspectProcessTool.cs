@@ -16,7 +16,8 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 /// process inspection tools (<c>list_dotnet_processes</c>, <c>get_process_info</c>,
 /// <c>get_diagnostic_capabilities</c>, <c>get_container_signals</c>, <c>get_memory_trend</c>)
 /// behind one <c>view=</c> discriminator, plus the Phase 10.3 <c>view=resources</c>
-/// extension for FD / handle / socket inspection. RFC 0002 §7.3 #9 / #213 — the five
+/// and Phase 10.4 <c>view=requests-now</c> extensions for FD / handle / socket inspection and
+/// in-flight ASP.NET Core request snapshots. RFC 0002 §7.3 #9 / #213 — the five
 /// legacy tools have been deleted in the alias removal wave; this is now the sole
 /// bootstrap entrypoint.
 /// </summary>
@@ -38,6 +39,8 @@ namespace DotnetDiagnosticsMcp.Server.Tools;
 ///   underlying collector contract: when the caller supplies <c>processId</c> explicitly it is
 ///   used as a raw OS pid (no .NET IPC check), so both views work on NativeAOT and non-.NET
 ///   processes.</description></item>
+///   <item><description><c>view=requests-now</c> always resolves through the .NET diagnostic IPC
+///   because it opens an EventPipe session and a live thread snapshot.</description></item>
 ///   <item><description>Every other view auto-resolves the lone visible .NET process when
 ///   <c>processId</c> is omitted, matching the legacy bootstrap-implicit behavior.</description></item>
 /// </list></para>
@@ -63,6 +66,9 @@ public sealed class InspectProcessTool
     /// <summary>Inspect FD / handle / socket state, optionally over a short trend window.</summary>
     public const string ResourcesView = "resources";
 
+    /// <summary>Capture in-flight ASP.NET Core requests and enrich them with the current thread stack.</summary>
+    public const string RequestsNowView = "requests-now";
+
     private static readonly IReadOnlyList<string> AllowedViews = new[]
     {
         ListView,
@@ -71,12 +77,13 @@ public sealed class InspectProcessTool
         ContainerView,
         MemoryTrendView,
         ResourcesView,
+        RequestsNowView,
     };
 
-    [RequireScope("read-counters")]
+    [RequireAnyScope("read-counters", "ptrace")]
     [McpServerTool(
         Name = "inspect_process",
-        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / resources)",
+        Title = "Inspect a .NET process (list / info / capabilities / container / memory_trend / resources / requests-now)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
@@ -84,12 +91,12 @@ public sealed class InspectProcessTool
     [Description(
         "RFC 0002 §4.6 — single bootstrap entrypoint that subsumes list_dotnet_processes, " +
         "get_process_info, get_diagnostic_capabilities, get_container_signals and get_memory_trend, " +
-        "plus the Phase 10.3 resources view. Pick the projection with view=list|info|capabilities|container|memory_trend|resources. " +
+        "plus the Phase 10.3 resources view and Phase 10.4 requests-now view. Pick the projection with view=list|info|capabilities|container|memory_trend|resources|requests-now. " +
         "view=list returns every .NET process visible to the diagnostic IPC and ignores processId. " +
         "All other views auto-resolve the lone visible .NET process when processId is omitted; " +
         "view=memory_trend and view=resources additionally accept any OS pid (NativeAOT / non-.NET) when processId is explicit, " +
         "and use durationSeconds + sampleEverySeconds to shape their observation windows. " +
-        "No EventPipe session is opened by any view — same boundary as the five legacy tools.")]
+        "view=requests-now opens a short EventPipe session on Microsoft.AspNetCore.Hosting and then captures a live thread snapshot, so it requires the ptrace scope.")]
     public static async Task<DiagnosticResult<InspectProcessReport>> InspectProcess(
         IProcessDiscovery discovery,
         IProcessContextResolver resolver,
@@ -97,7 +104,9 @@ public sealed class InspectProcessTool
         IContainerSignalsCollector containerCollector,
         IMemoryTrendCollector memoryCollector,
         IProcessResourcesCollector resourcesCollector,
-        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|resources. Defaults to 'list'.")]
+        IRequestsNowCollector requestsNowCollector,
+        IPrincipalAccessor principalAccessor,
+        [Description("Projection to compute. Allowed: list|info|capabilities|container|memory_trend|resources|requests-now. Defaults to 'list'.")]
         string? view = ListView,
         [Description("Operating system process id of the target. Required by no view: list ignores it, every other view auto-resolves the lone visible .NET process when omitted.")]
         int? processId = null,
@@ -113,6 +122,28 @@ public sealed class InspectProcessTool
                 view, AllowedViews, parameterName: "view", out var canonical, out var failure))
         {
             return failure!;
+        }
+
+        var principal = principalAccessor.Current;
+        if (principal is not null)
+        {
+            var requiredScope = canonical == RequestsNowView ? "ptrace" : "read-counters";
+            if (!principal.HasScope(requiredScope))
+            {
+                var message =
+                    canonical == RequestsNowView
+                        ? $"view='{canonical}' requires the '{requiredScope}' scope because it captures a live thread snapshot."
+                        : $"view='{canonical}' requires the '{requiredScope}' scope. inspect_process preserves the legacy authorization boundary of its bootstrap views.";
+                return DiagnosticResult.Fail<InspectProcessReport>(
+                    message,
+                    new DiagnosticError("Forbidden", message, requiredScope),
+                    new NextActionHint(
+                        "inspect_process",
+                        canonical == RequestsNowView
+                            ? "Retry with a bearer that also grants 'ptrace', or use one of the read-only bootstrap views."
+                            : "Retry with a bearer that grants 'read-counters', or use view='requests-now' with a ptrace-scoped bearer.",
+                        new Dictionary<string, object?> { ["view"] = canonical }));
+            }
         }
 
         return canonical switch
@@ -146,6 +177,12 @@ public sealed class InspectProcessTool
                     .ConfigureAwait(false),
                 canonical,
                 (report, data) => report with { Resources = data }),
+            RequestsNowView => Wrap(
+                await DiagnosticTools.GetRequestsNow(
+                        requestsNowCollector, resolver, processId, cancellationToken)
+                    .ConfigureAwait(false),
+                canonical,
+                (report, data) => report with { RequestsNow = data?.Requests }),
             _ => throw new InvalidOperationException(
                 $"DiscriminatorDispatch accepted unknown view '{canonical}'."),
         };
@@ -196,6 +233,7 @@ public sealed class InspectProcessTool
 /// <param name="Container">Populated when <c>view=container</c> — cgroup v2 signals.</param>
 /// <param name="MemoryTrend">Populated when <c>view=memory_trend</c> — OS memory samples + verdict.</param>
 /// <param name="Resources">Populated when <c>view=resources</c> — FD / handle / socket state.</param>
+/// <param name="RequestsNow">Populated when <c>view=requests-now</c> — in-flight ASP.NET Core requests with thread stacks.</param>
 public sealed record InspectProcessReport(
     string View,
     IReadOnlyList<DotnetProcess>? List = null,
@@ -203,4 +241,5 @@ public sealed record InspectProcessReport(
     DiagnosticCapabilities? Capabilities = null,
     ContainerSignals? Container = null,
     MemoryTrend? MemoryTrend = null,
-    ProcessResources? Resources = null);
+    ProcessResources? Resources = null,
+    IReadOnlyList<InFlightHttpRequest>? RequestsNow = null);

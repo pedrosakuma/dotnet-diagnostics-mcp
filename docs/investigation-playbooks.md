@@ -162,6 +162,19 @@ client-induced.
 
 ---
 
+## 4b. "One endpoint is hanging right now"
+
+1. Call `inspect_process(view="requests-now")` while the incident is happening. It opens a short (~2 s) request window and returns only in-flight ASP.NET Core requests, with the current thread id and top stack frames.
+2. Sort mentally by `startedAtMs` — the oldest request is your best candidate.
+3. Look at `topFrames[]`:
+   - app code near the top → you already have the first suspect method
+   - `Task.Delay`, timers, waits, or `Monitor.Enter` → likely async hang / lock contention
+   - framework I/O (`Socket`, `SslStream`, `HttpClient`) → pivot to `collect_events(kind="event_source", providerName="System.Net.Http")`
+4. If the single-thread view is not enough, escalate to `collect_thread_snapshot` for the full thread + lock graph while the same request is still hanging.
+5. Reproduce locally with `samples/BadCodeSample`'s `/slow-hang?seconds=N` fixture.
+
+---
+
 ## 5. "Is this a NativeAOT app?"
 
 `inspect_process(view="capabilities")` returns `runtime: "NativeAot"`. On NativeAOT:
