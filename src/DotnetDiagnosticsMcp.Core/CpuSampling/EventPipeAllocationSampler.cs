@@ -1,4 +1,5 @@
 using System.Diagnostics.Tracing;
+using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Core.Memory;
 using Microsoft.Diagnostics.NETCore.Client;
 using Microsoft.Diagnostics.Tracing;
@@ -358,6 +359,11 @@ public sealed class EventPipeAllocationSampler
         }
 
         public AllocatedType ToRecord()
-            => new(TypeName, _totalBytes, _eventCount, _largeCount > _smallCount ? HeapKind.Large : HeapKind.Small);
+            => new(
+                TypeName,
+                _totalBytes,
+                _eventCount,
+                _largeCount > _smallCount ? HeapKind.Large : HeapKind.Small,
+                new TypeIdentity(TypeName));
     }
 }

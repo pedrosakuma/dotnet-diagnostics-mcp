@@ -9,6 +9,7 @@
   cap/error notes when Meter cardinality is truncated.
 - `inspect_process(view="resources")` now reports FD / handle / socket state: Linux snapshots classify `/proc/<pid>/fd`, aggregate TCP states from `/proc/<pid>/net/tcp{,6}`, parse `Max open files` from `/proc/<pid>/limits`, and can sample a short trend window; Windows returns `GetProcessHandleCount` with a clear partial-support note. `inspect_process(view="capabilities")` now surfaces `CanReadProcFs` / `CanReadHandleCount` so agents can see whether the sidecar can collect those signals before asking.
 - `samples/BadCodeSample` gained `/fd-leak` and `/socket-leak` fixtures, plus live/integration coverage and docs for the new unmanaged-resource investigation path.
+- `query_snapshot(view="diff")` can now diff `cpu-sample`, `heap-snapshot`, and `allocation-sample` handles against a `baselineHandle`, including per-second normalization for allocation windows.
 
 ### Fixed
 - `deploy/Dockerfile`: removed dev-only `"Urls": "http://127.0.0.1:8787"` from

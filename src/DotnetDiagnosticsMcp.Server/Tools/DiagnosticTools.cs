@@ -725,7 +725,7 @@ public sealed class DiagnosticTools
         }
 
         var sample = result.Summary;
-        var handle = handles.Register(pid, "allocation-sample", result.Artifact, CpuSampleHandleTtl);
+        var handle = handles.Register(pid, "allocation-sample", new AllocationSampleArtifact(sample, result.Artifact), CpuSampleHandleTtl);
 
         var topType = sample.TopByBytes.Count > 0 ? sample.TopByBytes[0] : null;
         var unknownOnly = topType?.TypeName == "<unknown>" && sample.TopByBytes.Count == 1;
@@ -772,7 +772,7 @@ public sealed class DiagnosticTools
         if (maxDepth < 1) return InvalidArg<CallTreeView>(nameof(maxDepth), "must be >= 1");
         if (maxNodes < 1) return InvalidArg<CallTreeView>(nameof(maxNodes), "must be >= 1");
 
-        var artifact = handles.TryGet<CpuSampleTraceArtifact>(handle);
+        var artifact = ResolveTraceArtifact(handles, handle);
         if (artifact is null)
         {
             return DiagnosticResult.Fail<CallTreeView>(
@@ -808,6 +808,13 @@ public sealed class DiagnosticTools
             summary,
             new NextActionHint("query_snapshot", "Drill deeper by anchoring at a specific method.",
                 new Dictionary<string, object?> { ["handle"] = handle, ["rootMethodFilter"] = "<method substring>", ["maxDepth"] = 6 }));
+    }
+
+    internal static CpuSampleTraceArtifact? ResolveTraceArtifact(IDiagnosticHandleStore handles, string handle)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(handle);
+        return handles.TryGet<CpuSampleTraceArtifact>(handle)
+            ?? handles.TryGet<AllocationSampleArtifact>(handle)?.TraceArtifact;
     }
 
     [RequireScope("eventpipe")]

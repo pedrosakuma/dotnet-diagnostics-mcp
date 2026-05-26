@@ -56,6 +56,14 @@ app.MapGet("/render", (int? count) =>
 })
 .WithName("RenderLines");
 
+app.MapGet("/cpu-burn", (int? ms) =>
+{
+    var burnMs = Math.Clamp(ms ?? 250, 1, 10_000);
+    BurnCpu(burnMs);
+    return Results.Json(new { burnedMs = burnMs });
+})
+.WithName("CpuBurn");
+
 // Slow regex on user input — classic backtracking blowup.
 app.MapGet("/validate", (string? email) =>
 {
@@ -67,15 +75,16 @@ app.MapGet("/validate", (string? email) =>
 })
 .WithName("ValidateEmail");
 
-// Memory leak: every call appends a 1 MiB byte[] to a static list.
+// Memory leak: every call appends an N MiB byte[] to a static list.
 var cache = new List<byte[]>();
 var sampleActivitySource = new ActivitySource("CoreClrSample.Activities");
-app.MapGet("/leak", () =>
+app.MapGet("/leak", (int? mb) =>
 {
-    cache.Add(new byte[1_048_576]);
-    return Results.Json(new { retainedMb = cache.Count });
+    var leakMb = Math.Clamp(mb ?? 1, 1, 64);
+    cache.Add(new byte[leakMb * 1_048_576]);
+    return Results.Json(new { retainedMb = cache.Sum(buffer => buffer.Length) / 1_048_576, leakedThisCallMb = leakMb });
 })
-.WithName("LeakOneMB");
+.WithName("LeakBytes");
 
 // Exception-storm: control flow via int.Parse on bad input inside a hot loop.
 app.MapGet("/parse", () =>
@@ -203,6 +212,13 @@ app.MapGet("/threadpool/queue", (int? globalItems, int? localItems, int? blockMs
 .WithName("QueueThreadPoolWork");
 
 app.Run();
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static void BurnCpu(int milliseconds)
+{
+    var deadline = Stopwatch.GetTimestamp() + (long)milliseconds * Stopwatch.Frequency / 1_000;
+    BusySpin(deadline);
+}
 
 static void BusySpin(long deadline)
 {

@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DotnetDiagnosticsMcp.Core\DotnetDiagnosticsMcp.Core.csproj" />
+    <ProjectReference Include="..\..\src\DotnetDiagnosticsMcp.Server\DotnetDiagnosticsMcp.Server.csproj" />
     <!-- Live tests spawn the sample apps directly. Build them but do not
          reference their assemblies (the tests shell out to `dotnet <dll>`). -->
     <ProjectReference Include="..\..\samples\CoreClrSample\CoreClrSample.csproj"

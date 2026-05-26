@@ -1,3 +1,5 @@
+using DotnetDiagnosticsMcp.Core.Dump;
+
 namespace DotnetDiagnosticsMcp.Core.CpuSampling;
 
 /// <summary>Identifies which heap an allocation was placed on.</summary>
@@ -15,7 +17,8 @@ public sealed record AllocatedType(
     string TypeName,
     long TotalBytes,
     long EventCount,
-    HeapKind DominantKind);
+    HeapKind DominantKind,
+    TypeIdentity? Identity = null);
 
 /// <summary>
 /// Summary of an allocation sampling pass: top-N types by allocated bytes and by event count,
@@ -44,3 +47,5 @@ public sealed record AllocationSample(
 /// under a handle for drill-down queries via <c>get_call_tree</c>.
 /// </summary>
 public sealed record AllocationSampleResult(AllocationSample Summary, CpuSampleTraceArtifact Artifact);
+
+public sealed record AllocationSampleArtifact(AllocationSample Summary, CpuSampleTraceArtifact TraceArtifact);

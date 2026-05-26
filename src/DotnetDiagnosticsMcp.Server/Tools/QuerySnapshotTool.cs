@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Collection;
+using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Drilldown;
 using DotnetDiagnosticsMcp.Core.Dump;
 using DotnetDiagnosticsMcp.Core.Security;
@@ -46,6 +47,7 @@ public sealed class QuerySnapshotTool
     // projection); the unified tool exposes that projection as the canonical
     // `call-tree` view so the (handle, view) contract is uniform across kinds.
     internal const string CallTreeView = "call-tree";
+    internal const string DiffView = "diff";
 
     // Legacy default views, mirrored so unified callers can omit `view` and still get
     // the same projection the kind's legacy tool returned by default.
@@ -83,8 +85,8 @@ public sealed class QuerySnapshotTool
         "`off-cpu-snapshot` → off-CPU views (topStacks | byThread | stack); " +
         "`counters` / `exception-snapshot` / `gc-events` / `event-source` / `activities` → collection views " +
         "(summary | byProvider | byType | recent | events | pauseHistogram | byEventName | bySource | byOperation | activities); " +
-        "`cpu-sample` / `allocation-sample` → `call-tree` (the only view; preserves get_call_tree behaviour with " +
-        "rootMethodFilter, maxDepth, maxNodes). " +
+        "`cpu-sample` / `allocation-sample` → `call-tree` | `diff`; `heap-snapshot` → `diff` in addition to heap views. `diff` compares the current handle against `baselineHandle`; `call-tree` preserves get_call_tree behaviour with " +
+        "rootMethodFilter, maxDepth, maxNodes. " +
         "Unknown handle kinds, unknown views and parameter-shape violations return structured InvalidArgument " +
         "envelopes — never a 500. Authorization is preserved per kind: heap-read for heap, ptrace for thread, " +
         "eventpipe for off-CPU, investigation-export for call-tree, and read-counters|eventpipe for collection. " +
@@ -97,8 +99,8 @@ public sealed class QuerySnapshotTool
         SensitiveValueGate sensitiveGate,
         IPrincipalAccessor principalAccessor,
         [Description("Drilldown handle returned by a prior collector (inspect_heap, collect_thread_snapshot, collect_off_cpu_sample, collect_cpu_sample, collect_allocation_sample, snapshot_counters, collect_exceptions, collect_gc_events, collect_event_source, collect_activities).")] string handle,
-        [Description("Kind-specific view. Heap: top-types|retention-paths|roots-by-kind|finalizer-queue|fragmentation|static-fields|delegate-targets|duplicate-strings|object|gcroot|objsize|async. Thread: threads-summary|stack|lock-graph|deadlocks|top-blocked|unique-stacks|threadpool. Off-CPU: topStacks|byThread|stack. Collection: summary|byProvider|byType|recent|events|pauseHistogram|byEventName|bySource|byOperation|activities. cpu-sample/allocation-sample: call-tree. Omit to use the kind's default view.")] string? view = null,
-        [Description("Maximum entries returned by any ranked-list view. Omit to use the per-kind legacy default: 50 for heap / thread / collection, 25 for off-CPU. Ignored by call-tree (use maxNodes).")] int? topN = null,
+        [Description("Kind-specific view. Heap: top-types|retention-paths|roots-by-kind|finalizer-queue|fragmentation|static-fields|delegate-targets|duplicate-strings|object|gcroot|objsize|async|diff. Thread: threads-summary|stack|lock-graph|deadlocks|top-blocked|unique-stacks|threadpool. Off-CPU: topStacks|byThread|stack. Collection: summary|byProvider|byType|recent|events|pauseHistogram|byEventName|bySource|byOperation|activities. cpu-sample/allocation-sample: call-tree|diff. Omit to use the kind's default view.")] string? view = null,
+        [Description("Maximum entries returned by any ranked-list view. Omit to use the per-kind legacy default: 50 for heap / thread / collection, 25 for off-CPU. For view=diff, defaults to 25 rows per bucket.")] int? topN = null,
         [Description("Heap view='top-types' only: ranking — 'bytes' (default) or 'instances'.")] string rankBy = "bytes",
         [Description("Heap view='retention-paths' only: case-insensitive substring matched against TypeFullName.")] string? typeFullName = null,
         [Description("Heap view='object'/'gcroot'/'objsize' only: managed object address (decimal or 0x-prefixed hex).")] string? address = null,
@@ -110,6 +112,8 @@ public sealed class QuerySnapshotTool
         [Description("Call-tree (cpu-sample / allocation-sample) only: optional case-insensitive substring; the tree is re-rooted at the highest-ranked frame whose method name contains this text.")] string? rootMethodFilter = null,
         [Description("Call-tree only: maximum tree depth from the root. Must be >= 1. Defaults to 8.")] int maxDepth = 8,
         [Description("Call-tree only: approximate cap on the number of nodes returned (top children at each level). Must be >= 1. Defaults to 200.")] int maxNodes = 200,
+        [Description("Diff view only: baseline handle to compare against the current `handle`. Required for view=diff.")] string? baselineHandle = null,
+        [Description("Diff view only: minimum absolute delta percentage required for a row to surface in `Changed`. Defaults to 5.0.")] double minDeltaPct = 5.0,
         LegacyDiagnosticsFlagDeprecation? deprecation = null,
         CancellationToken cancellationToken = default)
     {
@@ -121,15 +125,7 @@ public sealed class QuerySnapshotTool
         var lookup = handles.TryGetWithKind(handle);
         if (lookup is null)
         {
-            return DiagnosticResult.Fail<object>(
-                $"Handle '{handle}' is unknown or expired.",
-                new DiagnosticError(
-                    "HandleExpired",
-                    "Drill-down handles live ~10min and are invalidated when the target process exits.",
-                    handle),
-                new NextActionHint(ToolName,
-                    "Re-run the original collector on the same pid to issue a fresh handle.",
-                    null));
+            return HandleExpiredError(IsDiffView(view) ? "Current" : null, handle);
         }
 
         var kind = lookup.Value.Kind;
@@ -142,6 +138,10 @@ public sealed class QuerySnapshotTool
                 if (!RequireScope(principal, ScopeHeapRead, out var forbidden))
                 {
                     return forbidden!;
+                }
+                if (IsDiffView(view))
+                {
+                    return TryBuildDiff(handles, handle, lookup.Value, baselineHandle, minDeltaPct, topN);
                 }
                 var resolvedView = string.IsNullOrWhiteSpace(view) ? DefaultHeapView : view!;
                 var heap = await DiagnosticTools.QueryHeapSnapshot(
@@ -207,10 +207,14 @@ public sealed class QuerySnapshotTool
                 // `call-tree` view or an omitted value, and reject anything else with a
                 // structured InvalidArgument envelope so a confused caller sees the same
                 // shape it would see from any other kind/view mismatch.
+                if (IsDiffView(view))
+                {
+                    return TryBuildDiff(handles, handle, lookup.Value, baselineHandle, minDeltaPct, topN);
+                }
                 if (!string.IsNullOrWhiteSpace(view)
                     && !string.Equals(view, CallTreeView, StringComparison.Ordinal))
                 {
-                    return UnknownView(view!, kind, new[] { CallTreeView });
+                    return UnknownView(view!, kind, new[] { CallTreeView, DiffView });
                 }
                 var callTree = DiagnosticTools.GetCallTree(
                     handles,
@@ -254,6 +258,91 @@ public sealed class QuerySnapshotTool
                         "Use a handle issued by inspect_heap, collect_thread_snapshot, collect_off_cpu_sample, collect_cpu_sample, collect_allocation_sample, or any of the EventPipe collectors.",
                         null));
         }
+    }
+
+
+    private static bool IsDiffView(string? view)
+        => string.Equals(view, DiffView, StringComparison.Ordinal);
+
+    private static DiagnosticResult<object> TryBuildDiff(
+        IDiagnosticHandleStore handles,
+        string handle,
+        HandleLookup currentLookup,
+        string? baselineHandle,
+        double minDeltaPct,
+        int? topN)
+    {
+        if (string.IsNullOrWhiteSpace(baselineHandle))
+        {
+            return InvalidArgument(nameof(baselineHandle), "is required when view='diff'");
+        }
+
+        if (minDeltaPct < 0)
+        {
+            return InvalidArgument(nameof(minDeltaPct), "must be >= 0");
+        }
+
+        var effectiveTopN = topN ?? 25;
+        if (effectiveTopN < 1)
+        {
+            return InvalidArgument(nameof(topN), "must be >= 1 when view='diff'");
+        }
+
+        var baselineLookup = handles.TryGetWithKind(baselineHandle);
+        if (baselineLookup is null)
+        {
+            return HandleExpiredError("Baseline", baselineHandle);
+        }
+
+        if (!string.Equals(currentLookup.Kind, baselineLookup.Value.Kind, StringComparison.Ordinal))
+        {
+            return InvalidKindPair(currentLookup.Kind, baselineLookup.Value.Kind);
+        }
+
+        return currentLookup.Kind switch
+        {
+            DiagnosticTools.HeapSnapshotKind when currentLookup.Artifact is HeapSnapshotArtifact current && baselineLookup.Value.Artifact is HeapSnapshotArtifact baseline
+                => WrapDiff(currentLookup.Kind, baselineHandle, handle, SampleDiffer.Compare(baseline, baselineHandle, current, handle, minDeltaPct, effectiveTopN)),
+
+            "cpu-sample" when currentLookup.Artifact is CpuSampleTraceArtifact current && baselineLookup.Value.Artifact is CpuSampleTraceArtifact baseline
+                => WrapDiff(currentLookup.Kind, baselineHandle, handle, SampleDiffer.Compare(baseline, baselineHandle, current, handle, minDeltaPct, effectiveTopN)),
+
+            "allocation-sample" when currentLookup.Artifact is AllocationSampleArtifact current && baselineLookup.Value.Artifact is AllocationSampleArtifact baseline
+                => WrapDiff(currentLookup.Kind, baselineHandle, handle, SampleDiffer.Compare(baseline.Summary, baselineHandle, current.Summary, handle, minDeltaPct, effectiveTopN)),
+
+            _ => DiagnosticResult.Fail<object>(
+                $"Handle kind '{currentLookup.Kind}' cannot be diffed via view='diff'.",
+                new DiagnosticError("InvalidArgument", $"Handle kind '{currentLookup.Kind}' cannot be diffed via view='diff'.", "view"))
+        };
+    }
+
+    private static DiagnosticResult<object> WrapDiff<TKey, TMetric>(string kind, string baselineHandle, string currentHandle, SampleDiff<TKey, TMetric> diff)
+        => AsObjectEnvelope(DiagnosticResult.Ok(diff, BuildDiffSummary(kind, baselineHandle, currentHandle, diff)));
+
+    private static string BuildDiffSummary<TKey, TMetric>(string kind, string baselineHandle, string currentHandle, SampleDiff<TKey, TMetric> diff)
+        => $"Compared {kind} handle '{currentHandle}' against baseline '{baselineHandle}': {diff.TotalAdded} added, {diff.TotalRemoved} removed, {diff.TotalChanged} changed — verdict {diff.Verdict}.";
+
+    private static DiagnosticResult<object> HandleExpiredError(string? side, string handle)
+    {
+        var prefix = string.IsNullOrWhiteSpace(side) ? "Handle" : $"{side} handle";
+        return DiagnosticResult.Fail<object>(
+            $"{prefix} '{handle}' is unknown or expired.",
+            new DiagnosticError(
+                "HandleExpired",
+                "Drill-down handles live ~10min and are invalidated when the target process exits.",
+                handle),
+            new NextActionHint(ToolName,
+                "Re-run the original collector on the same pid to issue a fresh handle.",
+                null));
+    }
+
+    private static DiagnosticResult<object> InvalidKindPair(string currentKind, string baselineKind)
+    {
+        var message = $"query_snapshot(view='diff') requires baseline/current handles of the same supported kind. Accepted pairs: heap-snapshot×heap-snapshot, cpu-sample×cpu-sample, allocation-sample×allocation-sample. Received baseline={baselineKind}, current={currentKind}.";
+        return DiagnosticResult.Fail<object>(
+            message,
+            new DiagnosticError("InvalidArgument", message, "baselineHandle"),
+            new NextActionHint(ToolName, "Retry with two handles issued by the same collector family.", null));
     }
 
     private static readonly string[] SupportedKinds =
