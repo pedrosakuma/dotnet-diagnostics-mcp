@@ -5,6 +5,7 @@ using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Artifacts;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Collection;
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Db;
@@ -1372,6 +1373,84 @@ public class LiveCoreClrProcessTests : IAsyncLifetime
         snapshot.WorkerThreadTimeline.Should().NotBeEmpty();
         snapshot.WorkerThreadTimeline.Max(static bucket => bucket.Count)
             .Should().BeGreaterThan(snapshot.WorkerThreadTimeline.Min(static bucket => bucket.Count));
+    }
+
+    [WindowsOnlyFact("ContentionStart/Stop EventPipe events are not emitted by current non-Windows runtimes in this test environment.", Timeout = 60_000)]
+    public async Task Contention_CollectorAggregatesLockStorm_FromBadCodeSample()
+    {
+        await using var badSample = await StartPublishedSampleAsync("BadCodeSample");
+        using var http = new HttpClient { BaseAddress = new Uri(badSample.BaseUrl) };
+        var collector = new EventPipeContentionCollector();
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/lock-storm?seconds=3&blockers=8");
+            response.EnsureSuccessStatusCode();
+        });
+
+        var snapshot = await collector.CollectAsync(
+            badSample.ProcessId,
+            TimeSpan.FromSeconds(5),
+            CancellationToken.None);
+
+        await driver;
+
+        snapshot.TotalEvents.Should().BeGreaterThan(0, $"notes: {string.Join(" | ", snapshot.Notes)}");
+        snapshot.DistinctMonitors.Should().BeGreaterThan(0);
+        snapshot.TotalContentionDuration.Should().BeGreaterThan(TimeSpan.Zero);
+        snapshot.MaxContentionDuration.Should().BeGreaterThan(TimeSpan.Zero);
+        snapshot.Events.Should().Contain(sample =>
+            sample.CallSiteMethod.Contains("BadCodeSample", StringComparison.OrdinalIgnoreCase)
+            || sample.CallSiteModule.Contains("BadCodeSample", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [WindowsOnlyFact("ContentionStart/Stop EventPipe events are not emitted by current non-Windows runtimes in this test environment.", Timeout = 60_000)]
+    public async Task Contention_HandleEnablesDrilldownViews()
+    {
+        await using var badSample = await StartPublishedSampleAsync("BadCodeSample");
+        using var http = new HttpClient { BaseAddress = new Uri(badSample.BaseUrl) };
+        var collector = new EventPipeContentionCollector();
+        var handles = new MemoryDiagnosticHandleStore();
+        var resolver = new FixedProcessContextResolver(badSample.ProcessId);
+
+        var driver = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            using var response = await http.GetAsync("/lock-storm?seconds=3&blockers=8");
+            response.EnsureSuccessStatusCode();
+        });
+
+        var collected = await DiagnosticTools.CollectContention(
+            collector,
+            resolver,
+            handles,
+            processId: badSample.ProcessId,
+            durationSeconds: 5,
+            depth: SamplingDepth.Detail,
+            cancellationToken: CancellationToken.None);
+
+        await driver;
+
+        collected.Handle.Should().NotBeNullOrWhiteSpace();
+        var drilled = await QuerySnapshotTool.QuerySnapshot(
+            handles,
+            new ClrMdDumpInspector(),
+            new SensitiveDataRedactor(),
+            new SensitiveValueGate(null),
+            new RootPrincipalAccessor(),
+            collected.Handle!,
+            view: "byCallSite",
+            topN: 10,
+            cancellationToken: CancellationToken.None);
+
+        drilled.Error.Should().BeNull();
+        var query = drilled.Data.Should().BeOfType<CollectionQueryResult>().Subject;
+        query.Kind.Should().Be(CollectionHandleKinds.ContentionSnapshot);
+        query.View.Should().Be("byCallSite");
+        var byCallSite = query.Payload.Should().BeOfType<ContentionByCallSiteView>().Subject;
+        byCallSite.TotalEvents.Should().BeGreaterThan(0);
+        byCallSite.CallSites.Should().NotBeEmpty();
     }
 
     [Fact(Timeout = 60_000)]

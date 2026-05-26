@@ -2,6 +2,7 @@ using System.ComponentModel;
 using DotnetDiagnosticsMcp.Core;
 using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Collection;
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.Db;
 using DotnetDiagnosticsMcp.Core.Drilldown;
@@ -52,13 +53,14 @@ public sealed class CollectEventsTool
         "logs",
         "jit",
         "threadpool",
+        "contention",
         "db",
     };
 
     [RequireAnyScope("read-counters", "eventpipe")]
     [McpServerTool(
         Name = "collect_events",
-        Title = "Collect EventPipe events (counters | exceptions | gc | event_source | activities | logs | jit | threadpool | db)",
+        Title = "Collect EventPipe events (counters | exceptions | gc | event_source | activities | logs | jit | threadpool | contention | db)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = false,
@@ -69,10 +71,10 @@ public sealed class CollectEventsTool
         "exception stream), 'gc' (GC start/stop pairs and pause durations), 'event_source' " +
         "(generic provider passthrough — requires providerName), 'activities' (ActivitySource " +
         "spans), 'logs' (curated ILogger view from Microsoft-Extensions-Logging), 'jit' " +
-        "(tiered compilation / ReadyToRun activity), 'threadpool' (runtime ThreadPool starvation view: worker/IOCP timelines, hill-climbing transitions, and work-item origins), or 'db' (curated EF Core / SqlClient command and pool view). Each kind preserves the full behavior of its legacy collector tool, including " +
+        "(tiered compilation / ReadyToRun activity), 'threadpool' (runtime ThreadPool starvation view: worker/IOCP timelines, hill-climbing transitions, and work-item origins), 'contention' (runtime lock-contention aggregation by call site and owner thread), or 'db' (curated EF Core / SqlClient command and pool view). Each kind preserves the full behavior of its legacy collector tool, including " +
         "the original authorization scope: 'counters' uses 'read-counters'; all other kinds use " +
         "'eventpipe'. Returns a polymorphic envelope with exactly one of " +
-        "{counters, exceptions, gc, eventSource, activities, logs, jit, threadPool, db} populated alongside the chosen " +
+        "{counters, exceptions, gc, eventSource, activities, logs, jit, threadPool, contention, db} populated alongside the chosen " +
         "kind, the issued handle, and standard NextActionHints. " +
         "IMPORTANT: for 'exceptions' and 'gc', start collection BEFORE the workload you want to " +
         "observe — EventPipe sessions take ~500 ms–1 s to fully start and events before then are " +
@@ -88,6 +90,7 @@ public sealed class CollectEventsTool
         ILogCollector logCollector,
         IJitCollector jitCollector,
         IThreadPoolCollector threadPoolCollector,
+        IContentionCollector contentionCollector,
         IDbCollector dbCollector,
         IProcessContextResolver resolver,
         IDiagnosticHandleStore handles,
@@ -96,7 +99,7 @@ public sealed class CollectEventsTool
         IPrincipalAccessor principalAccessor,
         [Description(
             "Which EventPipe family to collect. One of: 'counters', 'exceptions', 'gc', " +
-            "'event_source', 'activities', 'logs', 'jit', 'threadpool', 'db'. Each kind preserves the options of its legacy " +
+            "'event_source', 'activities', 'logs', 'jit', 'threadpool', 'contention', 'db'. Each kind preserves the options of its legacy " +
             "collector tool; irrelevant options are ignored.")]
         string kind = "counters",
         // Shared options.
@@ -255,6 +258,14 @@ public sealed class CollectEventsTool
                         "threadpool",
                         (env, data) => env with { ThreadPool = data }),
 
+                    "contention" => Project(
+                        await DiagnosticTools.CollectContention(
+                            contentionCollector, resolver, handles,
+                            processId, effectiveDuration, depth,
+                            ct).ConfigureAwait(false),
+                        "contention",
+                        (env, data) => env with { Contention = data }),
+ 
                     "db" => Project(
                         await DiagnosticTools.CollectDb(
                             dbCollector, resolver, handles,
@@ -313,7 +324,7 @@ public sealed class CollectEventsTool
 /// <summary>
 /// Polymorphic payload returned by <see cref="CollectEventsTool.CollectEvents"/>. Exactly one
 /// of the kind-specific fields (<see cref="Counters"/>, <see cref="Exceptions"/>,
-/// <see cref="Gc"/>, <see cref="EventSource"/>, <see cref="Activities"/>, <see cref="Logs"/>, <see cref="Jit"/>, <see cref="ThreadPool"/>, <see cref="Db"/>) is populated, matched
+/// <see cref="Gc"/>, <see cref="EventSource"/>, <see cref="Activities"/>, <see cref="Logs"/>, <see cref="Jit"/>, <see cref="ThreadPool"/>, <see cref="Contention"/>, <see cref="Db"/>) is populated, matched
 /// by <see cref="Kind"/>. Mirrors the discriminator-envelope convention used by other
 /// consolidated tools (e.g. <c>get_method_il</c>).
 /// </summary>
@@ -327,4 +338,5 @@ public sealed record CollectEventsEnvelope(
     LogSnapshot? Logs = null,
     JitSnapshot? Jit = null,
     ThreadPoolEventSnapshot? ThreadPool = null,
+    ContentionSnapshot? Contention = null,
     DbSnapshot? Db = null);

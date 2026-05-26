@@ -4,6 +4,7 @@
 
 ### Added
 - `inspect_process(view="runtime-config")` now reports best-effort GC / ThreadPool startup settings, tiered-compilation env overrides, filtered runtime environment variables, and a forward-compatible `appContextSwitches` field. **Security boundary:** `envVars[]` is strictly filtered to `DOTNET_`, `COMPlus_`, `ASPNETCORE_`, and `DOTNET_SYSTEM_` prefixes so secrets like `*_TOKEN` / `*_KEY` outside those prefixes are never exposed.
+- `collect_events(kind="contention")` adds a curated CLR lock-contention view over `Microsoft-Windows-DotNETRuntime` with wait-duration percentiles, `query_snapshot(handle, view="summary|byCallSite|byOwner")` drilldown, and a new `/lock-storm?seconds=N&blockers=M` `BadCodeSample` fixture for reproducing monitor storms.
 
 ## [0.5.0] — 2026-05-26
 

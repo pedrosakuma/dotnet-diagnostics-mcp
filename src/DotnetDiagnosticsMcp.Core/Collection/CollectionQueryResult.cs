@@ -1,3 +1,4 @@
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Db;
 using DotnetDiagnosticsMcp.Core.Jit;
 using DotnetDiagnosticsMcp.Core.Logs;
@@ -256,6 +257,43 @@ public sealed record ThreadPoolWorkItemOriginsView(
     int TotalEnqueueEvents,
     int Returned,
     IReadOnlyList<ThreadPoolWorkItemOrigin> Origins);
+
+// --- Contention snapshot views -----------------------------------------------------------------
+
+public sealed record ContentionSummaryView(
+    int TotalEvents,
+    int ContendedMonitorCount,
+    TimeSpan TotalContentionDuration,
+    TimeSpan P50ContentionDuration,
+    TimeSpan P95ContentionDuration,
+    TimeSpan MaxContentionDuration,
+    IReadOnlyList<string> Notes);
+
+public sealed record ContentionByCallSiteView(
+    int TotalEvents,
+    int Returned,
+    IReadOnlyList<ContentionCallSiteGroup> CallSites);
+
+public sealed record ContentionCallSiteGroup(
+    string CallSiteMethod,
+    string CallSiteModule,
+    int EventCount,
+    int DistinctMonitors,
+    int DistinctOwnerThreads,
+    TimeSpan TotalContentionDuration,
+    TimeSpan MaxContentionDuration);
+
+public sealed record ContentionByOwnerView(
+    int TotalEvents,
+    int Returned,
+    IReadOnlyList<ContentionOwnerGroup> Owners);
+
+public sealed record ContentionOwnerGroup(
+    int? OwnerManagedThreadId,
+    int EventCount,
+    int DistinctMonitors,
+    TimeSpan TotalContentionDuration,
+    TimeSpan MaxContentionDuration);
 
 // --- DB snapshot views -------------------------------------------------------------------------
 

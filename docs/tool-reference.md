@@ -79,6 +79,7 @@ Per-tool `Summary` semantics:
 | `collect_events(kind="logs")` | The `Recent[]` list. Level counts + per-category rollups remain exact for the window. |
 | `collect_events(kind="jit")` | Method rows beyond the hottest 10. Healthcheck + tier counts remain exact for the window. |
 | `collect_events(kind="threadpool")` | The full worker/IOCP timelines and hill-climbing sequence. Summary keeps headline counts + top origins; drill in with `query_snapshot(handle, view=timeline|hillClimbing|workItemOrigins)`. |
+| `collect_events(kind="contention")` | The raw contention event list. Summary keeps headline wait totals + percentiles; drill in with `query_snapshot(handle, view=byCallSite|byOwner)`. |
 | `collect_events(kind="db")` | The long `ByCommand[]` / `NPlusOne[]` lists. Summary keeps the headline aggregates + pool slice. |
 | `collect_thread_snapshot` | The lock graph + threads beyond the top 3 most-blocked. Drill in with `query_snapshot(view=lock-graph|deadlocks|unique-stacks)`. |
 
@@ -171,6 +172,7 @@ Os 7 coletores windowed — `collect_events(kind="counters")`, `collect_events(k
 Os 6 coletores windowed — `collect_events(kind="counters")`, `collect_events(kind="exceptions")`,
 `collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`, `collect_events(kind="logs")`, `collect_events(kind="threadpool")` — devolvem, junto do summary +
 `collect_events(kind="gc")`, `collect_events(kind="activities")`, `collect_events(kind="event_source")`, `collect_events(kind="logs")`, `collect_events(kind="db")` — devolvem, junto do summary +
+`collect_events(kind="contention")` — devolve o summary + handle do snapshot de contenção para drilldown por call-site/owner sem repetir a janela.
 top-N inline, um `handle` opaco (Crockford-base32, TTL ~10 min) registrado num
 store em memória. A LLM pode então re-projetar o mesmo artefato sob outra
 visão **sem rodar o EventPipe de novo** chamando `query_snapshot`:
@@ -206,6 +208,7 @@ Visões disponíveis por `kind`:
 | `log-snapshot` | `collect_events(kind="logs")` | `summary` (default), `byCategory`, `byLevel`, `recent`, `errors` |
 | `jit-snapshot` | `collect_events(kind="jit")` | `summary` (default), `topMethods`, `tierDistribution`, `reJIT` |
 | `threadpool-snapshot` | `collect_events(kind="threadpool")` | `summary` (default), `timeline`, `hillClimbing`, `workItemOrigins` |
+| `contention-snapshot` | `collect_events(kind="contention")` | `summary` (default), `byCallSite`, `byOwner` |
 | `db-snapshot` | `collect_events(kind="db")` | `summary` (default), `byCommand`, `n+1`, `connectionPool` |
 | `heap-snapshot` | `inspect_heap` / `inspect_heap(source="live")` / `inspect_heap(source="dump")` | `top-types` (default), `retention-paths`, `roots-by-kind`, `finalizer-queue`, `fragmentation`, `static-fields`, `delegate-targets`, `duplicate-strings`, `gchandles`, `object`, `gcroot`, `objsize`, `async`, `diff` |
 | `thread-snapshot` | `collect_thread_snapshot` | `top-blocked` (default), `threads-summary`, `stack`, `lock-graph`, `deadlocks`, `unique-stacks`, `threadpool` |
@@ -754,9 +757,7 @@ identical, but each carries a `DEPRECATED` notice and will be removed in
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`, `logs`, `jit`. Case-sensitive. |
-| `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`, `logs`, `threadpool`. Case-sensitive. |
-| `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`, `logs`, `db`. Case-sensitive. |
+| `kind` | `string` | — | One of `counters`, `exceptions`, `gc`, `event_source`, `activities`, `logs`, `jit`, `threadpool`, `contention`, `db`. Case-sensitive. |
 | `processId` | `int?` | auto | Target process id. |
 | `durationSeconds` | `int` | 5 (counters) / 10 (others) | Collection window. |
 | `providers` / `meters` / `intervalSeconds` / `maxInstrumentTimeSeries` | counters only | — | Same as [`collect_events(kind="counters")`](#collect_events(kind="counters")). |
@@ -765,24 +766,16 @@ identical, but each carries a `DEPRECATED` notice and will be removed in
 | `providerName` / `keywords` / `eventLevel` / `depth` / `unsafeProvider` | event_source only | — | Same as [`collect_events(kind="event_source")`](#collect_events(kind="event_source")). |
 | `sources` / `maxActivities` | activities only | — | Same as [`collect_events(kind="activities")`](#collect_events(kind="activities")). |
 | `categories` / `minLevel` / `maxMessageBytes` / `depth` | logs only | — | Same as [`collect_events(kind="logs")`](#collect_events(kind="logs")). |
-| `depth` | jit only | `Summary` | Same as [`collect_events(kind="jit")`](#collect_events(kind="jit")). |
-
-**Returns:** `CollectEventsEnvelope` — a polymorphic record that carries the
-`kind` discriminator plus exactly one populated payload field
-(`counters` / `exceptions` / `gc` / `eventSource` / `activities` / `logs` / `jit`). The
-| `depth` | threadpool only | `Summary` | `Summary` keeps the headline counts + top origins inline; `Detail` / `Raw` keep full timelines + hill-climbing samples inline. |
-
-**Returns:** `CollectEventsEnvelope` — a polymorphic record that carries the
-`kind` discriminator plus exactly one populated payload field
-(`counters` / `exceptions` / `gc` / `eventSource` / `activities` / `logs` / `threadPool`). The
+| `depth` | jit / threadpool / contention only | `Summary` | Inline verbosity for the curated runtime views. |
 | `intervalSeconds` / `depth` | db only | `1` / `Summary` | SqlClient EventCounter refresh interval + inline verbosity for the curated DB view. |
 
 **Returns:** `CollectEventsEnvelope` — a polymorphic record that carries the
 `kind` discriminator plus exactly one populated payload field
-(`counters` / `exceptions` / `gc` / `eventSource` / `activities` / `logs` / `db`). The
-envelope's `summary`, `hints`, `handle`, `handleExpiresAt`, and
-`resolvedProcess` are passed through from the underlying collector verbatim,
-so `query_snapshot` drilldowns continue to work unchanged.
+(`counters` / `exceptions` / `gc` / `eventSource` / `activities` / `logs` /
+`jit` / `threadPool` / `contention` / `db`). The envelope's `summary`, `hints`,
+`handle`, `handleExpiresAt`, and `resolvedProcess` are passed through from the
+underlying collector verbatim, so `query_snapshot` drilldowns continue to work
+unchanged.
 
 **Authorization.** The dispatcher is gated by `RequireAnyScope("read-counters","eventpipe")`
 and re-checks the per-kind scope inside the call so the boundaries of RFC 0001
@@ -1335,6 +1328,36 @@ Collects a curated ThreadPool starvation view from the runtime `ThreadingKeyword
 hill-climbing transitions/reasons, best-effort effective min/max settings when the
 runtime emits `ThreadPoolMinMaxThreadsChanged`, and top work-item origins when EventPipe
 exposes enqueue call stacks.
+
+## `collect_events(kind="contention")`
+
+Collects a curated CLR lock-contention view from the runtime `Contention` keyword
+(`Microsoft-Windows-DotNETRuntime`, `0x4000`). The collector pairs `ContentionStart`
+/ `ContentionStop` events by contending thread, computes wait duration percentiles,
+and groups the captured waits by contended call site and owner thread.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `processId` | `int?` | auto | Target process id |
+| `durationSeconds` | `int` | `10` | Window length |
+| `depth` | `SamplingDepth` | `Summary` | `Summary` drops the raw event list inline; `Detail` / `Raw` keep the captured events inline |
+
+**Returns:** `ContentionSnapshot` with:
+
+- `totalEvents`, `distinctMonitors`
+- `totalContentionDuration`, `p50ContentionDuration`, `p95ContentionDuration`, `maxContentionDuration`
+- `events` (`ContentionEventSample[]` sorted by `duration` descending)
+- `notes`
+
+**Drilldown:** `query_snapshot(handle, view="summary" | "byCallSite" | "byOwner")`.
+
+**Notes:**
+
+- `byCallSite` is best-effort and depends on EventPipe call stacks being available in the session.
+- On current Linux runtimes, `ContentionStart` / `ContentionStop` may not be emitted over EventPipe even when `monitor-lock-contention-count` rises; the collector surfaces that caveat in `notes` when the window is empty.
+
 ## `collect_events(kind="db")`
 
 Collects a curated database view by combining EF Core command activities with

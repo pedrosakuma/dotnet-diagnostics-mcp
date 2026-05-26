@@ -1,5 +1,6 @@
 using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Collection;
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.Db;
 using DotnetDiagnosticsMcp.Core.EventSources;
@@ -347,6 +348,48 @@ public class CollectionQueryDispatcherTests
         var hill = hillOutcome.Result!.Payload.Should().BeOfType<ThreadPoolHillClimbingView>().Subject;
         hill.Returned.Should().Be(1);
         hill.Samples[0].Reason.Should().Be("Warmup");
+    }
+
+    [Fact]
+    public void Contention_ByCallSiteAndByOwnerViews_RenderExpectedSlices()
+    {
+        var snapshot = new ContentionSnapshot(
+            ProcessId: 42,
+            StartedAt: At,
+            Duration: TimeSpan.FromSeconds(5),
+            TotalEvents: 3,
+            DistinctMonitors: 2,
+            TotalContentionDuration: TimeSpan.FromMilliseconds(57),
+            P50ContentionDuration: TimeSpan.FromMilliseconds(15),
+            P95ContentionDuration: TimeSpan.FromMilliseconds(30),
+            MaxContentionDuration: TimeSpan.FromMilliseconds(30),
+            Events:
+            [
+                new ContentionEventSample(At, At.AddMilliseconds(30), TimeSpan.FromMilliseconds(30), 9, 17, 101, 5001, "BadCodeSample.LockStorm", "BadCodeSample"),
+                new ContentionEventSample(At.AddMilliseconds(40), At.AddMilliseconds(55), TimeSpan.FromMilliseconds(15), 10, 17, 101, 5001, "BadCodeSample.LockStorm", "BadCodeSample"),
+                new ContentionEventSample(At.AddMilliseconds(60), At.AddMilliseconds(72), TimeSpan.FromMilliseconds(12), 11, 23, 202, 5002, "System.Threading.Monitor.Enter", "System.Private.CoreLib"),
+            ],
+            Notes: ["note"]);
+
+        var summaryOutcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.ContentionSnapshot, "summary", snapshot, 10);
+        var summary = summaryOutcome.Result!.Payload.Should().BeOfType<ContentionSummaryView>().Subject;
+        summary.TotalEvents.Should().Be(3);
+        summary.ContendedMonitorCount.Should().Be(2);
+        summary.P95ContentionDuration.Should().Be(TimeSpan.FromMilliseconds(30));
+
+        var byCallSiteOutcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.ContentionSnapshot, "byCallSite", snapshot, 10);
+        var byCallSite = byCallSiteOutcome.Result!.Payload.Should().BeOfType<ContentionByCallSiteView>().Subject;
+        byCallSite.Returned.Should().Be(2);
+        byCallSite.CallSites[0].CallSiteMethod.Should().Be("BadCodeSample.LockStorm");
+        byCallSite.CallSites[0].DistinctOwnerThreads.Should().Be(1);
+        byCallSite.CallSites[0].TotalContentionDuration.Should().Be(TimeSpan.FromMilliseconds(45));
+
+        var byOwnerOutcome = CollectionQueryDispatcher.Dispatch(CollectionHandleKinds.ContentionSnapshot, "byOwner", snapshot, 10);
+        var byOwner = byOwnerOutcome.Result!.Payload.Should().BeOfType<ContentionByOwnerView>().Subject;
+        byOwner.Returned.Should().Be(2);
+        byOwner.Owners[0].OwnerManagedThreadId.Should().Be(17);
+        byOwner.Owners[0].DistinctMonitors.Should().Be(1);
+        byOwner.Owners[0].TotalContentionDuration.Should().Be(TimeSpan.FromMilliseconds(45));
     }
 
     [Fact]

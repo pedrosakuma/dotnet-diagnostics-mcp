@@ -1,4 +1,5 @@
 using DotnetDiagnosticsMcp.Core.Activities;
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.Db;
 using DotnetDiagnosticsMcp.Core.EventSources;
@@ -35,6 +36,7 @@ public static class CollectionQueryDispatcher
         CollectionHandleKinds.LogSnapshot => new[] { "summary", "byCategory", "byLevel", "recent", "errors" },
         CollectionHandleKinds.JitSnapshot => new[] { "summary", "topMethods", "tierDistribution", "reJIT" },
         CollectionHandleKinds.ThreadPoolSnapshot => new[] { "summary", "timeline", "hillClimbing", "workItemOrigins" },
+        CollectionHandleKinds.ContentionSnapshot => new[] { "summary", "byCallSite", "byOwner" },
         CollectionHandleKinds.DbSnapshot => new[] { "summary", "byCommand", "n+1", "connectionPool" },
         _ => Array.Empty<string>(),
     };
@@ -91,6 +93,8 @@ public static class CollectionQueryDispatcher
                 => Ok(Render(jit, effectiveView, topN)),
             CollectionHandleKinds.ThreadPoolSnapshot when artifact is ThreadPoolEventSnapshot threadPool
                 => Ok(Render(threadPool, effectiveView, topN)),
+            CollectionHandleKinds.ContentionSnapshot when artifact is ContentionSnapshot contention
+                => Ok(Render(contention, effectiveView, topN)),
             CollectionHandleKinds.DbSnapshot when artifact is DbSnapshot db
                 => Ok(Render(db, effectiveView, topN)),
             _ => new DispatchOutcome(null, kind, null, null, null),
@@ -390,6 +394,54 @@ public static class CollectionQueryDispatcher
 
         return new CollectionQueryResult(
             CollectionHandleKinds.ThreadPoolSnapshot, view, snapshot.ProcessId, snapshot.StartedAt, snapshot.Duration, payload);
+    }
+
+    private static CollectionQueryResult Render(ContentionSnapshot snapshot, string view, int topN)
+    {
+        var byCallSite = snapshot.Events
+            .GroupBy(static item => new { item.CallSiteMethod, item.CallSiteModule })
+            .Select(static group => new ContentionCallSiteGroup(
+                group.Key.CallSiteMethod,
+                group.Key.CallSiteModule,
+                group.Count(),
+                group.Select(static item => item.LockId).Where(static lockId => lockId != 0).Distinct().Count(),
+                group.Select(static item => item.OwnerManagedThreadId).Where(static owner => owner.HasValue).Select(static owner => owner!.Value).Distinct().Count(),
+                group.Aggregate(TimeSpan.Zero, static (sum, item) => sum + item.Duration),
+                group.Max(static item => item.Duration)))
+            .OrderByDescending(static group => group.TotalContentionDuration)
+            .ThenByDescending(static group => group.EventCount)
+            .ThenBy(static group => group.CallSiteMethod, StringComparer.Ordinal)
+            .Take(topN)
+            .ToList();
+        var byOwner = snapshot.Events
+            .GroupBy(static item => item.OwnerManagedThreadId)
+            .Select(static group => new ContentionOwnerGroup(
+                group.Key,
+                group.Count(),
+                group.Select(static item => item.LockId).Where(static lockId => lockId != 0).Distinct().Count(),
+                group.Aggregate(TimeSpan.Zero, static (sum, item) => sum + item.Duration),
+                group.Max(static item => item.Duration)))
+            .OrderByDescending(static group => group.TotalContentionDuration)
+            .ThenBy(static group => group.OwnerManagedThreadId)
+            .Take(topN)
+            .ToList();
+
+        object payload = view.ToLowerInvariant() switch
+        {
+            "bycallsite" => new ContentionByCallSiteView(snapshot.TotalEvents, byCallSite.Count, byCallSite),
+            "byowner" => new ContentionByOwnerView(snapshot.TotalEvents, byOwner.Count, byOwner),
+            _ => new ContentionSummaryView(
+                snapshot.TotalEvents,
+                snapshot.DistinctMonitors,
+                snapshot.TotalContentionDuration,
+                snapshot.P50ContentionDuration,
+                snapshot.P95ContentionDuration,
+                snapshot.MaxContentionDuration,
+                snapshot.Notes),
+        };
+
+        return new CollectionQueryResult(
+            CollectionHandleKinds.ContentionSnapshot, view, snapshot.ProcessId, snapshot.StartedAt, snapshot.Duration, payload);
     }
 
     private static CollectionQueryResult Render(DbSnapshot snapshot, string view, int topN)

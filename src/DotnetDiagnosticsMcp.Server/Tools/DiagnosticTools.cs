@@ -6,6 +6,7 @@ using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Bytes;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Collection;
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Container;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
@@ -1657,6 +1658,57 @@ public sealed class DiagnosticTools
             new NextActionHint("query_snapshot",
                 "Inspect top work-item origins without re-collecting.",
                 new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "workItemOrigins", ["topN"] = 20 })),
+            resolved.Context);
+    }
+
+    [RequireScope("eventpipe")]
+    [Description(
+        "Collects a curated CLR lock-contention view from the runtime Contention keyword. " +
+        "Aggregates monitor waits by call site and owner thread, computes total/p50/p95/max wait duration, and retains the full event slice behind the issued handle for query_snapshot(handle, view=summary|byCallSite|byOwner).")]
+    public static async Task<DiagnosticResult<ContentionSnapshot>> CollectContention(
+        IContentionCollector collector,
+        IProcessContextResolver resolver,
+        IDiagnosticHandleStore handles,
+        [Description("Operating system process id of the target .NET process. Optional — server auto-selects when only one .NET process is visible.")] int? processId = null,
+        [Description("Duration of the collection window in seconds. Must be >= 1. Defaults to 10.")] int durationSeconds = 10,
+        [Description("Verbosity (summary|detail|raw). Default 'summary' keeps the headline aggregates inline and relies on query_snapshot(handle, view=byCallSite|byOwner) for grouped drilldown.")]
+        SamplingDepth depth = SamplingDepth.Summary,
+        CancellationToken cancellationToken = default)
+    {
+        if (durationSeconds < 1) return InvalidArg<ContentionSnapshot>(nameof(durationSeconds), "must be >= 1");
+
+        var resolved = await ResolveContextAsync<ContentionSnapshot>(resolver, processId, cancellationToken).ConfigureAwait(false);
+        if (resolved.Failure is not null) return resolved.Failure;
+        var pid = resolved.ProcessId;
+
+        var snapshot = await collector.CollectAsync(pid, TimeSpan.FromSeconds(durationSeconds), cancellationToken).ConfigureAwait(false);
+
+        var inlineSnapshot = snapshot;
+        if (depth == SamplingDepth.Summary)
+        {
+            inlineSnapshot = snapshot with
+            {
+                Events = Array.Empty<ContentionEventSample>(),
+            };
+        }
+
+        var summary = snapshot.TotalEvents == 0
+            ? $"No lock contention events were captured in {durationSeconds}s. Start the collection before the workload and retry if you expected waits."
+            : $"Captured {snapshot.TotalEvents} lock-contention event(s) over {durationSeconds}s across {snapshot.DistinctMonitors} contended monitor(s). " +
+              $"Total wait={snapshot.TotalContentionDuration.TotalMilliseconds:F1}ms, p95={snapshot.P95ContentionDuration.TotalMilliseconds:F1}ms, max={snapshot.MaxContentionDuration.TotalMilliseconds:F1}ms.";
+
+        var handle = handles.Register(pid, CollectionHandleKinds.ContentionSnapshot, snapshot, CollectionHandleTtl);
+        return WithContext(DiagnosticResult.OkWithHandle(
+            inlineSnapshot,
+            summary,
+            handle.Id,
+            handle.ExpiresAt,
+            new NextActionHint("query_snapshot",
+                "Group this contention window by call site without re-collecting.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byCallSite", ["topN"] = 20 }),
+            new NextActionHint("query_snapshot",
+                "Group this contention window by owner thread without re-collecting.",
+                new Dictionary<string, object?> { ["handle"] = handle.Id, ["view"] = "byOwner", ["topN"] = 20 })),
             resolved.Context);
     }
 

@@ -1,6 +1,7 @@
 using DotnetDiagnosticsMcp.Core.Activities;
 using DotnetDiagnosticsMcp.Core.Capabilities;
 using DotnetDiagnosticsMcp.Core.Bytes;
+using DotnetDiagnosticsMcp.Core.Contention;
 using DotnetDiagnosticsMcp.Core.Counters;
 using DotnetDiagnosticsMcp.Core.CpuSampling;
 using DotnetDiagnosticsMcp.Core.Db;
@@ -83,6 +84,7 @@ internal static class DiagnosticServiceRegistration
         services.AddSingleton<ILogCollector, EventPipeLogCollector>();
         services.AddSingleton<IJitCollector, EventPipeJitCollector>();
         services.AddSingleton<IThreadPoolCollector, EventPipeThreadPoolCollector>();
+        services.AddSingleton<IContentionCollector, EventPipeContentionCollector>();
         services.AddSingleton<IDbCollector, EventPipeDbCollector>();
         services.AddSingleton<IProcessDumper, DiagnosticsClientDumper>();
         services.AddSingleton<IModuleByteSource, ClrMdModuleByteSource>();

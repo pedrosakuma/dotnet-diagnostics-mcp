@@ -69,9 +69,11 @@ var badCodeEndpoints = new[]
     "/jit-pressure?count=200",
     "/slow-hang?seconds=5",
     "/threadpool-starve?blockers=50",
+    "/lock-storm?seconds=5&blockers=8",
     "/db-n+1?count=15",
 };
 var lockObject = new object();
+var lockStormGate = new object();
 using var dbActivitySource = new ActivitySource("Microsoft.EntityFrameworkCore");
 var meterFactory = app.Services.GetRequiredService<IMeterFactory>();
 var meter = meterFactory.Create("BadCodeSample");
@@ -401,6 +403,31 @@ app.MapGet("/threadpool-starve", (int? blockers) =>
     }
 
     return Results.Accepted($"/threadpool-starve?blockers={blockedWorkers}", new { blockers = blockedWorkers });
+});
+
+// 15. Lock storm — detect with collect_events(kind="contention")
+app.MapGet("/lock-storm", (int? seconds, int? blockers) =>
+{
+    var duration = TimeSpan.FromSeconds(Math.Clamp(seconds ?? 5, 1, 30));
+    var contenderCount = Math.Clamp(blockers ?? 8, 2, 128);
+    var stopAt = DateTime.UtcNow + duration;
+    long completedEntries = 0;
+    var tasks = Enumerable.Range(0, contenderCount)
+        .Select(_ => Task.Run(() =>
+        {
+            while (DateTime.UtcNow < stopAt)
+            {
+                lock (lockStormGate)
+                {
+                    Interlocked.Increment(ref completedEntries);
+                    Thread.Sleep(100);
+                }
+            }
+        }))
+        .ToArray();
+
+    Task.WaitAll(tasks);
+    return Results.Ok(new { seconds = duration.TotalSeconds, blockers = contenderCount, completedEntries });
 });
 
 // 16. DB N+1 query storm — detect with collect_events(kind="db")
